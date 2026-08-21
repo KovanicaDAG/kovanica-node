@@ -28,7 +28,7 @@ const NETWORK: &str = "kovanica-testnet-1";
 const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 /// Single P2P path: plaintext TCP. Not 80/443/3010/8080 and not libp2p :30333.
 const P2P_LISTEN_DEFAULT: &str = "0.0.0.0:9000";
-const P2P_BOOTSTRAP: &str = "explorer.kovanica.online:9000";
+const P2P_BOOTSTRAP: &str = "seed.kovanica.online:9000";
 
 /// Bind `addr` (e.g. `0.0.0.0:8080`) and serve the explorer until killed.
 pub fn serve(addr: impl ToSocketAddrs) -> std::io::Result<()> {
@@ -1212,7 +1212,7 @@ mod tests {
         assert!(env_off("none"));
         assert!(env_off("0"));
         assert!(!env_off(P2P_LISTEN_DEFAULT));
-        assert_eq!(P2P_BOOTSTRAP, "explorer.kovanica.online:9000");
+        assert_eq!(P2P_BOOTSTRAP, "seed.kovanica.online:9000");
     }
 
     #[test]

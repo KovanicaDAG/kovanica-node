@@ -11,7 +11,7 @@
 //!
 //! TCP one-shot sync (the on-wire path) lives in [`crate::net`]: a seed
 //! accepts on `KOVANICA_LISTEN` (default `:9000`) and writes every block;
-//! a clone pulls with `KOVANICA_PEERS=explorer.kovanica.online:9000`.
+//! a clone pulls with `KOVANICA_PEERS=seed.kovanica.online:9000`.
 //! Long-lived relay sessions are [`crate::relay`] — tests only, not the
 //! explorer loop.
 

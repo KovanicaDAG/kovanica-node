@@ -32,7 +32,7 @@ fn main() {
             println!("            env: KOVANICA_DATA  KOVANICA_MINE=0|1  KOVANICA_FAUCET=0|1");
             println!("                 KOVANICA_ALLOW_RESET=0|1  KOVANICA_OPERATOR=0|1");
             println!("                 KOVANICA_LISTEN=0.0.0.0:9000   (off to disable)");
-            println!("                 KOVANICA_PEERS=explorer.kovanica.online:9000");
+            println!("                 KOVANICA_PEERS=seed.kovanica.online:9000");
             println!("                 KOVANICA_POW=0|1  (default 1, consensus hash target)");
             println!();
             println!("{}", rpc::HELP);

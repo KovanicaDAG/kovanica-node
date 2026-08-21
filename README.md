@@ -52,7 +52,7 @@ discovered peers and never exchanged blocks.
 Public bootstrap:
 
 ```
-KOVANICA_PEERS=explorer.kovanica.online:9000
+KOVANICA_PEERS=seed.kovanica.online:9000
 ```
 
 That is the default when `KOVANICA_PEERS` is unset. The node also **listens** on
@@ -60,7 +60,7 @@ That is the default when `KOVANICA_PEERS` is unset. The node also **listens** on
 
 ```sh
 export KOVANICA_LISTEN=0.0.0.0:9000          # default; set to `off` to disable
-export KOVANICA_PEERS=explorer.kovanica.online:9000
+export KOVANICA_PEERS=seed.kovanica.online:9000
 export KOVANICA_POW=1
 export KOVANICA_MINE=0
 export KOVANICA_FAUCET=0
@@ -111,7 +111,7 @@ Live chain info without running a node: `GET https://explorer.kovanica.online/ap
 | `KOVANICA_OPERATOR` | `0` | mine / miner / mining endpoints |
 | `KOVANICA_ALLOW_RESET` | `0` | wipe the DAG |
 | `KOVANICA_LISTEN` | `0.0.0.0:9000` | TCP P2P bind (`off` to disable) |
-| `KOVANICA_PEERS` | `explorer.kovanica.online:9000` | comma-separated `host:9000` (`off` to disable) |
+| `KOVANICA_PEERS` | `seed.kovanica.online:9000` | comma-separated `host:9000` (`off` to disable) |
 
 Public seed node keeps faucet / mine / reset **off**. Do the same if you peer with it.
 The seed should set `KOVANICA_PEERS=off` so it does not dial itself.
