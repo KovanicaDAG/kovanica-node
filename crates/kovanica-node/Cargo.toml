@@ -5,15 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Runnable KovanicaDAG node: GHOSTDAG consensus, UTXO ledger, HTTP explorer, P2P."
+description = "Runnable KovanicaDAG node: GHOSTDAG consensus, UTXO ledger, HTTP explorer, TCP P2P."
 
 [dependencies]
 kovanica-dag = { path = "../kovanica-dag" }
 kovanica-state = { path = "../kovanica-state" }
 hex.workspace = true
-libp2p.workspace = true
-tokio.workspace = true
-futures.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

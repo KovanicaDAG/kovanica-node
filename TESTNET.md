@@ -13,10 +13,16 @@ Public BlockDAG testnet. Native token **KVNC** (8 decimals).
 | Min fee | 0.0001 KVNC at genesis |
 | k | 3 (GHOSTDAG) |
 | PoW | on (`KOVANICA_POW=1`) |
-| P2P | TCP `KOVANICA_LISTEN` (default `:9000`); libp2p `:30333` |
+| P2P | **TCP only** `KOVANICA_LISTEN` (default `0.0.0.0:9000`) |
+| Bootstrap | `KOVANICA_PEERS=explorer.kovanica.online:9000` |
 
 Live genesis and tip: `GET https://explorer.kovanica.online/api/head`  
+P2P status on a running node: `GET /api/p2p`  
+Block dump (same bytes a clone pulls over TCP): `GET /api/blocks`  
 Bootstrap blob: `GET https://explorer.kovanica.online/api/bootstrap`
+
+There is no second network path. libp2p / 30333 was removed: it bound a port
+and never gossiped blocks.
 
 ## Tokenomics
 

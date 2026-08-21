@@ -44,25 +44,57 @@ curl -s http://127.0.0.1:8080/api/head
 
 First start writes genesis into `KOVANICA_DATA`. Keep that directory if you want the same chain next time.
 
-## Join the public testnet (P2P)
+## Join the public testnet (TCP P2P)
 
-TCP gossip (blocks):
+**One path:** plaintext TCP on **9000**. There is no libp2p / 30333 — that layer
+discovered peers and never exchanged blocks.
 
-```sh
-export KOVANICA_LISTEN=0.0.0.0:9000
-export KOVANICA_PEERS=BOOTSTRAP_HOST:9000
+Public bootstrap:
+
+```
+KOVANICA_PEERS=explorer.kovanica.online:9000
 ```
 
-Open **9000/tcp** on your firewall. `KOVANICA_PEERS` is a comma-separated list.
+That is the default when `KOVANICA_PEERS` is unset. The node also **listens** on
+`0.0.0.0:9000` by default so other clones can pull from you.
 
-libp2p (mdns / gossipsub) also listens on **30333/tcp** when explorer mode starts.
+```sh
+export KOVANICA_LISTEN=0.0.0.0:9000          # default; set to `off` to disable
+export KOVANICA_PEERS=explorer.kovanica.online:9000
+export KOVANICA_POW=1
+export KOVANICA_MINE=0
+export KOVANICA_FAUCET=0
+export KOVANICA_ALLOW_RESET=0
+export KOVANICA_DATA="$PWD/data"
+
+./target/release/kovanica-node explorer 127.0.0.1:8080
+```
+
+Open **9000/tcp** inbound only if you want to serve other peers. Outbound 9000
+to the bootstrap host is enough to catch up.
+
+After the first pull, these should match:
+
+```sh
+curl -s http://127.0.0.1:8080/api/head
+curl -s https://explorer.kovanica.online/api/head
+```
+
+Same `genesis`, and `tip` once the seed has served its blocks. Status:
+
+```sh
+curl -s http://127.0.0.1:8080/api/p2p
+```
+
+If the seed is not yet listening on 9000, a clone is a **solo** explorer (own
+genesis, no sync). That is a seed-side bind, not a bug in this binary.
 
 Live chain info without running a node: `GET https://explorer.kovanica.online/api/head`
 
 ## Modes
 
 ```sh
-./target/release/kovanica-node explorer 127.0.0.1:8080   # HTTP API + UI
+./target/release/kovanica-node explorer 127.0.0.1:8080   # HTTP API + UI + TCP P2P
 ./target/release/kovanica-node demo                      # scripted smoke
 ./target/release/kovanica-node                           # stdin RPC
 ./target/release/kovanica-node help
@@ -78,10 +110,13 @@ Live chain info without running a node: `GET https://explorer.kovanica.online/ap
 | `KOVANICA_FAUCET` | `0` | mint to an address |
 | `KOVANICA_OPERATOR` | `0` | mine / miner / mining endpoints |
 | `KOVANICA_ALLOW_RESET` | `0` | wipe the DAG |
-| `KOVANICA_LISTEN` | unset | TCP P2P bind (`0.0.0.0:9000`) |
-| `KOVANICA_PEERS` | unset | `host:9000,host2:9000` |
+| `KOVANICA_LISTEN` | `0.0.0.0:9000` | TCP P2P bind (`off` to disable) |
+| `KOVANICA_PEERS` | `explorer.kovanica.online:9000` | comma-separated `host:9000` (`off` to disable) |
 
 Public seed node keeps faucet / mine / reset **off**. Do the same if you peer with it.
+The seed should set `KOVANICA_PEERS=off` so it does not dial itself.
+
+Do **not** bind 80, 443, 3010, 8080 (that's the HTTP explorer), 5000, 5173, or 8000.
 
 ## Crates
 
@@ -89,7 +124,7 @@ Public seed node keeps faucet / mine / reset **off**. Do the same if you peer wi
 | --- | --- |
 | `kovanica-dag` | BlockDAG, GHOSTDAG, PoW |
 | `kovanica-state` | UTXO, Ed25519, snapshots |
-| `kovanica-node` | this binary (RPC, explorer, P2P) |
+| `kovanica-node` | this binary (RPC, explorer, TCP P2P) |
 
 Web UI (not this repo): [kovanica-web](https://github.com/KovanicaDAG/kovanica-web).
 
