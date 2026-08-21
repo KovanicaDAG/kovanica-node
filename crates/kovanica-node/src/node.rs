@@ -81,7 +81,7 @@ impl core::fmt::Display for NodeError {
             NodeError::AlreadyInitialized => f.write_str("already initialised"),
             NodeError::ZeroAmount => f.write_str("amount must be non-zero"),
             NodeError::InsufficientFunds => {
-                f.write_str("no single output covers the amount plus fee")
+                f.write_str("no unspent outputs cover the amount plus fee")
             }
             NodeError::UnexpectedCoinbase => f.write_str("coinbase transactions are not accepted"),
             NodeError::BadSignature => f.write_str("bad spend signature"),
@@ -371,12 +371,17 @@ impl Node {
         let unsigned = self.prepare_transfer(from.address(), amount, to_addr)?;
         let mut tx = unsigned.tx;
         let sig = Sig::from_bytes(from.sign(&unsigned.sighash));
-        tx.attach_signature(0, sig);
+        for i in 0..tx.inputs().len() {
+            tx.attach_signature(i, sig);
+        }
         Ok(tx)
     }
 
-    /// Select one covering UTXO for `from` and build an **unsigned** transfer.
-    /// The wallet signs `sighash` and submits via [`submit_signed`](Self::submit_signed).
+    /// Select covering UTXOs for `from` and build an **unsigned** transfer.
+    /// One output is enough when it covers `amount + fee`; otherwise UTXOs are
+    /// accumulated (largest first) until they do. The wallet signs `sighash`
+    /// once and [`submit_signed`](Self::submit_signed) attaches it to every input
+    /// (same owner).
     pub fn prepare_transfer(
         &self,
         from: Address,
@@ -389,25 +394,37 @@ impl Node {
         let fee = self.min_fee();
         let need = amount.checked_add(fee).ok_or(NodeError::InsufficientFunds)?;
         let state = self.ledger()?.ledger_state();
-        let mut candidates: Vec<(OutPoint, u64)> = state
+        let mut owned: Vec<(OutPoint, u64)> = state
             .iter()
-            .filter(|(_, out)| out.owner == from && out.value >= need)
+            .filter(|(_, out)| out.owner == from)
             .map(|(op, out)| (*op, out.value))
             .collect();
-        candidates.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-        let (outpoint, value) = *candidates.first().ok_or(NodeError::InsufficientFunds)?;
+        owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut selected: Vec<(OutPoint, u64)> = Vec::new();
+        let mut total: u64 = 0;
+        for (op, value) in owned {
+            selected.push((op, value));
+            total = total.saturating_add(value);
+            if total >= need {
+                break;
+            }
+        }
+        if total < need {
+            return Err(NodeError::InsufficientFunds);
+        }
         let mut outputs = vec![TxOutput::new(amount, to)];
-        let change = value - need;
+        let change = total - need;
         if change > 0 {
             outputs.push(TxOutput::new(change, from));
         }
-        let tx = Transaction::unsigned(&[outpoint], outputs, Vec::new());
+        let outpoints: Vec<OutPoint> = selected.iter().map(|(op, _)| *op).collect();
+        let tx = Transaction::unsigned(&outpoints, outputs, Vec::new());
         let sighash = tx.sighash();
         Ok(Prepared {
             tx,
             sighash,
-            outpoint,
-            value,
+            outpoint: selected[0].0,
+            value: total,
             fee,
         })
     }
@@ -426,7 +443,10 @@ impl Node {
             return Err(NodeError::BadSignature);
         }
         let mut tx = prepared.tx;
-        tx.attach_signature(0, Sig::from_bytes(signature));
+        let sig = Sig::from_bytes(signature);
+        for i in 0..tx.inputs().len() {
+            tx.attach_signature(i, sig);
+        }
         self.submit_tx(tx)
     }
 

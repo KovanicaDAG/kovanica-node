@@ -1175,6 +1175,38 @@ mod tests {
     }
 
     #[test]
+    fn prepare_combines_two_coinbases_to_send_a_full_subsidy() {
+        use kovanica_state::KeyPair;
+
+        let mut app = Explorer::boot();
+        app.mining = false;
+        let from = KeyPair::from_u64(1);
+        let to = KeyPair::from_u64(9);
+        app.mesh.produce_empty("alpha").unwrap();
+        let prepared = app
+            .mesh
+            .node("alpha")
+            .unwrap()
+            .prepare_transfer(from.address(), GENESIS_SUBSIDY, to.address())
+            .unwrap();
+        assert!(prepared.tx.inputs().len() >= 2, "50 KVNC + fee needs two 50-KVNC coinbases");
+        let sig = from.sign(&prepared.sighash);
+        app.mesh
+            .submit_signed("alpha", from.address(), GENESIS_SUBSIDY, to.address(), sig)
+            .unwrap();
+        app.mesh.produce("alpha").unwrap();
+        app.mesh.drain(8);
+        assert_eq!(
+            app.mesh
+                .node("alpha")
+                .unwrap()
+                .balance(&to.address())
+                .unwrap(),
+            u128::from(GENESIS_SUBSIDY)
+        );
+    }
+
+    #[test]
     fn history_lists_credit_to_an_address() {
         let mut app = Explorer::boot();
         app.mining = false;
