@@ -1,0 +1,17 @@
+[package]
+name = "kovanica-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "UTXO ledger state for the Kovanica DAG ledger: transactions applied in GHOSTDAG-linearized order."
+
+[dependencies]
+kovanica-dag = { path = "../kovanica-dag" }
+blake3.workspace = true
+hex.workspace = true
+ed25519-dalek.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

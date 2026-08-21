@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KovanicaDAG · KVNC</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%2309090b'/><circle cx='10' cy='20' r='3' fill='%23d8d4cc'/><circle cx='22' cy='12' r='3' fill='%238aa0b4'/><circle cx='22' cy='22' r='3' fill='%23b08980'/><path d='M10 20 L22 12 M10 20 L22 22' stroke='%232a2a30' fill='none'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #09090b; --surface: #121214; --elevated: #1a1a1e; --fg: #f2f1ee;
+      --muted: #9a9aa3; --subtle: #6b6b74; --border: #2a2a30; --accent: #d8d4cc;
+      --accent-fg: #0a0a0b; --blue: #8aa0b4; --red: #b08980; --chain: #e8e4dc;
+      --ok: #7d9a7a; --danger: #c45c4a;
+      --display: "Fraunces", "Times New Roman", serif;
+      --sans: "IBM Plex Sans", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); min-height: 100dvh; }
+    button:not(:disabled), [role="button"] { cursor: pointer; }
+    button:disabled { opacity: .4; cursor: default; }
+    h1, h2 { font-family: var(--display); font-weight: 500; margin: 0; }
+    .header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 24px; border-bottom: 1px solid var(--border); }
+    .brand { display: flex; align-items: baseline; gap: 12px; }
+    .brand span { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--subtle); }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button, .btn {
+      font-family: var(--sans); font-size: 13px; font-weight: 500; height: 36px; padding: 0 12px;
+      border-radius: 4px; border: 1px solid var(--border); background: var(--elevated); color: var(--fg);
+    }
+    button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+    button.ghost { background: transparent; color: var(--muted); border-color: transparent; }
+    button.ghost:hover { color: var(--fg); background: var(--elevated); }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border-bottom: 1px solid var(--border); }
+    @media (min-width: 720px) { .stats { grid-template-columns: repeat(6, 1fr); } }
+    @media (min-width: 1100px) { .stats { grid-template-columns: repeat(12, 1fr); } }
+    .stats div { background: var(--bg); padding: 12px 16px; }
+    .stats dt { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+    .stats dd { margin: 4px 0 0; font-family: var(--mono); font-size: 13px; }
+    .dag-wrap { padding: 16px 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
+    .dag-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); list-style: none; margin: 0; padding: 0; }
+    .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 99px; margin-right: 6px; }
+    .canvas { height: min(52vh, 520px); border: 1px solid var(--border); border-radius: 8px; background: var(--bg); overflow: auto; }
+    svg { display: block; min-width: 100%; }
+    .tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--border); padding: 0 24px; }
+    .tabs button { height: 44px; border: 0; background: none; color: var(--muted); border-bottom: 1px solid transparent; border-radius: 0; }
+    .tabs button.on { color: var(--fg); border-bottom-color: var(--accent); }
+    .panel { padding: 20px 24px 32px; }
+    .grid { display: grid; gap: 24px; }
+    @media (min-width: 960px) { .grid { grid-template-columns: minmax(0,1fr) 280px; } }
+    .card { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 16px; }
+    .muted { color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+    input, select {
+      height: 36px; padding: 0 10px; border-radius: 4px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 13px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--subtle); font-weight: 500; padding: 8px 0; }
+    td { padding: 8px 8px 8px 0; border-top: 1px solid var(--border); font-family: var(--mono); }
+    .pill { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--subtle); }
+    .ok { color: var(--ok); } .err { color: var(--danger); }
+    .log { max-height: 320px; overflow: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    .log div { padding: 4px 0; border-bottom: 1px solid var(--border); }
+    .wallet { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .warn { color: var(--danger); font-size: 13px; }
+    label { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); margin: 10px 0 4px; }
+    textarea { width: 100%; min-height: 72px; padding: 8px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 12px; }
+    body.wallet-host .dag-wrap { display: none; }
+    body.wallet-host .stats { display: none; }
+    @media (max-width: 720px) {
+      .header, .panel, .dag-wrap { padding-left: 12px; padding-right: 12px; }
+      .tabs { padding: 0 12px; }
+      button, input, textarea, select { min-height: 44px; font-size: 16px; }
+      .qr { width: 140px; height: 140px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <h1>KovanicaDAG</h1>
+      <span>testnet · KVNC</span>
+    </div>
+    <div class="row">
+      <span class="pill" id="status">connecting…</span>
+      <button class="ghost" id="pause" hidden>Pause</button>
+      <button class="ghost" id="reset" hidden>Reset</button>
+    </div>
+  </header>
+  <dl class="stats" id="stats"></dl>
+  <section class="dag-wrap">
+    <div class="dag-head">
+      <div>
+        <h2>BlockDAG</h2>
+        <p class="muted" style="margin:4px 0 0;font-size:12px">Native token <strong>Kovanica (KVNC)</strong> on <span id="net-label">kovanica-testnet-1</span>. Subsidy halves every 1000 blocks. Engine is the Rust node.</p>
+      </div>
+      <ul class="legend">
+        <li><i style="background:var(--accent)"></i>Genesis</li>
+        <li><i style="background:var(--chain)"></i>Selected chain</li>
+        <li><i style="background:var(--blue)"></i>Blue</li>
+        <li><i style="background:var(--red)"></i>Red</li>
+      </ul>
+    </div>
+    <div class="canvas"><svg id="dag" role="img" aria-label="BlockDAG"></svg></div>
+  </section>
+  <nav class="tabs" id="tabs"></nav>
+  <section class="panel" id="panel"></section>
+<script>
+const TABS = ["Graph","Wallets","Mesh","Mempool","Order","Blocks","Docs","Console"];
+const walletHost = location.hostname.indexOf("wallet.") === 0 || location.pathname.indexOf("/wallet") >= 0;
+if (walletHost) document.body.classList.add("wallet-host");
+let tab = walletHost ? "Wallets" : "Graph";
+let state = null;
+let selectedBlock = null;
+let mining = false;
+let poll = null;
+let walletMsg = "";
+let walletBal = null;
+let walletHist = [];
+let bip39Words = null;
+
+const $ = (id) => document.getElementById(id);
+const short = (h) => (h || "").slice(0, 8);
+const colourFill = (c) => ({ genesis: "var(--accent)", chain: "var(--chain)", blue: "var(--blue)", red: "var(--red)" }[c] || "var(--muted)");
+const atom = () => (state && state.node && state.node.atom) || 100000000;
+const decimals = () => (state && state.node && state.node.decimals) || 8;
+function fmtKvnc(n) {
+  const v = Number(n) / atom();
+  const s = v.toFixed(8).replace(/\.?0+$/, "");
+  return (s || "0") + " KVNC";
+}
+function parseKvnc(s) {
+  const t = String(s).trim().replace(",", ".");
+  const a = atom();
+  const n = Math.round(Number(t) * a);
+  if (!Number.isFinite(n) || n <= 0) throw new Error("bad amount");
+  return n;
+}
+
+async function api(path, method = "GET") {
+  const r = await fetch(path, { method });
+  if (!r.ok) throw new Error(await r.text());
+  if (r.headers.get("content-type")?.includes("json")) return r.json();
+  return r.text();
+}
+
+function statsHtml(s) {
+  const n = s.node;
+  const cells = [
+    ["Blocks", n.blocks], ["Tips", n.tips.length], ["Blue score", n.blue_score],
+    ["Blue work", n.blue_work], ["k", n.k], ["Cap", fmtKvnc(n.subsidy)],
+    ["Issuance", fmtKvnc(n.issuance || n.subsidy)], ["Supply", fmtKvnc(n.supply)],
+    ["UTXOs", n.utxos], ["Chain", n.chain_len],
+    ["Mempool", n.mempool], ["Fee", fmtKvnc(n.min_fee || 0)], ["PoW", n.pow ? "on" : "off"], ["Genesis", short(n.genesis)], ["Txs", n.tx_count],
+  ];
+  return cells.map(([k,v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+}
+
+function layout(blocks) {
+  const byScore = {};
+  for (const b of blocks) {
+    const xk = String(b.blue_score);
+    (byScore[xk] ||= []).push(b);
+  }
+  const pos = {};
+  const scores = Object.keys(byScore).map(Number).sort((a,b)=>a-b);
+  scores.forEach((sc, i) => {
+    const col = byScore[String(sc)];
+    col.forEach((b, j) => {
+      pos[b.id] = { x: 56 + i * 86, y: 48 + j * 64 };
+    });
+  });
+  return pos;
+}
+
+function drawDag(s) {
+  const blocks = s.node.dag;
+  const pos = layout(blocks);
+  const sel = selectedBlock || s.node.selected_tip;
+  let maxX = 200, maxY = 180;
+  const edges = [];
+  for (const b of blocks) {
+    const p = pos[b.id];
+    maxX = Math.max(maxX, p.x + 80);
+    maxY = Math.max(maxY, p.y + 50);
+    b.parents.forEach((par) => {
+      const q = pos[par];
+      if (!q) return;
+      const bright = b.selected_parent === par;
+      edges.push(`<line x1="${q.x}" y1="${q.y}" x2="${p.x}" y2="${p.y}" stroke="${bright ? "var(--chain)" : "var(--border)"}" stroke-width="${bright ? 1.8 : 1}" />`);
+    });
+  }
+  const nodes = blocks.map((b) => {
+    const p = pos[b.id];
+    const on = b.id === sel;
+    return `<g transform="translate(${p.x},${p.y})" data-id="${b.id}" class="blk" style="cursor:pointer">
+      <circle r="${on ? 16 : 13}" fill="${colourFill(b.colour)}" stroke="var(--fg)" stroke-width="${on ? 2 : 1.2}" />
+      <text y="28" text-anchor="middle" fill="var(--muted)" style="font-size:10px;font-family:var(--mono)">${short(b.id)}</text>
+    </g>`;
+  }).join("");
+  const svg = $("dag");
+  svg.setAttribute("width", Math.max(640, maxX));
+  svg.setAttribute("height", Math.max(240, maxY));
+  svg.innerHTML = edges.join("") + nodes;
+  svg.querySelectorAll(".blk").forEach((g) => g.addEventListener("click", () => {
+    selectedBlock = g.getAttribute("data-id");
+    render();
+  }));
+}
+
+function blockCard(s) {
+  const id = selectedBlock || s.node.selected_tip;
+  const b = s.node.dag.find((x) => x.id === id) || s.node.dag[0];
+  if (!b) return "";
+  return `<aside class="card">
+    <p class="pill">Block</p>
+    <p class="mono">${b.id}</p>
+    <dl class="muted">
+      <div style="display:flex;justify-content:space-between;margin-top:8px"><dt>Colour</dt><dd class="mono" style="color:var(--fg)">${b.colour}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Blue score</dt><dd class="mono" style="color:var(--fg)">${b.blue_score}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Work</dt><dd class="mono" style="color:var(--fg)">${b.work}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Parents</dt><dd class="mono" style="color:var(--fg)">${b.parents.length}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Txs</dt><dd class="mono" style="color:var(--fg)">${b.txs.length}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Nonce</dt><dd class="mono" style="color:var(--fg)">${b.nonce}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Time</dt><dd class="mono" style="color:var(--fg)">${b.timestamp_ms}</dd></div>
+    </dl>
+    <ul class="muted" style="padding:8px 0 0;margin:8px 0 0;list-style:none">${b.txs.map((t) => `<li class="mono">${t.coinbase ? "coinbase" : "tx"} · ${short(t.id)}</li>`).join("")}</ul>
+  </aside>`;
+}
+
+function graphPanel(s) {
+  const names = s.mesh.nodes.map((n) => n.name);
+  return `<div class="grid">
+    <div>
+      <div class="row" style="margin-bottom:12px">${names.map((n) =>
+        `<button class="${n === s.selected ? "primary" : ""}" data-select="${n}">${n[0].toUpperCase()+n.slice(1)} <span class="mono">${s.mesh.nodes.find(x=>x.name===n).blocks}</span></button>`
+      ).join("")}</div>
+      <div class="row" style="margin-bottom:12px">
+        ${s.operator ? `<button class="primary" data-act="produce">Produce block</button>
+        <button data-act="empty">Empty block</button>
+        <button data-act="parallel">Parallel spend</button>
+        <button data-act="fork">Wide fork</button>` : `<p class="muted">Public testnet — produce only packs your signed tx. Empty-block minting is operator-only.</p>`}
+      </div>
+      <p class="muted">${s.mesh.nodes.length > 1 ? "In-process demo mesh." : "Single node. P2P sync via KOVANICA_LISTEN / KOVANICA_PEERS."} Parallel blocks merge under GHOSTDAG.</p>
+    </div>
+    ${blockCard(s)}
+  </div>`;
+}
+
+function walletsPanel(s) {
+  const rec = walletRecord();
+  const rows = s.wallets.map((w) => `<div class="wallet">
+    <div><div>Actor ${w.seed}${w.seed===1?" · faucet":""}</div><div class="mono">${w.address}</div></div>
+            <div class="mono">${fmtKvnc(w.balance)}</div>
+  </div>`).join("");
+  const keys = rec ? `
+    <p class="pill">Account ${rec.index || 0}</p>
+    <p class="mono" style="margin:8px 0">${rec.address}</p>
+    <p class="muted">Balance ${walletBal === null ? "…" : fmtKvnc(walletBal)}. 1 KVNC = ${atom().toLocaleString()} atoms. Secret stays in this browser.</p>
+    <img class="qr" alt="address QR" src="https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(rec.address)}" />
+    <div class="row" style="margin-top:10px">
+      <button type="button" data-wallet="copy">Copy address</button>
+      ${s.faucet ? `<button type="button" data-wallet="faucet">Faucet 1 KVNC</button>` : ""}
+      ${s.operator ? `<button type="button" data-wallet="miner">Take subsidy</button>` : ""}
+      <button type="button" data-wallet="export">Show seed</button>
+      <button type="button" data-wallet="download">Download seed</button>
+      <button type="button" data-wallet="forget">Forget</button>
+    </div>
+    <label>Account index</label>
+    <div class="row">
+      <input id="acc-index" type="number" min="0" max="20" value="${rec.index || 0}" style="width:80px" />
+      <button type="button" data-wallet="switch">Switch</button>
+    </div>
+    <form id="wallet-send" style="margin-top:16px">
+      <label>To (64-hex address)</label>
+      <input class="wide" name="to" spellcheck="false" placeholder="hex address" />
+      <label>Amount (KVNC)</label>
+      <div class="row">
+        <input name="amount" type="text" inputmode="decimal" value="1" style="width:120px" />
+        <button class="primary" type="submit">Sign & send</button>
+      </div>
+      <p class="muted" style="margin-top:8px">Network fee ${fmtKvnc(s.node.min_fee || 0)} paid to the miner.</p>
+    </form>
+    ${rec.mnemonicShown ? `<p class="mono" style="margin-top:12px">${rec.mnemonic}</p><p class="warn">Write this down. Anyone with it controls the KVNC.</p>` : ""}
+    ${walletMsg ? `<p class="${walletMsg.startsWith("err")?"warn":"ok"}" style="margin-top:10px">${walletMsg}</p>` : ""}
+    <p class="pill" style="margin-top:16px">History</p>
+    ${walletHist.length ? walletHist.slice().reverse().slice(0, 12).map((t) => `<div class="mono muted" style="padding:6px 0;border-bottom:1px solid var(--border)">${t.kind} ${fmtKvnc(Math.abs(t.delta))} · ${short(t.tx)}</div>`).join("") : `<p class="muted">No txs yet.</p>`}
+  ` : `
+    <p class="pill">Your wallet</p>
+    <p class="muted">BIP39 12-word seed in this browser. Accounts are index 0, 1, 2… from the same phrase. Node never sees the seed.</p>
+    <button class="primary" type="button" data-wallet="create">Create 12-word wallet</button>
+    <form id="wallet-import" style="margin-top:16px">
+      <label>Import phrase</label>
+      <textarea name="mnemonic" placeholder="twelve words"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button type="submit">Import</button>
+      </div>
+    </form>
+    ${walletMsg ? `<p class="warn" style="margin-top:10px">${walletMsg}</p>` : ""}
+  `;
+  return `<div class="grid">
+    <div class="card">${keys}</div>
+    <div>
+      <p class="pill">Network actors</p>
+      <p class="muted" style="margin:8px 0">Premine ${fmtKvnc(s.node.subsidy)} + decaying issuance. Miner is ${s.node.miner ? short(s.node.miner) : "founder"}. ${s.faucet ? "Faucet pays from actor 1." : "Faucet is off."} Hardware: Download seed.</p>
+      ${rows}
+    </div>
+  </div>`;
+}
+
+function meshPanel(s) {
+  const listen = s.listen || "";
+  const peers = (s.peers || []).join(", ") || "none";
+  const cmd = `export KOVANICA_POW=1 KOVANICA_LISTEN=0.0.0.0:9000 KOVANICA_PEERS=${listen || "BOOTSTRAP:9000"}\n./target/release/kovanica-node explorer 127.0.0.1:8080`;
+  return `<div class="grid">
+    <div>
+      <table><thead><tr><th>Node</th><th>Blocks</th><th>Tip</th><th>Peers</th><th>Mempool</th></tr></thead><tbody>
+        ${s.mesh.nodes.map((n) => `<tr><td>${n.name}</td><td>${n.blocks}</td><td>${short(n.tip)}</td><td>${n.peers.join(", ") || "—"}</td><td>${n.mempool}</td></tr>`).join("")}
+      </tbody></table>
+      <p class="muted" style="margin-top:12px">Mesh time ${s.mesh.now} · queued ${s.mesh.queued} · events ${s.mesh.events.length}</p>
+    </div>
+    <aside class="card">
+      <p class="pill">Bootstrap</p>
+      <p class="muted">Network <span class="mono">${s.network}</span></p>
+      <p class="mono" style="margin:8px 0">${s.node.genesis}</p>
+      <p class="muted">P2P listen <span class="mono">${listen || "not bound"}</span></p>
+      <p class="muted">Configured peers <span class="mono">${peers}</span></p>
+      <p class="muted" style="margin-top:8px">Join:</p>
+      <pre class="mono muted" style="white-space:pre-wrap">${cmd}</pre>
+      <p class="muted">JSON: <a href="/api/bootstrap">/api/bootstrap</a> · <a href="/api/head">/api/head</a> · <a href="/docs">/docs</a></p>
+    </aside>
+  </div>`;
+}
+
+function mempoolPanel(s) {
+  const rows = (s.node.pending || []).map((t) => `<tr><td class="mono">${short(t.id)}</td><td>${fmtKvnc(t.fee || 0)}</td><td>${t.inputs}</td><td>${t.outputs.map((o)=>fmtKvnc(o.value)+" → "+short(o.owner)).join("<br>")}</td></tr>`).join("");
+  return `<p class="muted">Min fee ${fmtKvnc(s.node.min_fee || 0)}. Miner collects fees on produce. ${s.node.pending.length} in pool.</p>
+    <table><thead><tr><th>Tx</th><th>Fee</th><th>Ins</th><th>Outs</th></tr></thead><tbody>
+    ${rows || `<tr><td colspan="4" class="muted">mempool empty</td></tr>`}
+    </tbody></table>`;
+}
+
+function docsPanel() {
+  return `<p class="muted"><a href="/docs">Raw TESTNET.md</a></p><pre id="docs-body" class="mono muted" style="white-space:pre-wrap">loading…</pre>`;
+}
+
+function orderPanel(s) {
+  return `<ol class="mono muted" style="padding-left:20px">${s.node.order.map((id,i)=>`<li style="margin:6px 0">${i} · ${id}${id===s.node.selected_tip?"  ← tip":""}</li>`).join("")}</ol>`;
+}
+
+function blocksPanel(s) {
+  return `<table><thead><tr><th>Id</th><th>Colour</th><th>Blue</th><th>Work</th><th>Txs</th></tr></thead><tbody>
+    ${s.node.dag.map((b)=>`<tr data-id="${b.id}" style="cursor:pointer"><td>${short(b.id)}</td><td>${b.colour}</td><td>${b.blue_score}</td><td>${b.work}</td><td>${b.txs.length}</td></tr>`).join("")}
+  </tbody></table>`;
+}
+
+function consolePanel(s) {
+  const pending = s.node.pending.map((t)=>`<div>mempool ${short(t.id)} fee ${fmtKvnc(t.fee||0)} in ${t.inputs} → ${t.outputs.map(o=>fmtKvnc(o.value)+" to "+short(o.owner)).join(", ")}</div>`).join("");
+  const ev = [...s.mesh.events].reverse().slice(0, 40).map((e)=>`<div>${e.at} ${e.kind} ${e.from} → ${e.to}</div>`).join("");
+  return `<div class="log">${pending || "<div>mempool empty</div>"}${ev || "<div>no gossip yet</div>"}</div>`;
+}
+
+function render() {
+  if (!state) return;
+  mining = !!state.mining;
+  $("stats").innerHTML = statsHtml(state);
+  $("status").textContent = `${mining ? "live" : "paused"} · ${state.network || "testnet"} · rust`;
+  $("pause").hidden = !state.operator;
+  $("pause").textContent = mining ? "Pause" : "Resume";
+  $("reset").hidden = !state.allow_reset;
+  drawDag(state);
+  $("tabs").innerHTML = TABS.map((t) => `<button class="${t===tab?"on":""}" data-tab="${t}">${t}</button>`).join("");
+  const fn = { Graph: graphPanel, Wallets: walletsPanel, Mesh: meshPanel, Mempool: mempoolPanel, Order: orderPanel, Blocks: blocksPanel, Docs: docsPanel, Console: consolePanel }[tab];
+  $("panel").innerHTML = fn(state);
+  if (tab === "Docs") {
+    api("/docs").then((t) => { const el = $("docs-body"); if (el) el.textContent = t; }).catch(() => {});
+  }
+}
+
+async function refresh() {
+  try {
+    const node = new URLSearchParams(location.search).get("node");
+    const q = state ? `?node=${encodeURIComponent(state.selected)}` : (node ? `?node=${node}` : "");
+    state = await api("/api/state" + q);
+    if (!selectedBlock) selectedBlock = state.node.selected_tip;
+    const rec = walletRecord();
+    if (rec) {
+      try {
+        const u = await api(`/api/utxos?address=${rec.address}&node=${encodeURIComponent(state.selected)}`);
+        walletBal = u.balance;
+        const h = await api(`/api/history?address=${rec.address}&node=${encodeURIComponent(state.selected)}`);
+        walletHist = h.txs || [];
+      } catch (_) { /* keep last */ }
+    }
+    render();
+  } catch (e) {
+    $("status").textContent = "offline";
+  }
+}
+
+async function act(name, extra = "") {
+  const node = state?.selected || "alpha";
+  await api(`/api/${name}?node=${encodeURIComponent(node)}${extra}`, "POST");
+  await refresh();
+}
+
+function hexOf(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function bytesOf(hex) {
+  const h = hex.replace(/^0x/, "");
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+function walletRecord() {
+  try { return JSON.parse(localStorage.getItem("kovanica.wallet") || "null"); }
+  catch { return null; }
+}
+function saveWallet(rec) {
+  localStorage.setItem("kovanica.wallet", JSON.stringify(rec));
+}
+async function loadWordlist() {
+  if (bip39Words) return bip39Words;
+  const t = await fetch("/bip39.txt").then((r) => r.text());
+  bip39Words = t.trim().split(/\s+/);
+  if (bip39Words.length !== 2048) throw new Error("bip39 wordlist");
+  return bip39Words;
+}
+function ed25519Pkcs8(seed32) {
+  const p = [0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+  const out = new Uint8Array(p.length + 32);
+  out.set(p, 0);
+  out.set(seed32, p.length);
+  return out;
+}
+async function mnemonicToSeed(mnemonic) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(mnemonic.normalize("NFKD")), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: enc.encode("mnemonic"), iterations: 2048, hash: "SHA-512" },
+    key,
+    512
+  );
+  return new Uint8Array(bits);
+}
+async function accountSeed(seed64, index) {
+  const buf = new Uint8Array(seed64.length + 4);
+  buf.set(seed64, 0);
+  new DataView(buf.buffer).setUint32(seed64.length, index >>> 0, false);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+}
+async function keysFromSeed32(seed32) {
+  const pkcs8 = ed25519Pkcs8(seed32);
+  const priv = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, ["sign"]);
+  const jwk = await crypto.subtle.exportKey("jwk", priv);
+  const rawPriv = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["sign"]);
+  const pubJwk = { kty: "OKP", crv: "Ed25519", x: jwk.x };
+  const pub = await crypto.subtle.importKey("jwk", pubJwk, { name: "Ed25519" }, true, ["verify"]);
+  const pubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", pub));
+  return { jwk, address: hexOf(pubRaw), _priv: rawPriv };
+}
+async function bip39FromEntropy(entropy) {
+  const words = await loadWordlist();
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", entropy));
+  const bits = [];
+  for (const b of entropy) for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1);
+  const cs = entropy.length * 8 / 32;
+  for (let i = 7; i >= 8 - cs; i--) bits.push((hash[0] >> i) & 1);
+  const out = [];
+  for (let i = 0; i < bits.length; i += 11) {
+    let v = 0;
+    for (let j = 0; j < 11; j++) v = (v << 1) | bits[i + j];
+    out.push(words[v]);
+  }
+  return out.join(" ");
+}
+async function walletOpen(mnemonic, index, shown) {
+  const seed64 = await mnemonicToSeed(mnemonic);
+  const seed32 = await accountSeed(seed64, index);
+  const keys = await keysFromSeed32(seed32);
+  const rec = { mnemonic, index, jwk: keys.jwk, address: keys.address, mnemonicShown: !!shown };
+  saveWallet(rec);
+  walletBal = 0;
+  walletHist = [];
+  return rec;
+}
+async function walletCreate() {
+  try {
+    const entropy = crypto.getRandomValues(new Uint8Array(16));
+    const mnemonic = await bip39FromEntropy(entropy);
+    await walletOpen(mnemonic, 0, true);
+    walletMsg = "write down the 12 words";
+  } catch (e) {
+    walletMsg = "err " + (e.message || "this browser has no Ed25519 WebCrypto");
+  }
+}
+async function walletImport(phrase) {
+  const words = phrase.trim().toLowerCase().split(/\s+/);
+  if (words.length !== 12 && words.length !== 24) throw new Error("need 12 or 24 words");
+  const list = await loadWordlist();
+  for (const w of words) if (!list.includes(w)) throw new Error("unknown word " + w);
+  await walletOpen(words.join(" "), 0, false);
+  walletMsg = "imported";
+}
+async function walletSign(sighashHex) {
+  const rec = walletRecord();
+  const key = await crypto.subtle.importKey("jwk", rec.jwk, { name: "Ed25519" }, false, ["sign"]);
+  const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", key, bytesOf(sighashHex)));
+  return hexOf(sig);
+}
+async function walletFaucet() {
+  const rec = walletRecord();
+  const node = state?.selected || "alpha";
+  const r = await api(`/api/faucet?node=${node}&to=${rec.address}&amount=${atom()}`, "POST");
+  walletMsg = r.ok ? "faucet paid 1 KVNC" : "err faucet";
+}
+async function walletSend(to, amountHuman) {
+  const rec = walletRecord();
+  const node = state?.selected || "alpha";
+  const amount = parseKvnc(amountHuman);
+  const prep = await api(`/api/prepare?node=${node}&from=${rec.address}&to=${to}&amount=${amount}`, "POST");
+  const sig = await walletSign(prep.sighash);
+  const sub = await api(`/api/submit?node=${node}&from=${rec.address}&to=${to}&amount=${amount}&sig=${sig}`, "POST");
+  await api(`/api/produce?node=${node}`, "POST");
+  walletMsg = `ok tx ${short(sub.tx)}`;
+}
+
+document.body.addEventListener("click", async (e) => {
+  const w = e.target.closest("[data-wallet]");
+  if (w) {
+    const op = w.dataset.wallet;
+    if (op === "create") await walletCreate();
+    if (op === "forget") { localStorage.removeItem("kovanica.wallet"); walletBal = null; walletHist = []; walletMsg = ""; }
+    if (op === "copy" && walletRecord()) await navigator.clipboard.writeText(walletRecord().address);
+    if (op === "export" && walletRecord()) {
+      const rec = walletRecord();
+      rec.mnemonicShown = !rec.mnemonicShown;
+      saveWallet(rec);
+    }
+    if (op === "download" && walletRecord()) {
+      const rec = walletRecord();
+      const blob = new Blob([rec.mnemonic + "\n"], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "kovanica-seed.txt";
+      a.click();
+      walletMsg = "seed file downloaded — keep it offline";
+    }
+    if (op === "switch" && walletRecord()) {
+      const rec = walletRecord();
+      const idx = Number(document.getElementById("acc-index").value) || 0;
+      await walletOpen(rec.mnemonic, idx, false);
+      walletMsg = "account " + idx;
+    }
+    if (op === "miner" && walletRecord()) {
+      try {
+        const rec = walletRecord();
+        await api(`/api/miner?node=${state?.selected || "alpha"}&addr=${rec.address}`, "POST");
+        walletMsg = "this address now receives block subsidy";
+      } catch (err) { walletMsg = "err " + (err.message || err); }
+    }
+    if (op === "faucet") {
+      try { await walletFaucet(); } catch (err) { walletMsg = "err " + (err.message || err); }
+    }
+    await refresh();
+    return;
+  }
+  const t = e.target.closest("[data-tab],[data-select],[data-act],[data-id]");
+  if (!t) return;
+  if (t.dataset.tab) { tab = t.dataset.tab; render(); }
+  if (t.dataset.select) { state.selected = t.dataset.select; selectedBlock = null; await refresh(); }
+  if (t.dataset.act) await act(t.dataset.act);
+  if (t.dataset.id && t.tagName === "TR") { selectedBlock = t.dataset.id; tab = "Graph"; render(); }
+});
+
+$("pause").onclick = async () => { mining = !mining; await api(`/api/mining?on=${mining ? 1 : 0}`, "POST"); render(); };
+$("reset").onclick = async () => { selectedBlock = null; await api("/api/reset", "POST"); await refresh(); };
+
+document.body.addEventListener("submit", async (e) => {
+  if (e.target.id === "wallet-import") {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try { await walletImport(String(fd.get("mnemonic") || "")); }
+    catch (err) { walletMsg = "err " + (err.message || err); }
+    await refresh();
+    return;
+  }
+  if (e.target.id === "wallet-send") {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await walletSend(String(fd.get("to")).trim(), String(fd.get("amount")));
+    } catch (err) {
+      walletMsg = "err " + (await (err.text?.() || err.message || "send failed"));
+    }
+    await refresh();
+    return;
+  }
+  if (e.target.id !== "send-form") return;
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  await act("send", `&from=${fd.get("from")}&amount=${fd.get("amount")}&to=${fd.get("to")}`);
+});
+
+poll = setInterval(refresh, 700);
+refresh();
+</script>
+</body>
+</html>
