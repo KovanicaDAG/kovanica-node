@@ -893,11 +893,7 @@ fn utxos_json(
 }
 
 fn parse_addr(s: &str) -> Result<Address, String> {
-    let bytes = hex::decode(s.trim()).map_err(|_| "address is not hex".to_string())?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| "address must be 32 bytes".to_string())?;
-    Ok(Address::from_bytes(arr))
+    Address::parse(s).map_err(|e| e.to_string())
 }
 
 fn parse_sig(s: &str) -> Result<[u8; 64], String> {

@@ -39,6 +39,40 @@ impl Address {
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
+
+    /// Human address: `kvnc` + base58(32-byte pubkey) + `dag`.
+    /// Wire / ledger still uses the 32 raw bytes (64 hex).
+    pub fn to_kvnc(&self) -> String {
+        format!("kvnc{}dag", b58_encode(&self.0))
+    }
+
+    /// Parse 64-hex **or** `kvnc…dag`.
+    pub fn parse(s: &str) -> Result<Self, &'static str> {
+        let t = s.trim();
+        if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let mut out = [0u8; 32];
+            let Ok(raw) = hex::decode(t) else {
+                return Err("address is not hex");
+            };
+            if raw.len() != 32 {
+                return Err("address must be 32 bytes");
+            }
+            out.copy_from_slice(&raw);
+            return Ok(Self(out));
+        }
+        if t.len() < 8
+            || !t.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("kvnc"))
+            || !t.get(t.len() - 3..).is_some_and(|p| p.eq_ignore_ascii_case("dag"))
+        {
+            return Err("address must be 64-hex or kvnc…dag");
+        }
+        let mid = &t[4..t.len() - 3];
+        let bytes = b58_decode(mid)?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "kvnc address must be 32 bytes")?;
+        Ok(Self(arr))
+    }
 }
 
 impl fmt::Debug for Address {
@@ -104,6 +138,53 @@ pub fn verify(address: &Address, message: &[u8], signature: &[u8; 64]) -> bool {
     verifying_key.verify_strict(message, &signature).is_ok()
 }
 
+const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+fn b58_encode(data: &[u8]) -> String {
+    let zeros = data.iter().take_while(|b| **b == 0).count();
+    let mut buf = data.to_vec();
+    let mut digits = Vec::new();
+    loop {
+        if buf.iter().all(|b| *b == 0) {
+            break;
+        }
+        let mut rem = 0u16;
+        for b in buf.iter_mut() {
+            let v = (rem << 8) | u16::from(*b);
+            *b = (v / 58) as u8;
+            rem = v % 58;
+        }
+        digits.push(B58[rem as usize]);
+    }
+    digits.reverse();
+    let mut out = vec![b'1'; zeros];
+    out.extend_from_slice(&digits);
+    String::from_utf8(out).expect("base58 alphabet is ascii")
+}
+
+fn b58_decode(s: &str) -> Result<Vec<u8>, &'static str> {
+    if s.is_empty() {
+        return Err("empty kvnc payload");
+    }
+    let mut acc = vec![0u8; 40];
+    for c in s.bytes() {
+        let val = B58
+            .iter()
+            .position(|b| *b == c)
+            .ok_or("invalid kvnc address character")?;
+        let mut carry = val as u32;
+        for b in acc.iter_mut().rev() {
+            let v = u32::from(*b) * 58 + carry;
+            *b = (v & 0xff) as u8;
+            carry = v >> 8;
+        }
+        if carry != 0 {
+            return Err("kvnc address overflow");
+        }
+    }
+    Ok(acc[acc.len() - 32..].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +218,18 @@ mod tests {
             KeyPair::from_u64(42).address(),
             KeyPair::from_u64(42).address()
         );
+    }
+
+    #[test]
+    fn kvnc_display_roundtrip() {
+        let addr = KeyPair::from_u64(1).address();
+        let shown = addr.to_kvnc();
+        assert!(shown.starts_with("kvnc"), "{shown}");
+        assert!(shown.starts_with("kvnc"), "{shown}");
+        assert!(shown.ends_with("dag"), "{shown}");
+        assert!(shown.len() < 4 + 64 + 3, "should be shorter than hex wrap");
+        assert_eq!(Address::parse(&shown).unwrap(), addr);
+        assert_eq!(Address::parse(&addr.to_hex()).unwrap(), addr);
+        assert!(Address::parse("not-an-address").is_err());
     }
 }

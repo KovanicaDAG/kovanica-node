@@ -65,4 +65,5 @@ export KOVANICA_PEERS=145.223.116.178:9000
 | `KOVANICA_POW` | `1` |
 | `KOVANICA_DATA` | `./data` |
 
-Do not enable faucet or reset on a public node.
+Addresses on screen look like `kvnc…dag` (base58 of the 32-byte key). The ledger
+still stores 64-hex; paste either form into send / API.
