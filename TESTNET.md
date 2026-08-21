@@ -27,6 +27,9 @@ and never gossiped blocks.
 `explorer.kovanica.online` is orange-cloud. TCP 9000 never reaches the seed
 through that name. Grey-cloud `seed.kovanica.online` (or the origin IP) is the
 peer address clones should dial. The seed itself keeps `KOVANICA_PEERS=off`.
+On connect the seed **serves** its dump then **reads** the clone's dump, so extra
+blocks on a clone can land on the seed. Home tap on Live pays 0.01 KVNC (40/day)
+from the founder UTXO, not the open faucet.
 
 
 ## Tokenomics

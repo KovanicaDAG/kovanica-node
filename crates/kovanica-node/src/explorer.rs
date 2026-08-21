@@ -8,12 +8,12 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kovanica_dag::BlockId;
 use kovanica_state::{Address, Transaction};
 
-use crate::net::{encode_records, pull_blocks_timeout};
+use crate::net::{encode_records, pull_blocks_timeout, serve_exchange};
 use crate::node::{Node, HALVING_ERA};
 use crate::p2p::Mesh;
 
@@ -25,6 +25,8 @@ const ATOM: u64 = 100_000_000;
 const GENESIS_SUBSIDY: u64 = 50 * ATOM;
 const GENESIS_PREMINE: u64 = 50 * ATOM;
 const NETWORK: &str = "kovanica-testnet-1";
+const TAP_REWARD_ATOMS: u64 = ATOM / 100;
+const TAP_DAILY: u32 = 40;
 const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 /// Single P2P path: plaintext TCP. Not 80/443/3010/8080 and not libp2p :30333.
 const P2P_LISTEN_DEFAULT: &str = "0.0.0.0:9000";
@@ -62,10 +64,11 @@ struct Explorer {
     faucet: bool,
     allow_reset: bool,
     operator: bool,
-    listen: Option<TcpListener>,
+    listen: Vec<TcpListener>,
     listen_addr: String,
     peers: Vec<String>,
     origins: HashMap<String, u64>,
+    taps: HashMap<String, (u64, u32)>,
 }
 
 impl Explorer {
@@ -81,10 +84,11 @@ impl Explorer {
             faucet: true,
             allow_reset: true,
             operator: true,
-            listen: None,
+            listen: Vec::new(),
             listen_addr: String::new(),
             peers: Vec::new(),
             origins: HashMap::new(),
+            taps: HashMap::new(),
         }
     }
 
@@ -104,13 +108,24 @@ impl Explorer {
     }
 
     fn tick_p2p(&mut self) {
-        if let Some(listener) = self.listen.as_ref() {
-            if let Ok((mut stream, peer)) = listener.accept() {
-                if let Some(n) = self.mesh.node("alpha") {
-                    let bytes = encode_records(&n.export());
-                    let _ = stream.write_all(&bytes);
-                    let _ = stream.flush();
-                    eprintln!("kovanica p2p served {} bytes to {peer}", bytes.len());
+        let mut incoming = Vec::new();
+        for listener in &self.listen {
+            while let Ok((stream, peer)) = listener.accept() {
+                incoming.push((stream, peer));
+            }
+        }
+        for (mut stream, peer) in incoming {
+            if let Some(n) = self.mesh.node_mut("alpha") {
+                match serve_exchange(&mut stream, n, Duration::from_millis(800)) {
+                    Ok(got) => {
+                        eprintln!("kovanica p2p exchanged with {peer} (peer sent {got} records)");
+                        if got > 0 {
+                            persist_all(&self.mesh);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("kovanica p2p exchange {peer}: {e}");
+                    }
                 }
             }
         }
@@ -157,10 +172,11 @@ impl Explorer {
         persist_all(&mesh);
         let listen = bind_p2p();
         let listen_addr = listen
-            .as_ref()
-            .and_then(|l| l.local_addr().ok())
+            .iter()
+            .filter_map(|l| l.local_addr().ok())
             .map(|a| a.to_string())
-            .unwrap_or_default();
+            .collect::<Vec<_>>()
+            .join(",");
         let peers = peer_list();
         if !listen_addr.is_empty() || !peers.is_empty() {
             eprintln!("kovanica p2p listen={listen_addr} peers={peers:?}");
@@ -178,6 +194,7 @@ impl Explorer {
             listen_addr,
             peers,
             origins: load_origins(),
+            taps: load_taps(),
         };
         app.sync_peers(Duration::from_secs(3), true);
         app
@@ -293,28 +310,35 @@ fn ensure_network() {
     }
 }
 
-fn bind_p2p() -> Option<TcpListener> {
+fn bind_p2p() -> Vec<TcpListener> {
     let raw = std::env::var("KOVANICA_LISTEN").unwrap_or_else(|_| P2P_LISTEN_DEFAULT.into());
     if env_off(&raw) {
         eprintln!("kovanica p2p listen disabled");
-        return None;
+        return Vec::new();
     }
-    match TcpListener::bind(&raw) {
-        Ok(listener) => {
-            if let Err(e) = listener.set_nonblocking(true) {
-                eprintln!("kovanica p2p listen {raw} nonblocking failed: {e}");
-                return None;
+    let mut addrs = vec![raw.clone()];
+    if let Some(port) = raw.strip_prefix("0.0.0.0:") {
+        addrs.push(format!("[::]:{port}"));
+    }
+    let mut out = Vec::new();
+    for addr in addrs {
+        match TcpListener::bind(&addr) {
+            Ok(listener) => {
+                if let Err(e) = listener.set_nonblocking(true) {
+                    eprintln!("kovanica p2p listen {addr} nonblocking failed: {e}");
+                    continue;
+                }
+                if let Ok(local) = listener.local_addr() {
+                    eprintln!("kovanica p2p listen {local}");
+                }
+                out.push(listener);
             }
-            if let Ok(local) = listener.local_addr() {
-                eprintln!("kovanica p2p listen {local}");
+            Err(e) => {
+                eprintln!("kovanica p2p listen {addr} failed: {e}");
             }
-            Some(listener)
-        }
-        Err(e) => {
-            eprintln!("kovanica p2p listen {raw} failed: {e}");
-            None
         }
     }
+    out
 }
 
 fn peer_list() -> Vec<String> {
@@ -366,6 +390,43 @@ fn save_origins(map: &HashMap<String, u64>) {
         .collect();
     let _ = fs::create_dir_all(data_dir());
     let _ = fs::write(origins_path(), body);
+}
+
+fn taps_path() -> PathBuf {
+    data_dir().join("taps.txt")
+}
+
+fn utc_day() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0)
+}
+
+fn load_taps() -> HashMap<String, (u64, u32)> {
+    let mut map = HashMap::new();
+    let Ok(text) = fs::read_to_string(taps_path()) else {
+        return map;
+    };
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(addr) = parts.next() else { continue };
+        let Some(day) = parts.next().and_then(|s| s.parse().ok()) else { continue };
+        let Some(n) = parts.next().and_then(|s| s.parse().ok()) else { continue };
+        map.insert(addr.to_ascii_lowercase(), (day, n));
+    }
+    map
+}
+
+fn save_taps(map: &HashMap<String, (u64, u32)>) {
+    let mut rows: Vec<_> = map.iter().collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    let body: String = rows
+        .into_iter()
+        .map(|(k, (d, n))| format!("{k} {d} {n}\n"))
+        .collect();
+    let _ = fs::create_dir_all(data_dir());
+    let _ = fs::write(taps_path(), body);
 }
 
 fn origins_json(map: &HashMap<String, u64>) -> String {
@@ -673,6 +734,43 @@ fn dispatch(
             return Ok(format!(
                 "{{\"ok\":true,\"block\":{}}}",
                 jstr(&block.to_string())
+            ));
+        }
+        "tap" => {
+            if !env_flag("KOVANICA_TAP", true) {
+                return Err("tap disabled".into());
+            }
+            let to = parse_addr(q.get("to").ok_or("to address required")?)?;
+            let want = parse_u64(q, "amount", TAP_REWARD_ATOMS)?.min(TAP_REWARD_ATOMS);
+            if want == 0 {
+                return Err("amount required".into());
+            }
+            let key = to.to_hex();
+            let day = utc_day();
+            let used = {
+                let e = app.taps.entry(key.clone()).or_insert((day, 0));
+                if e.0 != day {
+                    *e = (day, 0);
+                }
+                e.1
+            };
+            if used >= TAP_DAILY {
+                return Err("daily tap limit".into());
+            }
+            let sent = app
+                .mesh
+                .send_to(&node, 1, want, to)
+                .map_err(|e| e.to_string())?;
+            if let Some(e) = app.taps.get_mut(&key) {
+                e.1 = e.1.saturating_add(1);
+            }
+            save_taps(&app.taps);
+            app.mesh.drain(8);
+            return Ok(format!(
+                "{{\"ok\":true,\"block\":{},\"amount\":{},\"left\":{}}}",
+                jstr(&sent.to_string()),
+                want,
+                TAP_DAILY.saturating_sub(used + 1)
             ));
         }
         other => return Err(format!("unknown action {other}")),
@@ -1258,5 +1356,26 @@ mod tests {
         assert!(listed.contains("HRV"));
         let bad = dispatch(&mut app, "origin", &std::collections::HashMap::new());
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn tap_credits_an_address_within_daily_cap() {
+        use kovanica_state::KeyPair;
+
+        let mut app = Explorer::boot();
+        app.mining = false;
+        let to = KeyPair::from_u64(9);
+        let mut q = std::collections::HashMap::new();
+        q.insert("to".into(), to.address().to_hex());
+        q.insert("amount".into(), TAP_REWARD_ATOMS.to_string());
+        let body = dispatch(&mut app, "tap", &q).unwrap();
+        assert!(body.contains("\"ok\":true"));
+        assert_eq!(
+            app.mesh.node("alpha").unwrap().balance(&to.address()).unwrap(),
+            u128::from(TAP_REWARD_ATOMS)
+        );
+        app.taps.insert(to.address().to_hex(), (utc_day(), TAP_DAILY));
+        let capped = dispatch(&mut app, "tap", &q).unwrap_err();
+        assert!(capped.contains("daily tap limit"));
     }
 }
