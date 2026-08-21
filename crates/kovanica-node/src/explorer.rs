@@ -59,6 +59,7 @@ struct Explorer {
     mesh: Mesh,
     selected: String,
     mining: bool,
+    mine_every: u64,
     ticks: u64,
     rotate: usize,
     faucet: bool,
@@ -79,6 +80,7 @@ impl Explorer {
             mesh,
             selected: "alpha".into(),
             mining: false,
+            mine_every: 120,
             ticks: 0,
             rotate: 0,
             faucet: true,
@@ -96,7 +98,7 @@ impl Explorer {
         self.mesh.tick();
         self.ticks += 1;
         self.tick_p2p();
-        if self.mining && self.ticks % 120 == 0 {
+        if self.mining && self.mine_every > 0 && self.ticks % self.mine_every == 0 {
             let names = self.mesh.names();
             if !names.is_empty() {
                 let name = &names[self.rotate % names.len()];
@@ -185,6 +187,7 @@ impl Explorer {
             mesh,
             selected: "alpha".into(),
             mining: env_flag("KOVANICA_MINE", false),
+            mine_every: mine_every_ticks(),
             ticks: 0,
             rotate: 0,
             faucet: env_flag("KOVANICA_FAUCET", false),
@@ -289,6 +292,19 @@ fn genesis_node() -> Node {
         let _ = node.set_proof_of_work(true);
     }
     node
+}
+
+/// Explorer loop sleeps 40ms per tick.
+const TICK_MS: u64 = 40;
+/// Default public mine interval when `KOVANICA_MINE=1` (seconds).
+const MINE_SECS_DEFAULT: u64 = 120;
+
+fn mine_every_ticks() -> u64 {
+    let secs = std::env::var("KOVANICA_MINE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(MINE_SECS_DEFAULT);
+    (secs.saturating_mul(1000) / TICK_MS).max(1)
 }
 
 fn env_flag(name: &str, default: bool) -> bool {

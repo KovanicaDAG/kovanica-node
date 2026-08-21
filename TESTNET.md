@@ -36,8 +36,11 @@ from the founder UTXO, not the open faucet.
 
 - 1 KVNC = 10^8 atoms.
 - New coins only from coinbase (issuance + fees to the miner).
-- Faucet and empty-block minting are **off** on the public explorer.
+- Faucet and empty-block minting are **off** on the public explorer (`KOVANICA_MINE=0`).
+- If mine is turned on, empty blocks are **120s** apart (`KOVANICA_MINE_SECS`, was ~5s).
 - Wallet `prepare` / `submit` stays open: you sign in the browser; the node never sees the seed.
+
+Join a clone: [JOIN.md](./JOIN.md) (one-click install, Windows/Linux/macOS, USB stick).
 
 ## Run
 
