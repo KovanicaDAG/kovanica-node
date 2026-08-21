@@ -71,28 +71,39 @@ pub fn pull_blocks<A: ToSocketAddrs>(addr: A, node: &mut Node) -> Result<usize, 
 }
 
 /// Like [`pull_blocks`] but bounded so a dead peer cannot stall the explorer.
+/// Tries every resolved address (IPv4 first): `seed.kovanica.online` has an
+/// AAAA while the seed binds `0.0.0.0:9000`, so IPv6-first connect would hang.
 pub fn pull_blocks_timeout(
     addr: &str,
     node: &mut Node,
     timeout: Duration,
 ) -> Result<usize, NetError> {
-    let sock = addr
-        .to_socket_addrs()
-        .map_err(io)?
-        .next()
-        .ok_or_else(|| NetError::Io("no address".into()))?;
-    let mut stream = TcpStream::connect_timeout(&sock, timeout).map_err(io)?;
-    stream.set_read_timeout(Some(timeout)).map_err(io)?;
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(io)?;
-    let records = decode_records(&buf)?;
-    let mut applied = 0;
-    for record in records {
-        node.receive_block(record)
-            .map_err(|e| NetError::Apply(e.to_string()))?;
-        applied += 1;
+    let mut socks: Vec<_> = addr.to_socket_addrs().map_err(io)?.collect();
+    if socks.is_empty() {
+        return Err(NetError::Io("no address".into()));
     }
-    Ok(applied)
+    socks.sort_by_key(|s| if s.is_ipv4() { 0u8 } else { 1 });
+    let mut last = NetError::Io("no address".into());
+    for sock in socks {
+        match TcpStream::connect_timeout(&sock, timeout) {
+            Ok(mut stream) => {
+                stream.set_read_timeout(Some(timeout)).map_err(io)?;
+                stream.set_write_timeout(Some(timeout)).map_err(io)?;
+                let mut buf = Vec::new();
+                stream.read_to_end(&mut buf).map_err(io)?;
+                let records = decode_records(&buf)?;
+                let mut applied = 0;
+                for record in records {
+                    node.receive_block(record)
+                        .map_err(|e| NetError::Apply(e.to_string()))?;
+                    applied += 1;
+                }
+                return Ok(applied);
+            }
+            Err(e) => last = io(e),
+        }
+    }
+    Err(last)
 }
 
 /// Why a sync failed.
