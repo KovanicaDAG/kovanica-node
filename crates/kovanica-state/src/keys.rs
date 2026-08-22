@@ -62,7 +62,9 @@ impl Address {
         }
         if t.len() < 8
             || !t.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("kvnc"))
-            || !t.get(t.len() - 3..).is_some_and(|p| p.eq_ignore_ascii_case("dag"))
+            || !t
+                .get(t.len() - 3..)
+                .is_some_and(|p| p.eq_ignore_ascii_case("dag"))
         {
             return Err("address must be 64-hex or kvnc…dag");
         }
@@ -166,7 +168,7 @@ fn b58_decode(s: &str) -> Result<Vec<u8>, &'static str> {
     if s.is_empty() {
         return Err("empty kvnc payload");
     }
-    let mut acc = vec![0u8; 40];
+    let mut acc = [0u8; 40];
     for c in s.bytes() {
         let val = B58
             .iter()

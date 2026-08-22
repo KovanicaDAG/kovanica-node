@@ -298,7 +298,10 @@ impl Node {
     /// genesis subsidy cap). Coinbase still cannot exceed `ledger.subsidy()`.
     pub fn issuance(&self) -> Result<u64, NodeError> {
         let ledger = self.ledger()?;
-        Ok(Self::issuance_at(ledger.subsidy(), ledger.dag().len() as u64))
+        Ok(Self::issuance_at(
+            ledger.subsidy(),
+            ledger.dag().len() as u64,
+        ))
     }
 
     /// `cap >> (height / HALVING_ERA)`, saturating at zero.
@@ -392,7 +395,9 @@ impl Node {
             return Err(NodeError::ZeroAmount);
         }
         let fee = self.min_fee();
-        let need = amount.checked_add(fee).ok_or(NodeError::InsufficientFunds)?;
+        let need = amount
+            .checked_add(fee)
+            .ok_or(NodeError::InsufficientFunds)?;
         let state = self.ledger()?.ledger_state();
         let mut owned: Vec<(OutPoint, u64)> = state
             .iter()
@@ -464,12 +469,7 @@ impl Node {
     }
 
     /// Send from a seed actor to an arbitrary address (faucet / demo).
-    pub fn send_to(
-        &mut self,
-        from_seed: u64,
-        amount: u64,
-        to: Address,
-    ) -> Result<Sent, NodeError> {
+    pub fn send_to(&mut self, from_seed: u64, amount: u64, to: Address) -> Result<Sent, NodeError> {
         let tx = self.build_transfer_to(from_seed, amount, to)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
@@ -530,7 +530,11 @@ impl Node {
 
         let (subsidy, mut working, original) = {
             let ledger = self.ledger.as_ref().expect("checked above");
-            (ledger.subsidy(), ledger.ledger_state(), ledger.ledger_state())
+            (
+                ledger.subsidy(),
+                ledger.ledger_state(),
+                ledger.ledger_state(),
+            )
         };
         let mut selected = Vec::new();
         let mut selected_ids = Vec::new();

@@ -6,8 +6,8 @@
 //!   UI) on `addr`, default `0.0.0.0:8080`. TCP P2P (the only network path)
 //!   binds `KOVANICA_LISTEN` (default `0.0.0.0:9000`) in the same process.
 
-use std::io::{self, BufRead, Write};
 use kovanica_node::{rpc, Node};
+use std::io::{self, BufRead, Write};
 
 fn main() {
     let mode = std::env::args().nth(1);
