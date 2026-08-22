@@ -73,6 +73,7 @@ struct Explorer {
 }
 
 impl Explorer {
+    #[cfg(test)]
     fn boot() -> Self {
         let mut mesh = line_mesh();
         mesh.drain(16);
@@ -275,6 +276,7 @@ fn load_or_genesis(name: &str) -> Node {
     genesis_node()
 }
 
+#[cfg(test)]
 fn line_mesh() -> Mesh {
     let mut mesh = Mesh::new();
     mesh.add("alpha", genesis_node());
@@ -287,7 +289,8 @@ fn line_mesh() -> Mesh {
 
 fn genesis_node() -> Node {
     let mut node = Node::new();
-    node.genesis(3, GENESIS_SUBSIDY, GENESIS_PREMINE, 1).expect("genesis");
+    node.genesis(3, GENESIS_SUBSIDY, GENESIS_PREMINE, 1)
+        .expect("genesis");
     if env_flag("KOVANICA_POW", true) {
         let _ = node.set_proof_of_work(true);
     }
@@ -427,8 +430,12 @@ fn load_taps() -> HashMap<String, (u64, u32)> {
     for line in text.lines() {
         let mut parts = line.split_whitespace();
         let Some(addr) = parts.next() else { continue };
-        let Some(day) = parts.next().and_then(|s| s.parse().ok()) else { continue };
-        let Some(n) = parts.next().and_then(|s| s.parse().ok()) else { continue };
+        let Some(day) = parts.next().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        let Some(n) = parts.next().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
         map.insert(addr.to_ascii_lowercase(), (day, n));
     }
     map
@@ -478,7 +485,12 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
         return respond(&mut stream, 200, "text/html; charset=utf-8", UI.as_bytes());
     }
     if method == "GET" && path == "/bip39.txt" {
-        return respond(&mut stream, 200, "text/plain; charset=utf-8", BIP39.as_bytes());
+        return respond(
+            &mut stream,
+            200,
+            "text/plain; charset=utf-8",
+            BIP39.as_bytes(),
+        );
     }
     if method == "GET" && path == "/kovanica-explorer-wallet.patch" {
         let body = std::fs::read("/workspace/kovanica-explorer-wallet.patch")
@@ -492,7 +504,12 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
         );
     }
     if method == "GET" && path == "/docs" {
-        return respond(&mut stream, 200, "text/plain; charset=utf-8", DOCS.as_bytes());
+        return respond(
+            &mut stream,
+            200,
+            "text/plain; charset=utf-8",
+            DOCS.as_bytes(),
+        );
     }
     if method == "GET" && path == "/api/bootstrap" {
         let n = app.mesh.node(&app.selected);
@@ -579,22 +596,14 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
     }
     if method == "GET" && path == "/api/history" {
         match history_json(app, &query) {
-            Ok(body) => {
-                return respond(&mut stream, 200, "application/json", body.as_bytes())
-            }
-            Err(e) => {
-                return respond(&mut stream, 400, "text/plain; charset=utf-8", e.as_bytes())
-            }
+            Ok(body) => return respond(&mut stream, 200, "application/json", body.as_bytes()),
+            Err(e) => return respond(&mut stream, 400, "text/plain; charset=utf-8", e.as_bytes()),
         }
     }
     if method == "GET" && path == "/api/utxos" {
         match utxos_json(app, &query) {
-            Ok(body) => {
-                return respond(&mut stream, 200, "application/json", body.as_bytes())
-            }
-            Err(e) => {
-                return respond(&mut stream, 400, "text/plain; charset=utf-8", e.as_bytes())
-            }
+            Ok(body) => return respond(&mut stream, 200, "application/json", body.as_bytes()),
+            Err(e) => return respond(&mut stream, 400, "text/plain; charset=utf-8", e.as_bytes()),
         }
     }
     if method == "POST" && path.starts_with("/api/") {
@@ -605,11 +614,9 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
         match dispatch(app, action, &query) {
             Ok(body) => {
                 persist_all(&app.mesh);
-                return respond(&mut stream, 200, "application/json", body.as_bytes())
+                return respond(&mut stream, 200, "application/json", body.as_bytes());
             }
-            Err(e) => {
-                return respond(&mut stream, 400, "text/plain; charset=utf-8", e.as_bytes())
-            }
+            Err(e) => return respond(&mut stream, 400, "text/plain; charset=utf-8", e.as_bytes()),
         }
     }
     respond(&mut stream, 404, "text/plain; charset=utf-8", b"not found")
@@ -620,19 +627,20 @@ fn dispatch(
     action: &str,
     q: &std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
-    let node = q.get("node").cloned().unwrap_or_else(|| app.selected.clone());
+    let node = q
+        .get("node")
+        .cloned()
+        .unwrap_or_else(|| app.selected.clone());
     match action {
-        "produce" => {
-            match app.mesh.produce(&node).map_err(|e| e.to_string())? {
-                Some(_) => {}
-                None => {
-                    if !app.operator {
-                        return Err("mempool empty".into());
-                    }
-                    app.mesh.produce_empty(&node).map_err(|e| e.to_string())?;
+        "produce" => match app.mesh.produce(&node).map_err(|e| e.to_string())? {
+            Some(_) => {}
+            None => {
+                if !app.operator {
+                    return Err("mempool empty".into());
                 }
+                app.mesh.produce_empty(&node).map_err(|e| e.to_string())?;
             }
-        }
+        },
         "empty" | "send" | "pool" | "parallel" | "fork" | "mining" | "miner" => {
             if !app.operator {
                 return Err("operator only".into());
@@ -676,7 +684,10 @@ fn dispatch(
                         .node_mut(&node)
                         .ok_or_else(|| "unknown node".to_string())?;
                     n.set_miner(addr);
-                    return Ok(format!("{{\"ok\":true,\"miner\":{}}}", jstr(&addr.to_hex())));
+                    return Ok(format!(
+                        "{{\"ok\":true,\"miner\":{}}}",
+                        jstr(&addr.to_hex())
+                    ));
                 }
                 _ => {}
             }
@@ -921,10 +932,7 @@ fn split_query(target: &str) -> (&str, std::collections::HashMap<String, String>
             let mut map = std::collections::HashMap::new();
             for pair in q.split('&') {
                 if let Some((k, v)) = pair.split_once('=') {
-                    map.insert(
-                        k.to_string(),
-                        urlencoding_decode(v),
-                    );
+                    map.insert(k.to_string(), urlencoding_decode(v));
                 }
             }
             (path, map)
@@ -1023,7 +1031,10 @@ fn node_json(node: &Node) -> String {
         return "{\"blocks\":0,\"dag\":[],\"order\":[],\"tips\":[],\"pending\":[]}".into();
     };
     let dag = ledger.dag();
-    let selected_tip = node.selected_tip().map(|t| t.to_string()).unwrap_or_default();
+    let selected_tip = node
+        .selected_tip()
+        .map(|t| t.to_string())
+        .unwrap_or_default();
     let chain: Vec<BlockId> = dag.selected_chain();
     let chain_set: HashSet<BlockId> = chain.iter().copied().collect();
     let tip_id = node.selected_tip().ok();
@@ -1219,19 +1230,9 @@ mod tests {
         let mut app = Explorer::boot();
         app.mining = false;
         let founder = kovanica_state::KeyPair::from_u64(1).address();
-        let before = app
-            .mesh
-            .node("alpha")
-            .unwrap()
-            .balance(&founder)
-            .unwrap();
+        let before = app.mesh.node("alpha").unwrap().balance(&founder).unwrap();
         app.mesh.produce_empty("alpha").unwrap();
-        let after = app
-            .mesh
-            .node("alpha")
-            .unwrap()
-            .balance(&founder)
-            .unwrap();
+        let after = app.mesh.node("alpha").unwrap().balance(&founder).unwrap();
         assert_eq!(after, before + u128::from(GENESIS_SUBSIDY));
     }
 
@@ -1248,7 +1249,10 @@ mod tests {
                 .unwrap(),
             ATOM.into()
         );
-        assert_eq!(n.balance(&founder).unwrap(), u128::from(GENESIS_PREMINE - ATOM + GENESIS_SUBSIDY));
+        assert_eq!(
+            n.balance(&founder).unwrap(),
+            u128::from(GENESIS_PREMINE - ATOM + GENESIS_SUBSIDY)
+        );
     }
 
     #[test]
@@ -1299,7 +1303,10 @@ mod tests {
             .unwrap()
             .prepare_transfer(from.address(), GENESIS_SUBSIDY, to.address())
             .unwrap();
-        assert!(prepared.tx.inputs().len() >= 2, "50 KVNC + fee needs two 50-KVNC coinbases");
+        assert!(
+            prepared.tx.inputs().len() >= 2,
+            "50 KVNC + fee needs two 50-KVNC coinbases"
+        );
         let sig = from.sign(&prepared.sighash);
         app.mesh
             .submit_signed("alpha", from.address(), GENESIS_SUBSIDY, to.address(), sig)
@@ -1383,10 +1390,15 @@ mod tests {
         let body = dispatch(&mut app, "tap", &q).unwrap();
         assert!(body.contains("\"ok\":true"));
         assert_eq!(
-            app.mesh.node("alpha").unwrap().balance(&to.address()).unwrap(),
+            app.mesh
+                .node("alpha")
+                .unwrap()
+                .balance(&to.address())
+                .unwrap(),
             u128::from(TAP_REWARD_ATOMS)
         );
-        app.taps.insert(to.address().to_hex(), (utc_day(), TAP_DAILY));
+        app.taps
+            .insert(to.address().to_hex(), (utc_day(), TAP_DAILY));
         let capped = dispatch(&mut app, "tap", &q).unwrap_err();
         assert!(capped.contains("daily tap limit"));
     }

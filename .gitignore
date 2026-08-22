@@ -1,3 +1,5 @@
 /target
 **/*.rs.bk
 Cargo.lock.orig
+# Runtime node/explorer persistence written relative to the working dir
+data/

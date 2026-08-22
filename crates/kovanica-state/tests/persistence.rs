@@ -12,7 +12,7 @@ const SUBSIDY: u64 = 1_000;
 fn snapshot(utxo: &UtxoSet) -> Vec<(OutPoint, u64, Address)> {
     let mut rows: Vec<(OutPoint, u64, Address)> =
         utxo.iter().map(|(op, o)| (*op, o.value, o.owner)).collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by_key(|a| a.0);
     rows
 }
 

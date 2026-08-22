@@ -106,12 +106,16 @@ fn tcp_exchange_merges_divergent_chains() {
         let (mut stream, _) = listener.accept().unwrap();
         stream.write_all(&server_bytes).unwrap();
         stream.flush().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         net::read_records_from(&mut stream).unwrap()
     });
 
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
     let from_server = net::read_records_from(&mut stream).unwrap();
     stream.write_all(&client_bytes).unwrap();
     stream.flush().unwrap();
