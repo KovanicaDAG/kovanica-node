@@ -464,7 +464,7 @@ impl Node {
             .filter(|(_, o)| &o.owner == owner)
             .map(|(op, o)| (*op, o.value))
             .collect();
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.sort_by_key(|a| a.0);
         Ok(rows)
     }
 
