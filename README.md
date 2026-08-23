@@ -16,6 +16,22 @@ Windows: `irm https://raw.githubusercontent.com/KovanicaDAG/kovanica-node/main/s
 
 USB stick files: [`scripts/usb/`](./scripts/usb/).
 
+## About this repo
+
+This repository contains the **runnable node binary** (`kovanica-node`). The full protocol — DAG consensus, UTXO ledger, CLI, and web UI — lives in the unified [**kovanica-protocol**](https://github.com/KovanicaDAG/kovanica-protocol) monorepo:
+
+```
+kovanica-protocol/
+├── crates/
+│   ├── kovanica-dag/     # DAG + GHOSTDAG consensus
+│   ├── kovanica-state/   # UTXO ledger
+│   ├── kovanica-node/    # Node binary (this code)
+│   └── kovanica-cli/     # CLI wallet
+└── web/                  # React/TS UI (explorer, wallet, map)
+```
+
+For development, pull from [kovanica-protocol](https://github.com/KovanicaDAG/kovanica-protocol). This repo is a mirror for standalone binary distribution.
+
 ## Requirements
 
 - Rust 1.75+ ([rustup](https://rustup.rs)) — the installer fetches this
@@ -24,8 +40,8 @@ USB stick files: [`scripts/usb/`](./scripts/usb/).
 ## Build from a git checkout (optional)
 
 ```sh
-git clone https://github.com/KovanicaDAG/kovanica-node.git
-cd kovanica-node
+git clone https://github.com/KovanicaDAG/kovanica-protocol.git
+cd kovanica-protocol
 cargo build --release -p kovanica-node
 ```
 
