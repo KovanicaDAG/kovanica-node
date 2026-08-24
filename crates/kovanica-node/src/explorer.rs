@@ -95,7 +95,7 @@ pub fn serve(addr: impl ToSocketAddrs) -> std::io::Result<()> {
                 // Refresh peer gauge periodically so the standalone :9090
                 // metrics listener serves fresh values between scrapes.
                 if app.ticks % 125 == 0 {
-                    set_peer_count(app.mesh.total_peer_count());
+                    set_peer_count(app.live_peers.len());
                 }
                 app.ws_broadcast_state();
                 thread::sleep(Duration::from_millis(40));
@@ -119,6 +119,8 @@ struct Explorer {
     listen_addr: String,
     peers: Vec<String>,
     origins: HashMap<String, u64>,
+    /// Peers that answered our last sync attempt (live connectivity).
+    live_peers: HashSet<String>,
     taps: HashMap<String, (u64, u32)>,
     ws_clients: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,
     /// DHT routing table for the explorer's alpha node.
@@ -153,6 +155,7 @@ impl Explorer {
             listen_addr: String::new(),
             peers: Vec::new(),
             origins: HashMap::new(),
+            live_peers: HashSet::new(),
             taps: HashMap::new(),
             ws_clients: Arc::new(Mutex::new(Vec::new())),
             dht_table: None,
@@ -319,6 +322,7 @@ impl Explorer {
         if peers.is_empty() {
             return;
         }
+        let mut answered: HashSet<String> = HashSet::new();
         if let Some(n) = self.mesh.node_mut("alpha") {
             for addr in peers {
                 // Try headers-first sync first (more efficient)
@@ -328,8 +332,12 @@ impl Explorer {
                             "kovanica p2p headers-first sync from {addr}: {} headers, {} bodies applied",
                             stats.headers_received, stats.bodies_applied
                         );
+                        answered.insert(addr.clone());
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        // Reachable, just nothing new to apply.
+                        answered.insert(addr.clone());
+                    }
                     Err(e) => {
                         // Fall back to legacy full-dump pull
                         if log {
@@ -337,21 +345,20 @@ impl Explorer {
                         }
                         match pull_blocks_timeout(&addr, n, timeout) {
                             Ok(k) if k > 0 => {
-                                eprintln!(
-                                    "kovanica p2p pulled {k} records from {addr} (full dump)"
-                                );
+                                eprintln!("kovanica p2p pulled {k} records from {addr} (full dump)");
+                                answered.insert(addr.clone());
                             }
                             Ok(_) => {}
-                            Err(e) => {
-                                if log {
-                                    eprintln!("kovanica p2p pull {addr}: {e}");
-                                }
-                            }
+                            Err(_) => {}
                         }
                     }
                 }
             }
         }
+        // Live connectivity = peers that answered this round. Peers no longer
+        // in the config drop out immediately; silent ones drop out here too.
+        self.live_peers = answered;
+        set_peer_count(self.live_peers.len());
         persist_all(&self.mesh);
     }
 
@@ -400,6 +407,7 @@ impl Explorer {
             listen_addr,
             peers,
             origins: load_origins(),
+            live_peers: HashSet::new(),
             taps: load_taps(),
             ws_clients: Arc::new(Mutex::new(Vec::new())),
             dht_table: None,
@@ -796,7 +804,7 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
     if method == "GET" && path == "/metrics" {
         // Sample live gauges on every scrape so Prometheus always sees fresh
         // values even when no block/mempool event fired recently.
-        set_peer_count(app.mesh.total_peer_count());
+        set_peer_count(app.live_peers.len());
         return respond_prometheus_metrics(&mut stream);
     }
 
