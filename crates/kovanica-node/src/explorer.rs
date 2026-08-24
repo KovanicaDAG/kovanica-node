@@ -92,6 +92,11 @@ pub fn serve(addr: impl ToSocketAddrs) -> std::io::Result<()> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 app.tick();
+                // Refresh peer gauge periodically so the standalone :9090
+                // metrics listener serves fresh values between scrapes.
+                if app.ticks % 125 == 0 {
+                    set_peer_count(app.mesh.total_peer_count());
+                }
                 app.ws_broadcast_state();
                 thread::sleep(Duration::from_millis(40));
             }
