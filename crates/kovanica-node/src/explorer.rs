@@ -345,7 +345,9 @@ impl Explorer {
                         }
                         match pull_blocks_timeout(&addr, n, timeout) {
                             Ok(k) if k > 0 => {
-                                eprintln!("kovanica p2p pulled {k} records from {addr} (full dump)");
+                                eprintln!(
+                                    "kovanica p2p pulled {k} records from {addr} (full dump)"
+                                );
                                 answered.insert(addr.clone());
                             }
                             Ok(_) => {}
