@@ -3,6 +3,9 @@
 #   curl -sSfL https://raw.githubusercontent.com/KovanicaDAG/kovanica-node/main/scripts/install.sh | bash
 # Optional: KOVANICA_HOME=~/kovanica-node  KOVANICA_PEERS=seed.kovanica.online:9000
 #           bash scripts/install.sh --systemd
+#
+# Prefers a prebuilt binary from the latest GitHub Release (Linux x86_64/arm64,
+# macOS x86_64/arm64); falls back to building from source anywhere else.
 set -euo pipefail
 
 HOME_DIR="${KOVANICA_HOME:-$HOME/kovanica-node}"
@@ -21,33 +24,61 @@ done
 
 need() { command -v "$1" >/dev/null 2>&1 || return 1; }
 
-if need apt-get; then
-  sudo apt-get update -y
-  sudo apt-get install -y build-essential git pkg-config libssl-dev curl tar
-elif need brew; then
-  brew list curl >/dev/null 2>&1 || brew install curl
-elif need dnf; then
-  sudo dnf install -y gcc gcc-c++ make openssl-devel curl tar
-fi
+mkdir -p "$HOME_DIR/bin" "$HOME_DIR/data"
+BIN="$HOME_DIR/bin/kovanica-node"
 
-if ! need rustc || ! need cargo; then
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-fi
-# shellcheck disable=SC1091
-source "$HOME/.cargo/env" 2>/dev/null || true
-export PATH="$HOME/.cargo/bin:$PATH"
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+case "$OS/$ARCH" in
+  Linux/x86_64)              ASSET=kovanica-node-x86_64-linux ;;
+  Linux/aarch64|Linux/arm64) ASSET=kovanica-node-aarch64-linux ;;
+  Darwin/arm64)              ASSET=kovanica-node-aarch64-macos ;;
+  Darwin/x86_64)             ASSET=kovanica-node-x86_64-macos ;;
+  *)                         ASSET="" ;;
+esac
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-echo "downloading kovanica-node main (tarball, no git)…"
-curl -sSfL https://github.com/KovanicaDAG/kovanica-node/archive/refs/heads/main.tar.gz \
-  | tar -xz -C "$TMP"
-SRC="$(find "$TMP" -maxdepth 1 -type d -name 'kovanica-node-*' | head -1)"
-test -n "$SRC"
 
-mkdir -p "$HOME_DIR/bin" "$HOME_DIR/data"
-(cd "$SRC" && cargo build --release -p kovanica-node)
-install -m 755 "$SRC/target/release/kovanica-node" "$HOME_DIR/bin/kovanica-node"
+INSTALLED=0
+if [ -n "$ASSET" ]; then
+  URL="https://github.com/KovanicaDAG/kovanica-node/releases/latest/download/$ASSET.tar.gz"
+  echo "downloading prebuilt binary ($ASSET)…"
+  if curl -fsSL "$URL" -o "$TMP/$ASSET.tar.gz"; then
+    tar -xzf "$TMP/$ASSET.tar.gz" -C "$HOME_DIR/bin"
+    chmod +x "$BIN"
+    INSTALLED=1
+  else
+    echo "no prebuilt binary available — falling back to source build…"
+  fi
+fi
+
+if [ "$INSTALLED" != 1 ]; then
+  if need apt-get; then
+    sudo apt-get update -y
+    sudo apt-get install -y build-essential git pkg-config libssl-dev curl tar
+  elif need brew; then
+    brew list curl >/dev/null 2>&1 || brew install curl
+  elif need dnf; then
+    sudo dnf install -y gcc gcc-c++ make openssl-devel curl tar
+  fi
+
+  if ! need rustc || ! need cargo; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  fi
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env" 2>/dev/null || true
+  export PATH="$HOME/.cargo/bin:$PATH"
+
+  echo "downloading kovanica-node main (tarball, no git)…"
+  curl -sSfL https://github.com/KovanicaDAG/kovanica-node/archive/refs/heads/main.tar.gz \
+    | tar -xz -C "$TMP"
+  SRC="$(find "$TMP" -maxdepth 1 -type d -name 'kovanica-node-*' | head -1)"
+  test -n "$SRC"
+
+  (cd "$SRC" && cargo build --release -p kovanica-node)
+  install -m 755 "$SRC/target/release/kovanica-node" "$BIN"
+fi
 
 cat > "$HOME_DIR/run.sh" << EOF
 #!/usr/bin/env bash
@@ -61,7 +92,7 @@ export KOVANICA_TAP=0
 export KOVANICA_POW=1
 export KOVANICA_ALLOW_RESET=0
 export KOVANICA_DATA="$HOME_DIR/data"
-exec "$HOME_DIR/bin/kovanica-node" explorer 127.0.0.1:8080
+exec "$BIN" explorer 127.0.0.1:8080
 EOF
 chmod +x "$HOME_DIR/run.sh"
 
@@ -82,7 +113,7 @@ Environment=KOVANICA_MINE_SECS=120
 Environment=KOVANICA_FAUCET=0
 Environment=KOVANICA_POW=1
 Environment=KOVANICA_DATA=${HOME_DIR}/data
-ExecStart=${HOME_DIR}/bin/kovanica-node explorer 127.0.0.1:8080
+ExecStart=${BIN} explorer 127.0.0.1:8080
 Restart=on-failure
 RestartSec=5
 
@@ -97,6 +128,6 @@ else
   echo "start: $HOME_DIR/run.sh"
 fi
 
-echo "binary: $HOME_DIR/bin/kovanica-node"
+echo "binary: $BIN"
 echo "check:  curl -s http://127.0.0.1:8080/api/head"
 echo "live:   curl -s https://explorer.kovanica.online/api/head"
