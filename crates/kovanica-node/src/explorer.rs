@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use kovanica_dag::BlockId;
 use kovanica_state::{Address, Transaction};
@@ -35,8 +35,6 @@ const ATOM: u64 = 100_000_000;
 const GENESIS_SUBSIDY: u64 = 50 * ATOM;
 const GENESIS_PREMINE: u64 = 50 * ATOM;
 const NETWORK: &str = "kovanica-testnet";
-const TAP_REWARD_ATOMS: u64 = ATOM / 100;
-const TAP_DAILY: u32 = 40;
 const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 /// Single P2P path: plaintext TCP. Not 80/443/3010/8080 and not libp2p :30333.
 const P2P_LISTEN_DEFAULT: &str = "0.0.0.0:9000";
@@ -121,7 +119,6 @@ struct Explorer {
     origins: HashMap<String, u64>,
     /// Peers that answered our last sync attempt (live connectivity).
     live_peers: HashSet<String>,
-    taps: HashMap<String, (u64, u32)>,
     ws_clients: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,
     /// DHT routing table for the explorer's alpha node.
     dht_table: Option<RoutingTable>,
@@ -156,7 +153,6 @@ impl Explorer {
             peers: Vec::new(),
             origins: HashMap::new(),
             live_peers: HashSet::new(),
-            taps: HashMap::new(),
             ws_clients: Arc::new(Mutex::new(Vec::new())),
             dht_table: None,
             dht_node_id: None,
@@ -410,7 +406,6 @@ impl Explorer {
             peers,
             origins: load_origins(),
             live_peers: HashSet::new(),
-            taps: load_taps(),
             ws_clients: Arc::new(Mutex::new(Vec::new())),
             dht_table: None,
             dht_node_id: Some(node_id),
@@ -670,47 +665,6 @@ fn save_origins(map: &HashMap<String, u64>) {
         .collect();
     let _ = fs::create_dir_all(data_dir());
     let _ = fs::write(origins_path(), body);
-}
-
-fn taps_path() -> PathBuf {
-    data_dir().join("taps.txt")
-}
-
-fn utc_day() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() / 86_400)
-        .unwrap_or(0)
-}
-
-fn load_taps() -> HashMap<String, (u64, u32)> {
-    let mut map = HashMap::new();
-    let Ok(text) = fs::read_to_string(taps_path()) else {
-        return map;
-    };
-    for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(addr) = parts.next() else { continue };
-        let Some(day) = parts.next().and_then(|s| s.parse().ok()) else {
-            continue;
-        };
-        let Some(n) = parts.next().and_then(|s| s.parse().ok()) else {
-            continue;
-        };
-        map.insert(addr.to_ascii_lowercase(), (day, n));
-    }
-    map
-}
-
-fn save_taps(map: &HashMap<String, (u64, u32)>) {
-    let mut rows: Vec<_> = map.iter().collect();
-    rows.sort_by(|a, b| a.0.cmp(b.0));
-    let body: String = rows
-        .into_iter()
-        .map(|(k, (d, n))| format!("{k} {d} {n}\n"))
-        .collect();
-    let _ = fs::create_dir_all(data_dir());
-    let _ = fs::write(taps_path(), body);
 }
 
 fn origins_json(map: &HashMap<String, u64>) -> String {
@@ -1137,43 +1091,6 @@ fn dispatch(
             return Ok(format!(
                 "{{\"ok\":true,\"block\":{}}}",
                 jstr(&block.to_string())
-            ));
-        }
-        "tap" => {
-            if !env_flag("KOVANICA_TAP", true) {
-                return Err("tap disabled".into());
-            }
-            let to = parse_addr(q.get("to").ok_or("to address required")?)?;
-            let want = parse_u64(q, "amount", TAP_REWARD_ATOMS)?.min(TAP_REWARD_ATOMS);
-            if want == 0 {
-                return Err("amount required".into());
-            }
-            let key = to.to_hex();
-            let day = utc_day();
-            let used = {
-                let e = app.taps.entry(key.clone()).or_insert((day, 0));
-                if e.0 != day {
-                    *e = (day, 0);
-                }
-                e.1
-            };
-            if used >= TAP_DAILY {
-                return Err("daily tap limit".into());
-            }
-            let sent = app
-                .mesh
-                .send_to(&node, 1, want, to)
-                .map_err(|e| e.to_string())?;
-            if let Some(e) = app.taps.get_mut(&key) {
-                e.1 = e.1.saturating_add(1);
-            }
-            save_taps(&app.taps);
-            app.mesh.drain(8);
-            return Ok(format!(
-                "{{\"ok\":true,\"block\":{},\"amount\":{},\"left\":{}}}",
-                jstr(&sent.to_string()),
-                want,
-                TAP_DAILY.saturating_sub(used + 1)
             ));
         }
         "fee_estimate" => {
@@ -1790,51 +1707,16 @@ mod tests {
     }
 
     #[test]
-    fn tap_credits_an_address_within_daily_cap() {
+    fn tap_action_is_removed() {
         use kovanica_state::KeyPair;
 
         let mut app = Explorer::boot();
-        app.mining = false;
         let to = KeyPair::from_u64(9);
         let mut q = std::collections::HashMap::new();
         q.insert("to".into(), to.address().to_hex());
-        q.insert("amount".into(), TAP_REWARD_ATOMS.to_string());
-        let body = dispatch(&mut app, "tap", &q).unwrap();
-        assert!(body.contains("\"ok\":true"));
-        assert_eq!(
-            app.mesh
-                .node("alpha")
-                .unwrap()
-                .balance(&to.address())
-                .unwrap(),
-            u128::from(TAP_REWARD_ATOMS)
-        );
-        app.taps
-            .insert(to.address().to_hex().to_lowercase(), (utc_day(), TAP_DAILY));
-        let capped = dispatch(&mut app, "tap", &q).unwrap_err();
-        assert!(capped.contains("daily tap limit"));
-    }
-
-    #[test]
-    fn tap_accepts_kvnc_addresses() {
-        use kovanica_state::KeyPair;
-
-        let mut app = Explorer::boot();
-        app.mining = false;
-        let to = KeyPair::from_u64(11);
-        let mut q = std::collections::HashMap::new();
-        q.insert("to".into(), to.address().to_kvnc());
         q.insert("amount".into(), "1".into());
-        let body = dispatch(&mut app, "tap", &q).unwrap();
-        assert!(body.contains("\"ok\":true"));
-        assert_eq!(
-            app.mesh
-                .node("alpha")
-                .unwrap()
-                .balance(&to.address())
-                .unwrap(),
-            1u128
-        );
+        let err = dispatch(&mut app, "tap", &q).unwrap_err();
+        assert!(err.contains("unknown action"));
     }
 
     #[test]

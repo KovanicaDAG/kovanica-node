@@ -30,7 +30,7 @@ fn main() {
             println!("  explorer  HTTP UI + JSON API (default 0.0.0.0:8080)");
             println!("            TCP P2P on KOVANICA_LISTEN (default 0.0.0.0:9000)");
             println!("            env: KOVANICA_DATA  KOVANICA_MINE=0|1  KOVANICA_MINE_SECS=120");
-            println!("                 KOVANICA_FAUCET=0|1  KOVANICA_TAP=0|1");
+            println!("            KOVANICA_FAUCET=0|1");
             println!("                 KOVANICA_ALLOW_RESET=0|1  KOVANICA_OPERATOR=0|1");
             println!("                 KOVANICA_LISTEN=0.0.0.0:9000   (off to disable)");
             println!("                 KOVANICA_PEERS=seed.kovanica.online:9000");
