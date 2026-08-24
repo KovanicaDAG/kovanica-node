@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot KovanicaDAG node install — no git clone.
 #   curl -sSfL https://raw.githubusercontent.com/KovanicaDAG/kovanica-node/main/scripts/install.sh | bash
-# Optional: KOVANICA_HOME=~/kovanica-node  KOVANICA_PEERS=seed.kovanica.online:9000
+# Optional: KOVANICA_HOME=~/kovanica-node  KOVANICA_PEERS=seed.kovanica.online:9000,seed3.kovanica.online:9000
 #           bash scripts/install.sh --systemd
 #
 # Prefers a prebuilt binary from the latest GitHub Release (Linux x86_64/arm64,
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 HOME_DIR="${KOVANICA_HOME:-$HOME/kovanica-node}"
-SEED="${KOVANICA_PEERS:-seed.kovanica.online:9000}"
+SEED="${KOVANICA_PEERS:-seed.kovanica.online:9000,seed3.kovanica.online:9000}"
 SYSTEMD=0
 for a in "$@"; do
   case "$a" in
