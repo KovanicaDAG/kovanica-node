@@ -17,6 +17,7 @@
 //! tip                                 selected (heaviest) tip
 //! len                                 number of blocks
 //! save <path> / load <path>          snapshot persistence
+//! checkpoint <path> / load_checkpoint <path>  finality checkpoint persistence
 //! ```
 
 use kovanica_state::Address;
@@ -25,9 +26,10 @@ use crate::node::Node;
 
 /// The help text listing every command.
 pub const HELP: &str = "commands: help | genesis <k> <subsidy> <amount> <seed> | \
+genesis_finality <k> <subsidy> <amount> <seed> <finality_depth> | \
 address <seed> | balance <seed|addr-hex> | send <from-seed> <amount> <to-seed> | \
 pool <from-seed> <amount> <to-seed> | produce | pending | tips | tip | len | \
-save <path> | load <path>";
+save <path> | load <path> | checkpoint <path> | load_checkpoint <path>";
 
 /// Run one command line against `node`, returning the response line. Never
 /// panics on bad input; malformed commands produce an `err ...` response.
@@ -57,6 +59,21 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
                     u64_arg(subsidy)?,
                     u64_arg(amount)?,
                     u64_arg(seed)?,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(format!("genesis {genesis} founder {founder}"))
+        }
+
+        "genesis_finality" => {
+            let [k, subsidy, amount, seed, finality_depth] = fixed::<5>(&args)?;
+            let (genesis, founder) = node
+                .genesis_with_finality(
+                    u16_arg(k)?,
+                    u64_arg(subsidy)?,
+                    u64_arg(amount)?,
+                    u64_arg(seed)?,
+                    u64_arg(finality_depth)?,
+                    u64::MAX,
                 )
                 .map_err(|e| e.to_string())?;
             Ok(format!("genesis {genesis} founder {founder}"))
@@ -124,6 +141,18 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
         "load" => {
             let [path] = fixed::<1>(&args)?;
             node.load(path).map_err(|e| e.to_string())?;
+            Ok("loaded".to_string())
+        }
+
+        "checkpoint" => {
+            let [path] = fixed::<1>(&args)?;
+            node.save_checkpoint(path).map_err(|e| e.to_string())?;
+            Ok(format!("checkpoint saved {path}"))
+        }
+
+        "load_checkpoint" => {
+            let [path] = fixed::<1>(&args)?;
+            node.load_checkpoint(path).map_err(|e| e.to_string())?;
             Ok("loaded".to_string())
         }
 

@@ -71,6 +71,7 @@
 
 pub mod keys;
 pub mod ledger;
+pub mod spv;
 pub mod store;
 pub mod tx;
 pub mod utxo;
@@ -78,8 +79,11 @@ pub mod validation;
 
 pub use keys::{verify, Address, KeyPair};
 pub use ledger::{
-    apply_block, apply_dag, BlockSummary, Ledger, LedgerError, LedgerInsertError, LedgerRun,
-    LedgerSnapshotError,
+    apply_block, apply_dag, BlockSummary, HalvingSchedule, Ledger, LedgerCheckpointError,
+    LedgerError, LedgerInsertError, LedgerRun, LedgerSnapshotError, DEFAULT_HALVING_ERA,
+};
+pub use spv::{
+    generate_merkle_proof, merkle_root, BlockFilter, BlockHeader, MerkleProof, SpvClient, SpvError,
 };
 pub use store::{LedgerStore, StoreError};
 pub use tx::{
@@ -87,4 +91,7 @@ pub use tx::{
     TxInput, TxOutput,
 };
 pub use utxo::UtxoSet;
-pub use validation::{validate_block_payload, BlockValidationError, TxStructureValidator};
+pub use validation::{
+    validate_block_payload, BlockValidationError, TxStructureValidator, MAX_BLOCK_PAYLOAD_SIZE,
+    MAX_TXS_PER_BLOCK, MAX_TX_SIZE,
+};

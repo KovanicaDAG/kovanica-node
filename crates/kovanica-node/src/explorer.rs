@@ -2,18 +2,27 @@
 //! Rust node. The page never reimplements consensus — it only renders what
 //! [`Mesh`] / [`Node`] already computed.
 
+use base64::Engine;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kovanica_dag::BlockId;
 use kovanica_state::{Address, Transaction};
 
-use crate::net::{encode_records, pull_blocks_timeout, serve_exchange};
+use crate::dht::{NodeId, PeerContact, RoutingTable};
+use crate::dns_seed::{DnsSeedConfig, DnsSeedResolver};
+use crate::metrics::{
+    init_metrics, record_explorer_http_request, render_prometheus, set_explorer_ws_clients,
+};
+use crate::net::{
+    encode_records, pull_blocks_timeout, serve_exchange, serve_headers_first, sync_headers_first,
+};
 use crate::node::{Node, HALVING_ERA};
 use crate::p2p::Mesh;
 
@@ -24,7 +33,7 @@ const DOCS: &str = include_str!("../../../TESTNET.md");
 const ATOM: u64 = 100_000_000;
 const GENESIS_SUBSIDY: u64 = 50 * ATOM;
 const GENESIS_PREMINE: u64 = 50 * ATOM;
-const NETWORK: &str = "kovanica-testnet-1";
+const NETWORK: &str = "kovanica-testnet";
 const TAP_REWARD_ATOMS: u64 = ATOM / 100;
 const TAP_DAILY: u32 = 40;
 const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -32,12 +41,46 @@ const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 const P2P_LISTEN_DEFAULT: &str = "0.0.0.0:9000";
 const P2P_BOOTSTRAP: &str = "seed.kovanica.online:9000";
 
+/// WebSocket message types for real-time updates
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+enum WsMsg {
+    #[serde(rename = "block")]
+    Block { id: String, blue_score: u64 },
+    #[serde(rename = "tx")]
+    Tx {
+        id: String,
+        from: String,
+        to: String,
+        amount: u64,
+    },
+    #[serde(rename = "tip")]
+    Tip { id: String, blue_score: u64 },
+    #[serde(rename = "peer")]
+    Peer { addr: String, connected: bool },
+    #[serde(rename = "state")]
+    State { snapshot: String },
+    #[serde(rename = "ping")]
+    Ping,
+    #[serde(rename = "pong")]
+    Pong,
+}
+
 /// Bind `addr` (e.g. `0.0.0.0:8080`) and serve the explorer until killed.
 pub fn serve(addr: impl ToSocketAddrs) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
     let bound = listener.local_addr()?;
     eprintln!("kovanica explorer on http://{bound}");
+
+    // Initialize metrics (Prometheus + tracing)
+    let metrics_addr = "0.0.0.0:9090";
+    if let Err(e) = init_metrics(metrics_addr) {
+        eprintln!("Failed to init metrics: {e}");
+    } else {
+        eprintln!("kovanica metrics on http://{metrics_addr}/metrics");
+    }
+
     let mut app = Explorer::boot_persist();
     loop {
         match listener.accept() {
@@ -48,6 +91,7 @@ pub fn serve(addr: impl ToSocketAddrs) -> std::io::Result<()> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 app.tick();
+                app.ws_broadcast_state();
                 thread::sleep(Duration::from_millis(40));
             }
             Err(e) => return Err(e),
@@ -70,9 +114,21 @@ struct Explorer {
     peers: Vec<String>,
     origins: HashMap<String, u64>,
     taps: HashMap<String, (u64, u32)>,
+    ws_clients: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,
+    /// DHT routing table for the explorer's alpha node.
+    dht_table: Option<RoutingTable>,
+    /// DHT NodeId for the explorer.
+    dht_node_id: Option<NodeId>,
+    /// DNS seed resolver for multi-seed discovery.
+    dns_resolver: Option<DnsSeedResolver<crate::dns_seed::StdDnsResolver>>,
+    /// Last time DHT bootstrap was attempted.
+    last_dht_bootstrap: u64,
+    /// Last time DHT peer replenishment was attempted.
+    last_dht_replenish: u64,
 }
 
 impl Explorer {
+    /// Test constructor: a fresh in-memory mesh, no persistence or sockets.
     #[cfg(test)]
     fn boot() -> Self {
         let mut mesh = line_mesh();
@@ -81,7 +137,7 @@ impl Explorer {
             mesh,
             selected: "alpha".into(),
             mining: false,
-            mine_every: 120,
+            mine_every: mine_every_ticks(),
             ticks: 0,
             rotate: 0,
             faucet: true,
@@ -92,6 +148,12 @@ impl Explorer {
             peers: Vec::new(),
             origins: HashMap::new(),
             taps: HashMap::new(),
+            ws_clients: Arc::new(Mutex::new(Vec::new())),
+            dht_table: None,
+            dht_node_id: None,
+            dns_resolver: None,
+            last_dht_bootstrap: 0,
+            last_dht_replenish: 0,
         }
     }
 
@@ -99,6 +161,7 @@ impl Explorer {
         self.mesh.tick();
         self.ticks += 1;
         self.tick_p2p();
+        self.tick_dht();
         if self.mining && self.mine_every > 0 && self.ticks % self.mine_every == 0 {
             let names = self.mesh.names();
             if !names.is_empty() {
@@ -110,6 +173,101 @@ impl Explorer {
         }
     }
 
+    /// DHT background task: bootstrap from DNS seeds, discover peers, replenish connections.
+    fn tick_dht(&mut self) {
+        // Initialize DHT on first tick
+        if self.dht_table.is_none() {
+            if let Some(n) = self.mesh.node_mut("alpha") {
+                let node_id = NodeId::random();
+                n.init_dht_routing_table(node_id, 8);
+                self.dht_node_id = Some(node_id);
+                self.dht_table = Some(n.dht_routing_table().unwrap().clone());
+
+                // Initialize DNS resolver
+                let _config = DnsSeedConfig::default();
+                self.dns_resolver = Some(DnsSeedResolver::new(crate::dns_seed::StdDnsResolver));
+            }
+        }
+
+        // Periodic DHT bootstrap from DNS seeds (every ~5 minutes)
+        if self.ticks > self.last_dht_bootstrap + 7500 {
+            // 7500 ticks * 40ms = 300s = 5min
+            self.last_dht_bootstrap = self.ticks;
+            if let Some(resolver) = &self.dns_resolver {
+                let seed_addrs = resolver.resolve_all();
+                if !seed_addrs.is_empty() {
+                    eprintln!("kovanica dht: resolved {} seed addresses", seed_addrs.len());
+                    // Convert seed addresses to peer contacts for bootstrap
+                    let mut seed_contacts = Vec::new();
+                    for addr in seed_addrs {
+                        // Generate a deterministic NodeId for each seed address
+                        let seed_id = NodeId::from_public_key(addr.to_string().as_bytes());
+                        seed_contacts.push(PeerContact::new(seed_id, addr.to_string()));
+                    }
+                    if let Some(n) = self.mesh.node_mut("alpha") {
+                        if let Ok(added) = n.dht_bootstrap(seed_contacts) {
+                            if added > 0 {
+                                eprintln!(
+                                    "kovanica dht: bootstrapped {} new contacts from DNS seeds",
+                                    added
+                                );
+                                // Sync local dht_table with node's table
+                                self.dht_table = n.dht_routing_table().cloned();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Periodic DHT peer replenishment (every ~2 minutes)
+        if self.ticks > self.last_dht_replenish + 3000 {
+            // 3000 ticks * 40ms = 120s = 2min
+            self.last_dht_replenish = self.ticks;
+            // Prune unreachable peers from DHT tables
+            if let Some(n) = self.mesh.node_mut("alpha") {
+                if let Some(table) = n.dht_routing_table_mut() {
+                    let pruned = table.prune_unresponsive(3);
+                    if !pruned.is_empty() {
+                        eprintln!("kovanica dht: pruned {} unreachable peers", pruned.len());
+                    }
+                    // Sync local dht_table
+                    self.dht_table = n.dht_routing_table().cloned();
+                }
+            }
+            // Replenish peer connections from DHT (separate borrow)
+            let added = self.mesh.replenish_peers_from_dht(8);
+            if added > 0 {
+                eprintln!(
+                    "kovanica dht: replenished {} peer connections from DHT",
+                    added
+                );
+            }
+        }
+    }
+
+    fn ws_broadcast_state(&self) {
+        if self.ws_clients.lock().unwrap().is_empty() {
+            return;
+        }
+        let snapshot = self.snapshot_json();
+        let msg = WsMsg::State { snapshot };
+        let text = serde_json::to_string(&msg).unwrap_or_default();
+        let frame = ws_frame_text(&text);
+        let mut clients = self.ws_clients.lock().unwrap();
+        clients.retain_mut(|client| {
+            if let Ok(mut c) = client.lock() {
+                c.write_all(&frame).is_ok() && c.flush().is_ok()
+            } else {
+                false
+            }
+        });
+    }
+
+    fn snapshot_json(&self) -> String {
+        snapshot(self)
+    }
+
     fn tick_p2p(&mut self) {
         let mut incoming = Vec::new();
         for listener in &self.listen {
@@ -119,15 +277,28 @@ impl Explorer {
         }
         for (mut stream, peer) in incoming {
             if let Some(n) = self.mesh.node_mut("alpha") {
-                match serve_exchange(&mut stream, n, Duration::from_millis(800)) {
-                    Ok(got) => {
-                        eprintln!("kovanica p2p exchanged with {peer} (peer sent {got} records)");
-                        if got > 0 {
-                            persist_all(&self.mesh);
-                        }
+                // Try headers-first sync serve first
+                match serve_headers_first(&mut stream, n, Duration::from_millis(800)) {
+                    Ok(()) => {
+                        eprintln!("kovanica p2p headers-first served {peer}");
+                        persist_all(&self.mesh);
                     }
-                    Err(e) => {
-                        eprintln!("kovanica p2p exchange {peer}: {e}");
+                    Err(_e) => {
+                        // Fall back to legacy full-dump exchange
+                        stream.set_nonblocking(false).unwrap();
+                        match serve_exchange(&mut stream, n, Duration::from_millis(800)) {
+                            Ok(got) => {
+                                eprintln!(
+                                    "kovanica p2p exchanged with {peer} (peer sent {got} records)"
+                                );
+                                if got > 0 {
+                                    persist_all(&self.mesh);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("kovanica p2p exchange {peer}: {e}");
+                            }
+                        }
                     }
                 }
             }
@@ -144,14 +315,32 @@ impl Explorer {
         }
         if let Some(n) = self.mesh.node_mut("alpha") {
             for addr in peers {
-                match pull_blocks_timeout(&addr, n, timeout) {
-                    Ok(k) if k > 0 => {
-                        eprintln!("kovanica p2p pulled {k} records from {addr}");
+                // Try headers-first sync first (more efficient)
+                match sync_headers_first(&addr, n, timeout) {
+                    Ok(stats) if stats.bodies_applied > 0 => {
+                        eprintln!(
+                            "kovanica p2p headers-first sync from {addr}: {} headers, {} bodies applied",
+                            stats.headers_received, stats.bodies_applied
+                        );
                     }
                     Ok(_) => {}
                     Err(e) => {
+                        // Fall back to legacy full-dump pull
                         if log {
-                            eprintln!("kovanica p2p pull {addr}: {e}");
+                            eprintln!("kovanica p2p headers-first failed {addr}: {e}, falling back to full dump");
+                        }
+                        match pull_blocks_timeout(&addr, n, timeout) {
+                            Ok(k) if k > 0 => {
+                                eprintln!(
+                                    "kovanica p2p pulled {k} records from {addr} (full dump)"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                if log {
+                                    eprintln!("kovanica p2p pull {addr}: {e}");
+                                }
+                            }
                         }
                     }
                 }
@@ -164,7 +353,12 @@ impl Explorer {
         let _ = fs::create_dir_all(data_dir());
         ensure_network();
         let mut mesh = Mesh::new();
-        mesh.add("alpha", load_or_genesis("alpha"));
+        // Create alpha node with DHT
+        let mut alpha_node = load_or_genesis("alpha");
+        let node_id = NodeId::random();
+        alpha_node.init_dht_routing_table(node_id, 8);
+        mesh.add_with_dht("alpha", alpha_node, node_id);
+
         if env_flag("KOVANICA_DEMO_MESH", false) {
             mesh.add("beta", load_or_genesis("beta"));
             mesh.add("gamma", load_or_genesis("gamma"));
@@ -184,6 +378,8 @@ impl Explorer {
         if !listen_addr.is_empty() || !peers.is_empty() {
             eprintln!("kovanica p2p listen={listen_addr} peers={peers:?}");
         }
+        let _config = DnsSeedConfig::default();
+        let dns_resolver = Some(DnsSeedResolver::new(crate::dns_seed::StdDnsResolver));
         let mut app = Self {
             mesh,
             selected: "alpha".into(),
@@ -199,6 +395,12 @@ impl Explorer {
             peers,
             origins: load_origins(),
             taps: load_taps(),
+            ws_clients: Arc::new(Mutex::new(Vec::new())),
+            dht_table: None,
+            dht_node_id: Some(node_id),
+            dns_resolver,
+            last_dht_bootstrap: 0,
+            last_dht_replenish: 0,
         };
         app.sync_peers(Duration::from_secs(3), true);
         app
@@ -297,6 +499,13 @@ fn genesis_node() -> Node {
     node
 }
 
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) => matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"),
+        Err(_) => default,
+    }
+}
+
 /// Explorer loop sleeps 40ms per tick.
 const TICK_MS: u64 = 40;
 /// Default public mine interval when `KOVANICA_MINE=1` (seconds).
@@ -308,13 +517,6 @@ fn mine_every_ticks() -> u64 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(MINE_SECS_DEFAULT);
     (secs.saturating_mul(1000) / TICK_MS).max(1)
-}
-
-fn env_flag(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(v) => matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"),
-        Err(_) => default,
-    }
 }
 
 fn ensure_network() {
@@ -335,29 +537,72 @@ fn bind_p2p() -> Vec<TcpListener> {
         eprintln!("kovanica p2p listen disabled");
         return Vec::new();
     }
-    let mut addrs = vec![raw.clone()];
+    let listeners = bind_p2p_addrs(&raw);
+    if listeners.is_empty() && !raw.is_empty() {
+        eprintln!("kovanica p2p listen {raw} produced no listeners");
+    }
+    listeners
+}
+
+fn bind_p2p_addrs(raw: &str) -> Vec<TcpListener> {
+    let mut addrs = vec![raw.to_string()];
     if let Some(port) = raw.strip_prefix("0.0.0.0:") {
         addrs.push(format!("[::]:{port}"));
     }
     let mut out = Vec::new();
     for addr in addrs {
-        match TcpListener::bind(&addr) {
-            Ok(listener) => {
-                if let Err(e) = listener.set_nonblocking(true) {
-                    eprintln!("kovanica p2p listen {addr} nonblocking failed: {e}");
-                    continue;
+        let listener = if addr.starts_with("[::]:") {
+            // A wildcard [::] socket with the default v6only=0 covers IPv4
+            // too, so it would collide with the 0.0.0.0 listener already
+            // bound above (EADDRINUSE). Mark it v6-only first — that needs a
+            // setsockopt before bind, hence socket2 rather than std.
+            match bind_v6_only(&addr) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    eprintln!("kovanica p2p listen {addr} failed: {e}");
+                    None
                 }
-                if let Ok(local) = listener.local_addr() {
-                    eprintln!("kovanica p2p listen {local}");
+            }
+        } else {
+            match TcpListener::bind(&addr) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    eprintln!("kovanica p2p listen {addr} failed: {e}");
+                    None
                 }
-                out.push(listener);
             }
-            Err(e) => {
-                eprintln!("kovanica p2p listen {addr} failed: {e}");
-            }
+        };
+        let Some(listener) = listener else { continue };
+        if let Err(e) = listener.set_nonblocking(true) {
+            eprintln!("kovanica p2p listen {addr} nonblocking failed: {e}");
+            continue;
         }
+        if let Ok(local) = listener.local_addr() {
+            eprintln!("kovanica p2p listen {local}");
+        }
+        out.push(listener);
     }
     out
+}
+
+/// Bind an `[::]:port` listener with IPV6_V6ONLY set, so it accepts IPv6
+/// only and leaves the IPv4 wildcard to its sibling socket.
+fn bind_v6_only(addr: &str) -> std::io::Result<TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let sock_addr: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
+    let socket = Socket::new(
+        Domain::for_address(sock_addr),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )?;
+    socket.set_only_v6(true)?;
+    socket.bind(&sock_addr.into())?;
+    socket.listen(128)?;
+    let listener: std::net::TcpListener = socket.into();
+    listener.set_nonblocking(true)?;
+    Ok(listener)
 }
 
 fn peer_list() -> Vec<String> {
@@ -461,6 +706,61 @@ fn origins_json(map: &HashMap<String, u64>) -> String {
     format!("{{\"pulses\":{}}}", jarr(items))
 }
 
+fn handle_websocket(app: &mut Explorer, mut stream: TcpStream, req: &str) -> std::io::Result<()> {
+    // Extract Sec-WebSocket-Key
+    let key = req
+        .lines()
+        .find(|l| l.to_lowercase().starts_with("sec-websocket-key:"))
+        .and_then(|l| l.split(':').nth(1))
+        .map(|s| s.trim())
+        .unwrap_or("");
+    let accept = {
+        use sha1::{Digest, Sha1};
+        let mut hasher = Sha1::new();
+        hasher.update(key.as_bytes());
+        hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+    };
+    let resp = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    );
+    stream.write_all(resp.as_bytes())?;
+    stream.flush()?;
+
+    // Register client
+    let client = Arc::new(Mutex::new(stream));
+    app.ws_clients.lock().unwrap().push(client.clone());
+    set_explorer_ws_clients(app.ws_clients.lock().unwrap().len());
+
+    // Read loop (handle ping/pong, keep alive)
+    let mut buf = [0u8; 1024];
+    loop {
+        match client.lock().unwrap().read(&mut buf) {
+            Ok(0) => break, // Connection closed
+            Ok(n) => {
+                // Simple WebSocket frame parsing (just handle ping/pong)
+                if n >= 2 && (buf[0] & 0x80) != 0 && (buf[0] & 0x0F) == 0x9 {
+                    // Ping frame - respond with pong
+                    let pong = vec![0x8A, 0x00]; // Pong frame, no payload
+                    if let Ok(mut c) = client.lock() {
+                        let _ = c.write_all(&pong);
+                        let _ = c.flush();
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Unregister client
+    app.ws_clients
+        .lock()
+        .unwrap()
+        .retain(|c| !Arc::ptr_eq(c, &client));
+    set_explorer_ws_clients(app.ws_clients.lock().unwrap().len());
+    Ok(())
+}
+
 fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -477,6 +777,19 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
     let method = parts.next().unwrap_or("GET");
     let target = parts.next().unwrap_or("/");
     let (path, query) = split_query(target);
+
+    // Record HTTP request metric
+    record_explorer_http_request(path, 200); // Will update with actual status later
+
+    // WebSocket upgrade
+    if method == "GET" && path == "/ws" && req.contains("Upgrade: websocket") {
+        return handle_websocket(app, stream, &req);
+    }
+
+    // Prometheus metrics endpoint
+    if method == "GET" && path == "/metrics" {
+        return respond_prometheus_metrics(&mut stream);
+    }
 
     if method == "HEAD" && (path == "/" || path == "/index.html" || path == "/wallet") {
         return respond(&mut stream, 200, "text/html; charset=utf-8", b"");
@@ -620,6 +933,50 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
         }
     }
     respond(&mut stream, 404, "text/plain; charset=utf-8", b"not found")
+}
+
+fn estimate_fee(node: &Node, _amount: u64) -> Result<u64, String> {
+    let pending = node.pending_txs();
+    if pending.is_empty() {
+        return Ok(node.min_fee());
+    }
+
+    let mut fees: Vec<u64> = pending
+        .iter()
+        .filter_map(|t| {
+            // Approximate fee from transaction
+            if let Ok(ledger) = node.ledger() {
+                let utxo = ledger.ledger_state();
+                let mut sum_in = 0u64;
+                for input in t.inputs() {
+                    if let Some(prev) = utxo.get(&input.outpoint) {
+                        sum_in = sum_in.saturating_add(prev.value);
+                    }
+                }
+                let sum_out: u64 = t.outputs().iter().map(|o| o.value).sum();
+                if sum_in > sum_out {
+                    Some(sum_in - sum_out)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if fees.is_empty() {
+        return Ok(node.min_fee());
+    }
+
+    fees.sort();
+    let _median = fees[fees.len() / 2];
+    let p90_idx = (fees.len() as f64 * 0.9).floor() as usize;
+    let p90 = fees[p90_idx.min(fees.len() - 1)];
+
+    // Use p90 fee for faster confirmation, minimum at node's min_fee
+    let base = std::cmp::max(node.min_fee(), p90);
+    Ok(base)
 }
 
 fn dispatch(
@@ -800,6 +1157,12 @@ fn dispatch(
                 TAP_DAILY.saturating_sub(used + 1)
             ));
         }
+        "fee_estimate" => {
+            let amount = parse_u64(q, "amount", 0)?;
+            let n = app.mesh.node(&node).ok_or("unknown node")?;
+            let fee = estimate_fee(n, amount)?;
+            return Ok(format!("{{\"ok\":true,\"fee\":{}}}", fee));
+        }
         other => return Err(format!("unknown action {other}")),
     }
     app.mesh.drain(8);
@@ -973,6 +1336,18 @@ fn respond_download(
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
+}
+
+fn respond_prometheus_metrics(stream: &mut TcpStream) -> std::io::Result<()> {
+    // Render the live recorder payload (same series the dedicated scrape
+    // endpoint on :9090 serves).
+    let body = render_prometheus();
+    respond(
+        stream,
+        200,
+        "text/plain; version=0.0.4; charset=utf-8",
+        body.as_bytes(),
+    )
 }
 
 fn snapshot(app: &Explorer) -> String {
@@ -1205,6 +1580,24 @@ fn jarr(items: impl Iterator<Item = String>) -> String {
     out.push(']');
     out
 }
+
+fn ws_frame_text(text: &str) -> Vec<u8> {
+    let payload = text.as_bytes();
+    let mut frame = Vec::with_capacity(2 + payload.len());
+    frame.push(0x81); // FIN + text frame
+    if payload.len() < 126 {
+        frame.push(payload.len() as u8);
+    } else if payload.len() < 65536 {
+        frame.push(126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        frame.push(127);
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    frame.extend_from_slice(payload);
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1221,7 +1614,7 @@ mod tests {
         assert!(json.contains("\"token\":\"KVNC\""));
         assert!(json.contains("\"ui\":\"v5\""));
         assert!(json.contains("\"pow\":true"));
-        assert!(json.contains("\"network\":\"kovanica-testnet-1\""));
+        assert!(json.contains("\"network\":\"kovanica-testnet\""));
         assert!(json.contains("\"subsidy\":5000000000"));
     }
 
@@ -1398,8 +1791,51 @@ mod tests {
             u128::from(TAP_REWARD_ATOMS)
         );
         app.taps
-            .insert(to.address().to_hex(), (utc_day(), TAP_DAILY));
+            .insert(to.address().to_hex().to_lowercase(), (utc_day(), TAP_DAILY));
         let capped = dispatch(&mut app, "tap", &q).unwrap_err();
         assert!(capped.contains("daily tap limit"));
+    }
+
+    #[test]
+    fn tap_accepts_kvnc_addresses() {
+        use kovanica_state::KeyPair;
+
+        let mut app = Explorer::boot();
+        app.mining = false;
+        let to = KeyPair::from_u64(11);
+        let mut q = std::collections::HashMap::new();
+        q.insert("to".into(), to.address().to_kvnc());
+        q.insert("amount".into(), "1".into());
+        let body = dispatch(&mut app, "tap", &q).unwrap();
+        assert!(body.contains("\"ok\":true"));
+        assert_eq!(
+            app.mesh
+                .node("alpha")
+                .unwrap()
+                .balance(&to.address())
+                .unwrap(),
+            1u128
+        );
+    }
+
+    #[test]
+    fn dual_stack_binds_v4_and_v6_on_the_same_port() {
+        // Skip where IPv6 is unavailable (some CI runners / containers).
+        if TcpListener::bind("[::]:0").is_err() {
+            return;
+        }
+        // Derive the port from the pid so parallel tests rarely collide.
+        let port: u16 = 20000 + u16::try_from(std::process::id() % 20_000).unwrap_or(0);
+        let raw = format!("0.0.0.0:{port}");
+        let listeners = bind_p2p_addrs(&raw);
+        assert_eq!(listeners.len(), 2, "want one v4 and one v6 listener");
+        for l in &listeners {
+            assert_eq!(l.local_addr().unwrap().port(), port);
+        }
+        // The v6 listener must genuinely be reachable on the v6 wildcard.
+        let mut c =
+            std::net::TcpStream::connect(format!("[::1]:{port}")).expect("v6 loopback connect");
+        use std::io::Write as _;
+        let _ = c.write_all(b"x"); // accepted is all we prove; write may race close
     }
 }

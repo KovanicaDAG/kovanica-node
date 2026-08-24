@@ -12,14 +12,17 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kovanica_dag::{pow, Block, BlockId, Dag, DagError};
+use kovanica_dag::{pow, Block, BlockId, Dag};
 use kovanica_state::{
-    apply_block, decode_block_payload, encode_block_payload, verify, Address, KeyPair, Ledger,
-    LedgerError, LedgerInsertError, LedgerStore, OutPoint, Sig, Transaction, TxId, TxOutput,
-    UtxoSet,
+    apply_block, decode_block_payload, encode_block_payload, verify, Address, HalvingSchedule,
+    KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore, OutPoint, Sig, Transaction, TxId,
+    TxOutput, UtxoSet, DEFAULT_HALVING_ERA,
 };
 
-use crate::mempool::Mempool;
+use crate::mempool_v2::{MempoolConfig, MempoolV2};
+use crate::metrics::{
+    record_block_produced, record_mempool_evicted, record_mempool_promoted, set_mempool_counts,
+};
 
 /// How far ahead of the local wall clock a received block's timestamp may sit
 /// before the node rejects it: two hours, in milliseconds. This is **node
@@ -72,6 +75,8 @@ pub enum NodeError {
         /// The local wall-clock time it was checked against, in milliseconds.
         now_ms: u64,
     },
+    /// A mempool operation failed.
+    Mempool(String),
 }
 
 impl core::fmt::Display for NodeError {
@@ -91,8 +96,9 @@ impl core::fmt::Display for NodeError {
             NodeError::Snapshot(e) => write!(f, "bad snapshot: {e}"),
             NodeError::TimestampTooFarInFuture { timestamp_ms, now_ms } => write!(
                 f,
-                "block timestamp {timestamp_ms}ms is more than {MAX_FUTURE_DRIFT_MS}ms ahead of local time {now_ms}ms"
+                "block timestamp ({timestamp_ms} ms) is more than 2h ahead of local clock ({now_ms} ms)"
             ),
+            NodeError::Mempool(err) => write!(f, "mempool error: {err}"),
         }
     }
 }
@@ -125,7 +131,7 @@ pub struct Prepared {
 }
 
 /// The wire form of a block for gossip: everything a peer needs to re-insert it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockRecord {
     /// The block's parents.
     pub parents: Vec<BlockId>,
@@ -140,14 +146,62 @@ pub struct BlockRecord {
     pub txs: Vec<Transaction>,
 }
 
+/// A MerkleBlock response for SPV clients: proves transaction inclusion in a block
+/// with zero full-payload leakage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MerkleBlock {
+    /// The block ID containing the transaction.
+    pub block_id: BlockId,
+    /// The block's BLAKE3 Merkle root.
+    pub merkle_root: [u8; 32],
+    /// Total number of transactions in the block.
+    pub tx_count: u32,
+    /// Inclusion proof for the matching transaction.
+    pub proof: Option<kovanica_state::spv::MerkleProof>,
+    /// The matching transaction data.
+    pub matched_tx: Option<Transaction>,
+}
+
+/// A block header: the block's consensus fields plus a commitment to its
+/// payload, but without the payload itself. Headers are **untrusted inventory**
+/// — a peer advertises which blocks it has by sending headers; the receiver
+/// decides which bodies to fetch by hash. Trust is anchored when the body
+/// arrives: the receiver checks that `BLAKE3(payload) == payload_hash` and that
+/// `Block::new(parents, work, timestamp_ms, nonce, payload).id() == id`. Until
+/// that check passes the header is just a hint (see `Block::id` — the id
+/// commits to the raw payload bytes, not to their hash, so a header alone
+/// cannot self-validate, exactly like Bitcoin's headers commit to transactions
+/// via the merkle root).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockHeader {
+    /// The block's BLAKE3 id (over parents, work, timestamp, nonce, and the
+    /// full payload — see `Block::id`).
+    pub id: BlockId,
+    /// The block's parents (sorted, de-duplicated — as `Block` stores them).
+    pub parents: Vec<BlockId>,
+    /// The block's work weight.
+    pub work: u128,
+    /// The block's timestamp, in milliseconds.
+    pub timestamp_ms: u64,
+    /// The block's proof-of-work nonce.
+    pub nonce: u64,
+    /// `BLAKE3(payload)` where `payload = encode_block_payload(txs)`.
+    pub payload_hash: [u8; 32],
+    /// Length of `payload` in bytes.
+    pub payload_len: u64,
+}
+
 /// A running node holding the ledger and mempool in memory.
-#[derive(Default)]
 pub struct Node {
     ledger: Option<Ledger>,
-    mempool: Mempool,
+    mempool: MempoolV2,
     clock: Clock,
     /// Address that receives the per-block KVNC subsidy coinbase.
     miner: Option<Address>,
+    /// DHT NodeId for peer discovery (optional).
+    dht_node_id: Option<crate::dht::NodeId>,
+    /// DHT routing table for peer discovery (optional).
+    dht_routing_table: Option<crate::dht::RoutingTable>,
 }
 
 /// Blocks per subsidy-halving era. Issuance is `cap >> (height / HALVING_ERA)`.
@@ -155,10 +209,35 @@ pub const HALVING_ERA: u64 = 1_000;
 /// Floor: `max(1, subsidy / 500_000)`. On the 50 KVNC testnet that is 0.0001 KVNC.
 pub const MIN_FEE_DIVISOR: u64 = 500_000;
 
+impl Default for Node {
+    fn default() -> Self {
+        Self {
+            ledger: None,
+            mempool: MempoolV2::default(),
+            clock: Clock::default(),
+            miner: None,
+            dht_node_id: None,
+            dht_routing_table: None,
+        }
+    }
+}
+
 impl Node {
     /// A fresh node with no ledger yet.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a node with custom mempool configuration.
+    pub fn with_mempool_config(config: MempoolConfig) -> Self {
+        Self {
+            ledger: None,
+            mempool: MempoolV2::new(config),
+            clock: Clock::default(),
+            miner: None,
+            dht_node_id: None,
+            dht_routing_table: None,
+        }
     }
 
     /// The node's current wall-clock time in milliseconds since the UNIX epoch.
@@ -265,17 +344,86 @@ impl Node {
         amount: u64,
         founder_seed: u64,
     ) -> Result<(BlockId, Address), NodeError> {
+        self.genesis_with_finality(k, subsidy, amount, founder_seed, u64::MAX, u64::MAX)
+    }
+
+    /// Like [`Node::genesis`], but with configurable finality depth and payload
+    /// pruning depth for the ledger.
+    ///
+    /// - `finality_depth`: blocks more than this many blue score below the selected
+    ///   tip become final (their UTXO state is pruned and they cannot be built on).
+    ///   `u64::MAX` (the default) disables finality pruning.
+    /// - `payload_pruning_depth`: blocks more than this many blue score below the
+    ///   selected tip have their payloads evicted in the underlying DAG.
+    ///   `u64::MAX` (the default) disables payload pruning.
+    ///
+    /// Typically `payload_pruning_depth >= finality_depth` so that a node can
+    /// serve block bodies for blocks that are final but no longer needed for
+    /// validation.
+    pub fn genesis_with_finality(
+        &mut self,
+        k: u16,
+        subsidy: u64,
+        amount: u64,
+        founder_seed: u64,
+        finality_depth: u64,
+        payload_pruning_depth: u64,
+    ) -> Result<(BlockId, Address), NodeError> {
         if self.ledger.is_some() {
             return Err(NodeError::AlreadyInitialized);
         }
         let founder = Self::address(founder_seed);
         let coinbase =
             Transaction::coinbase(vec![TxOutput::new(amount, founder)], b"genesis".to_vec());
-        let ledger = Ledger::new(k, subsidy, &[coinbase]).map_err(NodeError::Ledger)?;
+        let schedule = HalvingSchedule::new(subsidy, DEFAULT_HALVING_ERA);
+        let ledger = if finality_depth == u64::MAX && payload_pruning_depth == u64::MAX {
+            Ledger::new(k, schedule, &[coinbase]).map_err(NodeError::Ledger)?
+        } else if finality_depth != u64::MAX && payload_pruning_depth == u64::MAX {
+            Ledger::with_finality(k, schedule, &[coinbase], finality_depth)
+                .map_err(NodeError::Ledger)?
+        } else if finality_depth == u64::MAX && payload_pruning_depth != u64::MAX {
+            Ledger::with_payload_pruning(k, schedule, &[coinbase], payload_pruning_depth)
+                .map_err(NodeError::Ledger)?
+        } else {
+            Ledger::with_finality_and_payload_pruning(
+                k,
+                schedule,
+                &[coinbase],
+                finality_depth,
+                payload_pruning_depth,
+            )
+            .map_err(NodeError::Ledger)?
+        };
         let genesis = ledger.genesis();
         self.ledger = Some(ledger);
         self.miner = Some(founder);
         Ok((genesis, founder))
+    }
+
+    /// Enable (or disable) payload pruning on the underlying DAG. Returns an
+    /// error if the node is not initialised.
+    pub fn set_payload_pruning_depth(&mut self, depth: u64) -> Result<(), NodeError> {
+        self.ledger
+            .as_mut()
+            .ok_or(NodeError::NotInitialized)?
+            .set_payload_pruning_depth(depth);
+        Ok(())
+    }
+
+    /// The current payload pruning depth, or `u64::MAX` if disabled.
+    pub fn payload_pruning_depth(&self) -> u64 {
+        self.ledger
+            .as_ref()
+            .map(|l| l.payload_pruning_depth())
+            .unwrap_or(u64::MAX)
+    }
+
+    /// The blue-score threshold below which blocks' payloads are pruned.
+    pub fn payload_pruning_score(&self) -> u64 {
+        self.ledger
+            .as_ref()
+            .map(|l| l.payload_pruning_score())
+            .unwrap_or(0)
     }
 
     /// Who receives the native-token (KVNC) subsidy on produced blocks.
@@ -298,13 +446,11 @@ impl Node {
     /// genesis subsidy cap). Coinbase still cannot exceed `ledger.subsidy()`.
     pub fn issuance(&self) -> Result<u64, NodeError> {
         let ledger = self.ledger()?;
-        Ok(Self::issuance_at(
-            ledger.subsidy(),
-            ledger.dag().len() as u64,
-        ))
+        Ok(ledger.subsidy())
     }
 
-    /// `cap >> (height / HALVING_ERA)`, saturating at zero.
+    /// Compute the subsidy at a given height (height 0 = genesis).
+    /// `cap` is the genesis subsidy. Halving era is `HALVING_ERA` (1000 blocks).
     pub fn issuance_at(cap: u64, height: u64) -> u64 {
         let era = height / HALVING_ERA;
         if era >= 63 {
@@ -320,7 +466,7 @@ impl Node {
 
     /// Pending mempool transactions in assembly order.
     pub fn pending_txs(&self) -> Vec<Transaction> {
-        self.mempool.ordered()
+        self.mempool.ordered_pending()
     }
 
     /// The spendable balance of `owner` in the current full ledger state.
@@ -345,7 +491,17 @@ impl Node {
 
     /// Number of pending transactions in the mempool.
     pub fn pending_count(&self) -> usize {
-        self.mempool.len()
+        self.mempool.len_pending()
+    }
+
+    /// Number of orphan transactions in the mempool.
+    pub fn orphan_count(&self) -> usize {
+        self.mempool.len_orphans()
+    }
+
+    /// Total bytes of pending transactions.
+    pub fn mempool_bytes(&self) -> usize {
+        self.mempool.total_bytes()
     }
 
     /// Build a signed transfer of `amount` from actor `from_seed` to actor
@@ -464,7 +620,7 @@ impl Node {
             .filter(|(_, o)| &o.owner == owner)
             .map(|(op, o)| (*op, o.value))
             .collect();
-        rows.sort_by_key(|a| a.0);
+        rows.sort_by_key(|row| row.0);
         Ok(rows)
     }
 
@@ -497,7 +653,9 @@ impl Node {
     pub fn pool(&mut self, from_seed: u64, amount: u64, to_seed: u64) -> Result<TxId, NodeError> {
         let tx = self.build_transfer(from_seed, amount, to_seed)?;
         let id = tx.id();
-        self.mempool.add(tx);
+        self.mempool
+            .add(tx)
+            .map_err(|e| NodeError::Mempool(e.to_string()))?;
         Ok(id)
     }
 
@@ -508,8 +666,17 @@ impl Node {
             return Err(NodeError::UnexpectedCoinbase);
         }
         let id = tx.id();
-        self.mempool.add(tx);
-        Ok(id)
+        let start = std::time::Instant::now();
+        let result = self
+            .mempool
+            .add(tx)
+            .map_err(|e| NodeError::Mempool(e.to_string()));
+        let duration = start.elapsed();
+        match &result {
+            Ok(_) => crate::metrics::record_tx_validation(duration, false),
+            Err(_) => crate::metrics::record_tx_validation(duration, true),
+        }
+        result.map(|_| id)
     }
 
     /// Assemble the largest valid prefix of the mempool into a block on the
@@ -524,7 +691,7 @@ impl Node {
         if self.ledger.is_none() {
             return Err(NodeError::NotInitialized);
         }
-        if self.mempool.is_empty() {
+        if self.mempool.len_pending() == 0 {
             return Ok(None);
         }
 
@@ -538,7 +705,7 @@ impl Node {
         };
         let mut selected = Vec::new();
         let mut selected_ids = Vec::new();
-        for tx in self.mempool.ordered() {
+        for tx in self.mempool.ordered_pending() {
             if apply_block(&mut working, std::slice::from_ref(&tx), subsidy).is_ok() {
                 selected_ids.push(tx.id());
                 selected.push(tx);
@@ -557,11 +724,25 @@ impl Node {
         block_txs.extend(selected);
         let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &block_txs);
         let ledger = self.ledger.as_mut().expect("checked above");
+        let start = std::time::Instant::now();
         let block = ledger
             .insert(parents, work, timestamp, nonce, &block_txs)
             .map_err(NodeError::Insert)?;
+        let duration = start.elapsed();
+        let height = ledger
+            .dag()
+            .ghostdag(&block)
+            .map(|g| g.blue_score)
+            .unwrap_or(0);
+        let blue_score = height;
+        record_block_produced(height, blue_score, duration);
         self.mempool.remove_all(&selected_ids);
         self.evict_mempool();
+        set_mempool_counts(
+            self.mempool.len_pending(),
+            self.mempool.len_orphans(),
+            self.mempool.total_bytes(),
+        );
         Ok(Some(block))
     }
 
@@ -575,10 +756,24 @@ impl Node {
         let txs = self.issuance_txs(timestamp, 0);
         let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &txs);
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
+        let start = std::time::Instant::now();
         let id = ledger
             .insert(parents, work, timestamp, nonce, &txs)
             .map_err(NodeError::Insert)?;
+        let duration = start.elapsed();
+        let height = ledger
+            .dag()
+            .ghostdag(&id)
+            .map(|g| g.blue_score)
+            .unwrap_or(0);
+        let blue_score = height;
+        record_block_produced(height, blue_score, duration);
         self.evict_mempool();
+        set_mempool_counts(
+            self.mempool.len_pending(),
+            self.mempool.len_orphans(),
+            self.mempool.total_bytes(),
+        );
         Ok(id)
     }
 
@@ -600,15 +795,279 @@ impl Node {
 
     /// A pending mempool transaction by id, if present.
     pub fn mempool_tx(&self, id: &TxId) -> Option<Transaction> {
-        self.mempool.get(id)
+        self.mempool.get(id).cloned()
     }
 
     fn evict_mempool(&mut self) {
         let Some(ledger) = self.ledger.as_ref() else {
             return;
         };
+        let before_pending = self.mempool.len_pending();
+        let before_orphans = self.mempool.len_orphans();
         let utxo = ledger.ledger_state();
-        self.mempool.evict_invalid(&utxo);
+        self.mempool.revalidate_with_utxo(&utxo);
+        let after_pending = self.mempool.len_pending();
+        let after_orphans = self.mempool.len_orphans();
+        if before_pending > after_pending {
+            record_mempool_evicted(before_pending - after_pending);
+        }
+        if before_orphans > after_orphans {
+            record_mempool_evicted(before_orphans - after_orphans);
+        }
+        set_mempool_counts(
+            self.mempool.len_pending(),
+            self.mempool.len_orphans(),
+            self.mempool.total_bytes(),
+        );
+    }
+
+    /// Called when a new block is added: promote orphans whose inputs are now available.
+    pub fn promote_orphans(&mut self) -> usize {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return 0;
+        };
+        let utxo = ledger.ledger_state();
+        let tip = ledger.dag().selected_tip();
+        let height = ledger
+            .dag()
+            .ghostdag(&tip)
+            .map(|g| g.blue_score)
+            .unwrap_or(0);
+        let promoted = self.mempool.on_new_block(&utxo, height);
+        if promoted > 0 {
+            record_mempool_promoted(promoted);
+        }
+        set_mempool_counts(
+            self.mempool.len_pending(),
+            self.mempool.len_orphans(),
+            self.mempool.total_bytes(),
+        );
+        promoted
+    }
+
+    /// The header for block `id`, if present. The header commits to the payload
+    /// via `payload_hash`/`payload_len` but omits the payload bytes themselves.
+    pub fn block_header(&self, id: &BlockId) -> Option<BlockHeader> {
+        let dag = self.ledger.as_ref()?.dag();
+        let block = dag.block(id)?;
+        let payload = block.payload();
+        let hash = *blake3::hash(payload).as_bytes();
+        Some(BlockHeader {
+            id: *id,
+            parents: block.parents().to_vec(),
+            work: block.work(),
+            timestamp_ms: block.timestamp_ms(),
+            nonce: block.nonce(),
+            payload_hash: hash,
+            payload_len: payload.len() as u64,
+        })
+    }
+
+    /// Every non-genesis block as a header, in topological order (the same order
+    /// as `export`, minus the payload). Suitable for headers-first sync: a peer
+    /// learns the DAG shape without downloading bodies.
+    pub fn export_headers(&self) -> Vec<BlockHeader> {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return Vec::new();
+        };
+        let genesis = ledger.genesis();
+        ledger
+            .dag()
+            .linearize()
+            .into_iter()
+            .filter(|id| *id != genesis)
+            .filter_map(|id| self.block_header(&id))
+            .collect()
+    }
+
+    /// Every block id in the DAG (including genesis), sorted. The inventory a
+    /// node advertises so a peer can compute which headers it lacks.
+    pub fn inventory(&self) -> Vec<BlockId> {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return Vec::new();
+        };
+        let mut ids: Vec<BlockId> = ledger.dag().linearize();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The genesis block id, if initialised.
+    pub fn genesis_id(&self) -> Option<BlockId> {
+        self.ledger.as_ref().map(|l| l.genesis())
+    }
+
+    /// Whether the DAG contains `id`.
+    pub fn has_block(&self, id: &BlockId) -> bool {
+        self.ledger.as_ref().is_some_and(|l| l.dag().contains(id))
+    }
+
+    /// Headers for the blocks in `ids` that are present, in the order given.
+    pub fn headers_for(&self, ids: &[BlockId]) -> Vec<BlockHeader> {
+        ids.iter().filter_map(|id| self.block_header(id)).collect()
+    }
+
+    /// Construct an SPV `BlockHeader` for a single block in the DAG.
+    pub fn spv_header(&self, id: &BlockId) -> Option<kovanica_state::spv::BlockHeader> {
+        let ledger = self.ledger.as_ref()?;
+        let dag = ledger.dag();
+        let block = dag.block(id)?;
+        let ghostdag = dag.ghostdag(id)?;
+
+        let prev_hash = ghostdag
+            .selected_parent
+            .unwrap_or_else(|| BlockId::from_bytes([0u8; 32]));
+        let blue_score = ghostdag.blue_score;
+        let chain_blue_work = ghostdag.blue_work;
+
+        // Calculate height along selected-parent chain
+        let mut height = 0u64;
+        let mut cur = ghostdag.selected_parent;
+        while let Some(pid) = cur {
+            height += 1;
+            cur = dag.ghostdag(&pid).and_then(|g| g.selected_parent);
+        }
+
+        let txs = decode_block_payload(block.payload()).ok()?;
+        Some(kovanica_state::spv::BlockHeader::from_block(
+            block,
+            prev_hash,
+            blue_score,
+            chain_blue_work,
+            height,
+            &txs,
+        ))
+    }
+
+    /// Every block along the GHOSTDAG selected chain as an SPV header.
+    pub fn export_spv_headers(&self) -> Vec<kovanica_state::spv::BlockHeader> {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return Vec::new();
+        };
+        let selected_chain = ledger.dag().selected_chain();
+        selected_chain
+            .iter()
+            .filter_map(|id| self.spv_header(id))
+            .collect()
+    }
+
+    /// Export SPV block headers along the selected chain starting after the common
+    /// ancestor found in `locator`, up to `stop` (or tip), bounded by `limit`.
+    pub fn headers_from(
+        &self,
+        locator: &[BlockId],
+        stop: Option<BlockId>,
+        limit: usize,
+    ) -> Result<Vec<kovanica_state::spv::BlockHeader>, NodeError> {
+        let ledger = self.ledger()?;
+        let dag = ledger.dag();
+        let selected_chain = dag.selected_chain();
+
+        // 1. Find highest common ancestor in locator
+        let mut match_idx = None;
+        for loc in locator {
+            if let Some(pos) = selected_chain.iter().position(|id| id == loc) {
+                match_idx = Some(pos);
+                break;
+            }
+        }
+
+        // 2. Start after matched block, or from genesis (0) if no match / empty locator
+        let start_idx = match match_idx {
+            Some(idx) => idx + 1,
+            None => 0,
+        };
+
+        if start_idx >= selected_chain.len() {
+            return Ok(Vec::new());
+        }
+
+        // 3. Slice up to stop hash (if present and non-zero)
+        let candidates = &selected_chain[start_idx..];
+        let mut end_idx = candidates.len();
+        if let Some(stop_id) = stop {
+            if stop_id != BlockId::from_bytes([0u8; 32]) {
+                if let Some(pos) = candidates.iter().position(|id| *id == stop_id) {
+                    end_idx = pos + 1; // inclusive of stop_id
+                }
+            }
+        }
+
+        let max_serve = limit.clamp(1, 10_000);
+        let selected_ids = &candidates[..end_idx.min(max_serve)];
+
+        let headers: Vec<_> = selected_ids
+            .iter()
+            .filter_map(|id| self.spv_header(id))
+            .collect();
+
+        Ok(headers)
+    }
+
+    /// Assemble a `MerkleBlock` for a given transaction `tx_id` within block `block_id`
+    /// with zero full-payload leakage.
+    pub fn merkle_block(&self, block_id: &BlockId, tx_id: &TxId) -> Result<MerkleBlock, NodeError> {
+        let ledger = self.ledger()?;
+        let dag = ledger.dag();
+        let block = dag
+            .block(block_id)
+            .ok_or_else(|| NodeError::Io("block not found".into()))?;
+
+        let txs = decode_block_payload(block.payload())
+            .map_err(|e| NodeError::Snapshot(e.to_string()))?;
+
+        let merkle_root = kovanica_state::spv::merkle_root(&txs);
+        let tx_count = txs.len() as u32;
+
+        if let Some(index) = txs.iter().position(|t| t.id() == *tx_id) {
+            let proof = kovanica_state::spv::generate_merkle_proof(&txs, index);
+            let matched_tx = Some(txs[index].clone());
+            Ok(MerkleBlock {
+                block_id: *block_id,
+                merkle_root,
+                tx_count,
+                proof,
+                matched_tx,
+            })
+        } else {
+            Ok(MerkleBlock {
+                block_id: *block_id,
+                merkle_root,
+                tx_count,
+                proof: None,
+                matched_tx: None,
+            })
+        }
+    }
+
+    /// Verify that `record` matches `header` (id, parents, work, timestamp,
+    /// nonce, payload hash/len). Returns the block id on success.
+    pub fn verify_header_body(header: &BlockHeader, record: &BlockRecord) -> Option<BlockId> {
+        let payload = encode_block_payload(&record.txs);
+        if payload.len() as u64 != header.payload_len {
+            return None;
+        }
+        if *blake3::hash(&payload).as_bytes() != header.payload_hash {
+            return None;
+        }
+        let block = Block::new(
+            record.parents.clone(),
+            record.work,
+            record.timestamp_ms,
+            record.nonce,
+            payload,
+        );
+        let id = block.id();
+        if id != header.id {
+            return None;
+        }
+        if record.parents != header.parents
+            || record.work != header.work
+            || record.timestamp_ms != header.timestamp_ms
+            || record.nonce != header.nonce
+        {
+            return None;
+        }
+        Some(id)
     }
 
     /// The gossip record for a block, if present.
@@ -657,25 +1116,83 @@ impl Node {
             });
         }
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
-        match ledger.insert(
+
+        // Reject blocks built on pruned history: if the selected parent's payload
+        // has been evicted, we cannot serve its body and the block is effectively
+        // building on history we no longer have. This mirrors the finality check
+        // but uses the payload pruning depth instead.
+        // Check if block already exists (idempotent receive)
+        let block_id = {
+            let block = Block::new(
+                record.parents.clone(),
+                record.work,
+                record.timestamp_ms,
+                record.nonce,
+                encode_block_payload(&record.txs),
+            );
+            block.id()
+        };
+        if ledger.dag().contains(&block_id) {
+            return Ok(block_id);
+        }
+
+        let preview = match ledger.dag().preview(&Block::new(
+            record.parents.clone(),
+            record.work,
+            record.timestamp_ms,
+            record.nonce,
+            encode_block_payload(&record.txs),
+        )) {
+            Ok(p) => p,
+            Err(e) => return Err(NodeError::Insert(LedgerInsertError::Dag(e))),
+        };
+        if let Some(sp_block) = ledger.dag().block(&preview.selected_parent) {
+            if sp_block.is_pruned() {
+                return Err(NodeError::Insert(LedgerInsertError::Finality {
+                    parent_score: ledger
+                        .dag()
+                        .ghostdag(&preview.selected_parent)
+                        .map_or(0, |g| g.blue_score),
+                    finality_score: ledger.payload_pruning_score(),
+                }));
+            }
+        }
+
+        let start = std::time::Instant::now();
+        let result = ledger.insert(
             record.parents,
             record.work,
             record.timestamp_ms,
             record.nonce,
             &record.txs,
-        ) {
+        );
+        let duration = start.elapsed();
+        match result {
             Ok(id) => {
+                crate::metrics::record_block_validation(duration, false);
                 self.evict_mempool();
                 Ok(id)
             }
-            Err(LedgerInsertError::Dag(DagError::DuplicateBlock(id))) => Ok(id),
-            Err(e) => Err(NodeError::Insert(e)),
+            Err(e) => {
+                crate::metrics::record_block_validation(duration, true);
+                Err(NodeError::Insert(e))
+            }
         }
     }
 
     /// Write the ledger snapshot to `path`.
     pub fn save(&self, path: &str) -> Result<(), NodeError> {
         let bytes = self.ledger()?.write_snapshot();
+        fs::write(path, bytes).map_err(|e| NodeError::Io(e.to_string()))
+    }
+
+    /// Write a finality checkpoint to `path`. Fails if finality is disabled or
+    /// not yet active.
+    pub fn save_checkpoint(&self, path: &str) -> Result<(), NodeError> {
+        let bytes = self
+            .ledger()?
+            .write_checkpoint()
+            .map_err(|e| NodeError::Io(e.to_string()))?;
         fs::write(path, bytes).map_err(|e| NodeError::Io(e.to_string()))
     }
 
@@ -688,9 +1205,26 @@ impl Node {
         Ok(())
     }
 
+    /// Replace the node's ledger with one loaded from a finality checkpoint at
+    /// `path`. This is faster than a full snapshot load when the DAG is deep,
+    /// as it only replays blocks above the finality boundary.
+    pub fn load_checkpoint(&mut self, path: &str) -> Result<(), NodeError> {
+        let bytes = fs::read(path).map_err(|e| NodeError::Io(e.to_string()))?;
+        let ledger =
+            Ledger::read_checkpoint(&bytes).map_err(|e| NodeError::Snapshot(e.to_string()))?;
+        self.ledger = Some(ledger);
+        Ok(())
+    }
+
     /// Write an incremental append-only log of this node's ledger at `path`.
     pub fn create_log(&self, path: &str) -> Result<LedgerStore, NodeError> {
         LedgerStore::create(path, self.ledger()?).map_err(|e| NodeError::Io(e.to_string()))
+    }
+
+    /// Write a finality checkpoint to `path` using the LedgerStore.
+    pub fn create_checkpoint(&self, path: &str) -> Result<(), NodeError> {
+        LedgerStore::create_checkpoint(path, self.ledger()?)
+            .map_err(|e| NodeError::Io(e.to_string()))
     }
 
     /// Rebuild the node from an incremental log at `path`. The store is
@@ -702,12 +1236,28 @@ impl Node {
         Ok((
             Self {
                 ledger: Some(ledger),
-                mempool: Mempool::new(),
+                mempool: MempoolV2::default(),
                 clock: Clock::default(),
                 miner: None,
+                dht_node_id: None,
+                dht_routing_table: None,
             },
             store,
         ))
+    }
+
+    /// Rebuild the node from a finality checkpoint at `path`.
+    pub fn load_checkpoint_log(path: &str) -> Result<Self, NodeError> {
+        let ledger =
+            LedgerStore::open_checkpoint(path).map_err(|e| NodeError::Snapshot(e.to_string()))?;
+        Ok(Self {
+            ledger: Some(ledger),
+            mempool: MempoolV2::default(),
+            clock: Clock::default(),
+            miner: None,
+            dht_node_id: None,
+            dht_routing_table: None,
+        })
     }
 
     /// Append `id`'s block to an open log. No-op-level error if the block is
@@ -722,6 +1272,89 @@ impl Node {
             .append(block)
             .map_err(|e| NodeError::Io(e.to_string()))
     }
+
+    // ========================================================================
+    // DHT Integration Methods (P2P layer - not part of consensus state)
+    // ========================================================================
+
+    /// The node's DHT NodeId (for peer discovery). Returns None if not set.
+    pub fn dht_node_id(&self) -> Option<crate::dht::NodeId> {
+        self.dht_node_id
+    }
+
+    /// Set the node's DHT NodeId for peer discovery.
+    pub fn set_dht_node_id(&mut self, node_id: crate::dht::NodeId) {
+        self.dht_node_id = Some(node_id);
+    }
+
+    /// Get the node's DHT routing table, if DHT is enabled.
+    pub fn dht_routing_table(&self) -> Option<&crate::dht::RoutingTable> {
+        self.dht_routing_table.as_ref()
+    }
+
+    /// Get mutable access to the node's DHT routing table.
+    pub fn dht_routing_table_mut(&mut self) -> Option<&mut crate::dht::RoutingTable> {
+        self.dht_routing_table.as_mut()
+    }
+
+    /// Initialize the node's DHT routing table with a NodeId and bucket size k.
+    pub fn init_dht_routing_table(&mut self, node_id: crate::dht::NodeId, k: usize) {
+        self.dht_node_id = Some(node_id);
+        self.dht_routing_table = Some(crate::dht::RoutingTable::new(node_id, k));
+    }
+
+    /// Bootstrap this node's DHT routing table using a seed node's contacts.
+    /// Returns the number of new contacts added.
+    pub fn dht_bootstrap(
+        &mut self,
+        seed_contacts: Vec<crate::dht::PeerContact>,
+    ) -> Result<usize, NodeError> {
+        let table = self
+            .dht_routing_table_mut()
+            .ok_or(NodeError::NotInitialized)?;
+        let mut added = 0;
+        for contact in seed_contacts {
+            if table.update_contact(contact) != crate::dht::UpdateResult::Cached {
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
+    /// Perform an iterative DHT node lookup for a target NodeId.
+    /// Returns the k closest nodes found.
+    pub fn dht_find_node(
+        &self,
+        target: &crate::dht::NodeId,
+    ) -> Result<Vec<crate::dht::PeerContact>, NodeError> {
+        let table = self.dht_routing_table().ok_or(NodeError::NotInitialized)?;
+        Ok(table.closest_peers(target, table.k))
+    }
+
+    /// Handle an incoming DHT message from the wire.
+    /// Returns a response message if one should be sent back.
+    pub fn handle_dht_msg(&self, msg: crate::dht::DhtMsg) -> Option<crate::dht::DhtMsg> {
+        let table = self.dht_routing_table()?;
+        match msg {
+            crate::dht::DhtMsg::Ping { sender, nonce } => {
+                Some(crate::dht::DhtMsg::Pong { sender, nonce })
+            }
+            crate::dht::DhtMsg::FindNode {
+                sender,
+                target,
+                nonce,
+            } => {
+                let nodes = table.closest_peers(&target, table.k);
+                Some(crate::dht::DhtMsg::Nodes {
+                    sender,
+                    target,
+                    nonce,
+                    nodes,
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 fn fee_of(state: &UtxoSet, tx: &Transaction) -> u64 {
@@ -733,4 +1366,102 @@ fn fee_of(state: &UtxoSet, tx: &Transaction) -> u64 {
     }
     let sum_out: u64 = tx.outputs().iter().map(|o| o.value).sum();
     sum_in.saturating_sub(sum_out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_node_spv_header_and_export() {
+        let mut node = Node::new();
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+        let sent1 = node.send(1, 100, 2).unwrap();
+        let sent2 = node.send(2, 50, 3).unwrap();
+
+        let h_gen = node.spv_header(&genesis).unwrap();
+        assert_eq!(h_gen.id, genesis);
+        assert_eq!(h_gen.prev_hash, BlockId::from_bytes([0u8; 32]));
+        assert_eq!(h_gen.height, 0);
+
+        let h1 = node.spv_header(&sent1.block).unwrap();
+        assert_eq!(h1.id, sent1.block);
+        assert_eq!(h1.prev_hash, genesis);
+        assert_eq!(h1.height, 1);
+
+        let h2 = node.spv_header(&sent2.block).unwrap();
+        assert_eq!(h2.id, sent2.block);
+        assert_eq!(h2.prev_hash, sent1.block);
+        assert_eq!(h2.height, 2);
+
+        let all_spv = node.export_spv_headers();
+        assert_eq!(all_spv.len(), 3);
+        assert_eq!(all_spv[0].id, genesis);
+        assert_eq!(all_spv[1].id, sent1.block);
+        assert_eq!(all_spv[2].id, sent2.block);
+    }
+
+    #[test]
+    fn test_node_headers_from() {
+        let mut node = Node::new();
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+        let sent1 = node.send(1, 100, 2).unwrap();
+        let sent2 = node.send(2, 50, 3).unwrap();
+
+        // 1. Empty locator -> returns all from genesis
+        let h_all = node.headers_from(&[], None, 10).unwrap();
+        assert_eq!(h_all.len(), 3);
+
+        // 2. Locator with genesis -> returns from block 1 onwards
+        let h_after_gen = node.headers_from(&[genesis], None, 10).unwrap();
+        assert_eq!(h_after_gen.len(), 2);
+        assert_eq!(h_after_gen[0].id, sent1.block);
+        assert_eq!(h_after_gen[1].id, sent2.block);
+
+        // 3. Locator with tip -> returns empty
+        let h_tip = node.headers_from(&[sent2.block], None, 10).unwrap();
+        assert!(h_tip.is_empty());
+
+        // 4. Locator with unknown hash -> falls back to start from genesis
+        let h_unknown = node
+            .headers_from(&[BlockId::from_bytes([99u8; 32])], None, 10)
+            .unwrap();
+        assert_eq!(h_unknown.len(), 3);
+
+        // 5. Stop hash
+        let h_stop = node.headers_from(&[], Some(sent1.block), 10).unwrap();
+        assert_eq!(h_stop.len(), 2);
+        assert_eq!(h_stop[1].id, sent1.block);
+
+        // 6. Limit
+        let h_limit = node.headers_from(&[], None, 1).unwrap();
+        assert_eq!(h_limit.len(), 1);
+    }
+
+    #[test]
+    fn test_node_merkle_block() {
+        let mut node = Node::new();
+        node.genesis(3, 1000, 1000, 1).unwrap();
+        let sent = node.send(1, 200, 2).unwrap();
+
+        // Matching transaction
+        let mb = node.merkle_block(&sent.block, &sent.tx).unwrap();
+        assert_eq!(mb.block_id, sent.block);
+        assert!(mb.proof.is_some());
+        assert!(mb.matched_tx.is_some());
+        let proof = mb.proof.as_ref().unwrap();
+        assert_eq!(proof.tx_id, *sent.tx.as_bytes());
+        assert!(proof.verify());
+
+        // Non-matching transaction
+        let unknown_tx = TxId::from_bytes([99u8; 32]);
+        let mb_unknown = node.merkle_block(&sent.block, &unknown_tx).unwrap();
+        assert_eq!(mb_unknown.block_id, sent.block);
+        assert!(mb_unknown.proof.is_none());
+        assert!(mb_unknown.matched_tx.is_none());
+
+        // Non-existent block
+        let unknown_block = BlockId::from_bytes([99u8; 32]);
+        assert!(node.merkle_block(&unknown_block, &sent.tx).is_err());
+    }
 }

@@ -15,6 +15,58 @@
 //! oracle is maintained **incrementally**: each insert folds in just the one new
 //! block (Kaspa reachability / interval reindexing) rather than rebuilding from
 //! scratch (see [`crate::reachability`]).
+//!
+//! ## Payload pruning
+//!
+//! The DAG supports **payload pruning** to bound memory and disk usage. Each
+//! [`Block`] carries an `Option<Vec<u8>>` payload — `Some(payload)` when the
+//! block is recent, `None` once it is sufficiently finalized. A block is
+//! considered **prunable** when its blue score is more than
+//! `payload_pruning_depth` below the selected tip's blue score.
+//!
+//! ### Why the reachability oracle makes pruning safe
+//!
+//! The [`Reachability`] oracle answers `is_ancestor` and computes mergesets from
+//! the **selected-parent tree** (interval labels) and **future-covering sets**,
+//! which depend *only* on the DAG's topology (each block's parents and its
+//! GHOSTDAG selected parent). It never inspects block payloads. Therefore,
+//! evicting a block's payload does not affect any reachability query:
+//! `is_ancestor`, `in_anticone`, `mergeset_ordered`, and the GHOSTDAG colouring
+//! all continue to work correctly on pruned blocks.
+//!
+//! ### Pruning strategy
+//!
+//! - `payload_pruning_depth` is a parameter on [`Dag`] (default: `u64::MAX`,
+//!   meaning pruning disabled).
+//! - After each insert, [`Dag::prune_old_payloads`] is called. It computes the
+//!   pruning threshold as `selected_tip.blue_score.saturating_sub(payload_pruning_depth)`.
+//! - Any block with `blue_score < threshold` has its payload set to `None` via
+//!   [`Block::prune_payload`].
+//! - Genesis is never pruned (its blue score is 0, but it's the root).
+//! - Pruning is idempotent: once `payload = None`, it stays `None`.
+//!
+//! ### Interaction with `Ledger::with_finality`
+//!
+//! The ledger layer has its own `finality_depth` ([`Ledger::with_finality`])
+//! which prunes *per-block UTXO state* and rejects blocks built on final
+//! history. The DAG's `payload_pruning_depth` is a separate (typically larger)
+//! threshold that only evicts the opaque payload bytes. The two depths are
+//! independent:
+//! - `finality_depth` bounds the *state* the ledger must keep to validate new
+//!   blocks.
+//! - `payload_pruning_depth` bounds the *payloads* the DAG keeps for sync/serving.
+//!
+//! A typical configuration sets `payload_pruning_depth > finality_depth` so that
+//! a node can still serve block bodies for blocks that are final (and thus
+//! immutable) but no longer needed for validation.
+//!
+//! ### Snapshots
+//!
+//! When writing a snapshot ([`Dag::write_snapshot`]), pruned blocks are encoded
+//! with an empty payload. On load ([`Dag::read_snapshot`]), they are
+//! reconstructed with `payload = None` via [`Block::new_pruned`]. The block's
+//! id (computed at insertion time over the original payload) is preserved in the
+//! DAG's `nodes` map, so consensus integrity is maintained.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -22,6 +74,7 @@ use crate::block::{Block, BlockId};
 use crate::difficulty::{Retarget, TimedWork};
 use crate::reachability::Reachability;
 use crate::validation::BlockValidator;
+use crate::vrf::vrf_verify;
 
 /// Errors returned when inserting a block into the [`Dag`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +106,9 @@ pub enum DagError {
     /// Proof-of-work is enforced (see [`Dag::set_proof_of_work`]) and the block's
     /// id does not meet its `work` target — it was not adequately mined.
     InsufficientProofOfWork { id: BlockId, work: u128 },
+    /// VRF is enforced (see [`Dag::set_vrf`]) and the block's VRF proof is invalid
+    /// or the VRF output does not meet the leader eligibility threshold.
+    InvalidVrf { id: BlockId, reason: String },
 }
 
 impl core::fmt::Display for DagError {
@@ -84,6 +140,10 @@ impl core::fmt::Display for DagError {
             DagError::InsufficientProofOfWork { id, work } => write!(
                 f,
                 "block {id} does not meet its proof-of-work target for work {work}"
+            ),
+            DagError::InvalidVrf { id, reason } => write!(
+                f,
+                "block {id} has invalid VRF: {reason}"
             ),
         }
     }
@@ -166,6 +226,27 @@ pub struct Dag {
     /// requires every non-genesis block's id to meet its `work` target (see
     /// [`crate::pow`] and [`Dag::set_proof_of_work`]). Off by default.
     require_pow: bool,
+    /// Payload pruning depth: blocks more than this many blue score units below
+    /// the selected tip have their payloads evicted (`payload = None`).
+    /// `u64::MAX` means pruning is disabled (the default).
+    payload_pruning_depth: u64,
+    /// Consensus-enforced VRF policy. When `Some(threshold)`, each [`Dag::insert`]
+    /// of a non-genesis block requires:
+    /// - A valid VRF proof (`vrf_public_key`, `vrf_proof`, `vrf_output`)
+    /// - The VRF output to be less than `threshold` (leader eligibility).
+    ///   A threshold of `u64::MAX` means all valid VRF outputs are eligible.
+    ///   The threshold is interpreted as a big-endian u64 from the VRF output.
+    ///   Off by default (`None`).
+    vrf_config: Option<VrfConfig>,
+}
+
+/// VRF consensus enforcement configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct VrfConfig {
+    /// Eligibility threshold: blocks with VRF output < threshold are eligible
+    /// to produce a block. Interpreted as big-endian u64 from VRF output.
+    /// `u64::MAX` = all valid outputs eligible.
+    pub threshold: u64,
 }
 
 impl Dag {
@@ -200,6 +281,8 @@ impl Dag {
             validator: None,
             difficulty: None,
             require_pow: false,
+            payload_pruning_depth: u64::MAX,
+            vrf_config: None,
         };
         dag.reach = Reachability::build(&dag);
         dag
@@ -274,6 +357,92 @@ impl Dag {
         self.require_pow
     }
 
+    /// Enable consensus-enforced VRF leader selection.
+    ///
+    /// Once enabled, every subsequent [`Dag::insert`] of a non-genesis block
+    /// must satisfy:
+    /// - **Valid VRF proof.** The block must carry `vrf_public_key`, `vrf_proof`,
+    ///   and `vrf_output` fields, and the proof must verify correctly against
+    ///   the VRF input (derived from the block's parent tips).
+    /// - **Leader eligibility.** The VRF output (interpreted as big-endian u64)
+    ///   must be less than the configured `threshold`. A threshold of `u64::MAX`
+    ///   means any valid VRF output is eligible (useful for randomness beacon
+    ///   without leader selection).
+    ///
+    /// The VRF input is derived from the block's parent tips: `H(tip1 || tip2 || ...)`.
+    /// This ties leader eligibility to the DAG state, making it unpredictable
+    /// until the parents are known, but verifiable by anyone.
+    ///
+    /// Genesis is exempt. VRF enforcement is **off by default** (`None`), so a
+    /// DAG built without this call accepts blocks without VRF fields, exactly as
+    /// before. It composes with [`Dag::set_difficulty`] and
+    /// [`Dag::set_proof_of_work`]: all three can be enabled independently.
+    pub fn set_vrf(&mut self, threshold: u64) {
+        self.vrf_config = Some(VrfConfig { threshold });
+    }
+
+    /// Disable consensus-enforced VRF (blocks no longer need VRF fields).
+    pub fn disable_vrf(&mut self) {
+        self.vrf_config = None;
+    }
+
+    /// The current VRF enforcement config, if any.
+    pub fn vrf_config(&self) -> Option<VrfConfig> {
+        self.vrf_config
+    }
+
+    /// Set the payload pruning depth: blocks more than `depth` blue score units
+    /// below the selected tip will have their payloads evicted on the next insert
+    /// (or when [`Dag::prune_old_payloads`] is called explicitly). `u64::MAX`
+    /// (the default) disables payload pruning.
+    ///
+    /// The pruning threshold is computed as `selected_tip.blue_score.saturating_sub(depth)`.
+    /// Any block with `blue_score < threshold` has its payload set to `None`.
+    /// Genesis is never pruned.
+    pub fn set_payload_pruning_depth(&mut self, depth: u64) {
+        self.payload_pruning_depth = depth;
+    }
+
+    /// The current payload pruning depth. `u64::MAX` means pruning is disabled.
+    pub fn payload_pruning_depth(&self) -> u64 {
+        self.payload_pruning_depth
+    }
+
+    /// The blue-score threshold below which blocks are prunable: blocks with a
+    /// blue score `< payload_pruning_score()` have their payloads evicted.
+    /// Returns `0` when pruning is disabled or the DAG is not yet deep enough.
+    pub fn payload_pruning_score(&self) -> u64 {
+        if self.payload_pruning_depth == u64::MAX {
+            return 0;
+        }
+        let tip = self.selected_tip();
+        let max = self.ghostdag(&tip).map_or(0, |g| g.blue_score);
+        max.saturating_sub(self.payload_pruning_depth)
+    }
+
+    /// Evict payloads of all blocks whose blue score is below the pruning
+    /// threshold ([`Dag::payload_pruning_score`]). Idempotent: blocks already
+    /// pruned stay pruned. Genesis is never pruned.
+    ///
+    /// This is called automatically at the end of [`Dag::insert`] when
+    /// `payload_pruning_depth` is finite, but can also be invoked manually
+    /// (e.g. after loading a snapshot or changing the pruning depth).
+    pub fn prune_old_payloads(&mut self) {
+        let threshold = self.payload_pruning_score();
+        if threshold == 0 {
+            return;
+        }
+        for node in self.nodes.values_mut() {
+            // Never prune genesis (blue_score == 0, but it's the root)
+            if node.ghostdag.blue_score == 0 {
+                continue;
+            }
+            if node.ghostdag.blue_score < threshold && !node.block.is_pruned() {
+                node.block.prune_payload();
+            }
+        }
+    }
+
     /// The `work` a new block built on `parents` must carry to satisfy the
     /// enforced difficulty policy, or `None` when difficulty is disabled.
     ///
@@ -333,6 +502,16 @@ impl Dag {
     /// stored past set.
     pub fn is_ancestor(&self, ancestor: &BlockId, descendant: &BlockId) -> bool {
         self.reach.is_ancestor(ancestor, descendant)
+    }
+
+    /// Amortisation metrics `(reindexes, relayout_touches)` of the backing
+    /// reachability oracle: how many interval reindexes its incremental
+    /// maintenance has performed and how many tree nodes those reindexes touched.
+    /// Pure bookkeeping that never affects a query answer — exposed so tests can
+    /// prove interval reindexing stays cheaply amortised (see
+    /// [`Reachability::reindex_metrics`]).
+    pub fn reachability_reindex_metrics(&self) -> (u64, u64) {
+        self.reach.reindex_metrics()
     }
 
     /// `true` iff `a` and `b` are in each other's anticone: distinct blocks
@@ -413,6 +592,70 @@ impl Dag {
         Ok(())
     }
 
+    /// Enforce VRF rules on a prospective block.
+    fn check_vrf(
+        &self,
+        block: &Block,
+        id: BlockId,
+        _ghostdag: &GhostdagData,
+        threshold: u64,
+    ) -> Result<(), DagError> {
+        // VRF input is derived from the block's parent tips (deterministic from parents)
+        let vrf_input = Self::vrf_input(block.parents());
+
+        // Block must have VRF fields
+        let pk = block.vrf_public_key().ok_or_else(|| DagError::InvalidVrf {
+            id,
+            reason: "missing VRF public key".to_string(),
+        })?;
+        let proof = block.vrf_proof().ok_or_else(|| DagError::InvalidVrf {
+            id,
+            reason: "missing VRF proof".to_string(),
+        })?;
+        let output = block.vrf_output().ok_or_else(|| DagError::InvalidVrf {
+            id,
+            reason: "missing VRF output".to_string(),
+        })?;
+
+        // Verify the VRF proof
+        let verified_output =
+            vrf_verify(pk, &vrf_input, proof).map_err(|e| DagError::InvalidVrf {
+                id,
+                reason: format!("VRF verification failed: {e}"),
+            })?;
+
+        // Check output matches
+        if verified_output != *output {
+            return Err(DagError::InvalidVrf {
+                id,
+                reason: "VRF output does not match proof".to_string(),
+            });
+        }
+
+        // Check leader eligibility: output (as u64) < threshold
+        let output_u64 = output.as_u64();
+        if output_u64 >= threshold {
+            return Err(DagError::InvalidVrf {
+                id,
+                reason: format!("VRF output {output_u64} not eligible (threshold {threshold})"),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Compute the VRF input from a block's parents.
+    /// Hash of concatenated parent IDs, domain-separated.
+    pub fn vrf_input(parents: &[BlockId]) -> Vec<u8> {
+        use blake3::Hasher;
+        let mut hasher = Hasher::new();
+        hasher.update(b"KOVANICA_VRF_INPUT_v1");
+        for parent in parents {
+            hasher.update(parent.as_bytes());
+        }
+        hasher.finalize().as_bytes().to_vec()
+    }
+
     /// The last `window + 1` blocks of the selected-parent chain ending at `tip`
     /// (inclusive), oldest first, as difficulty-retarget samples. This is the
     /// window [`Retarget::next_work`] scores to set the *next* block's work.
@@ -473,7 +716,19 @@ impl Dag {
     /// precedes a parent's. The structural DAG checks run first, so a validator
     /// only ever sees a block whose parents are present.
     pub fn insert(&mut self, block: Block) -> Result<BlockId, DagError> {
-        let id = block.id();
+        self.insert_with_id(block, None)
+    }
+
+    /// Insert `block` with an optional pre-computed `id`. If `id` is `Some`,
+    /// it is used instead of `block.id()` — this is needed for restoring
+    /// pruned blocks from snapshots where the block's payload is empty and
+    /// `block.id()` would differ from the original.
+    pub fn insert_with_id(
+        &mut self,
+        block: Block,
+        id: Option<BlockId>,
+    ) -> Result<BlockId, DagError> {
+        let id = id.unwrap_or_else(|| block.id());
         if self.nodes.contains_key(&id) {
             return Err(DagError::DuplicateBlock(id));
         }
@@ -521,6 +776,12 @@ impl Dag {
                 work: block.work(),
             });
         }
+
+        // Consensus-enforced VRF leader selection, if enabled.
+        if let Some(vrf_config) = self.vrf_config {
+            self.check_vrf(&block, id, &ghostdag, vrf_config.threshold)?;
+        }
+
         let past_size = self.nodes[&sp].past_size
             + 1
             + (ghostdag.mergeset_blues.len() + ghostdag.mergeset_reds.len()) as u64;
@@ -555,6 +816,12 @@ impl Dag {
         // Fold the one new block into the reachability oracle incrementally
         // (Kaspa reachability / interval reindexing), rather than rebuilding it.
         self.reach.add_block(id, sp, &mergeset);
+
+        // Evict payloads of blocks that are now beyond the pruning depth.
+        if self.payload_pruning_depth != u64::MAX {
+            self.prune_old_payloads();
+        }
+
         Ok(id)
     }
 }

@@ -33,17 +33,54 @@
 //! assert_eq!(rpc::execute_line(&mut node, "balance 2"), "ok 200");
 //! ```
 
+pub mod dht;
+pub mod dns_seed;
 pub mod explorer;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzz;
 pub mod mempool;
+pub mod mempool_v2;
+pub mod metrics;
 pub mod net;
 pub mod node;
 pub mod p2p;
+pub mod p2p_hardening;
 pub mod relay;
 pub mod rpc;
+pub mod spv;
 
+pub use dht::{
+    DhtMsg, KBucket, NodeId, NodeLookup, PeerContact, RoutingTable, UpdateResult,
+    TAG_DHT_FIND_NODE, TAG_DHT_NODES, TAG_DHT_PING, TAG_DHT_PONG,
+};
+pub use dns_seed::{
+    mock_resolver, production_resolver, DnsResolver, DnsSeedConfig, DnsSeedResolver,
+    MockDnsResolver, StdDnsResolver,
+};
 pub use explorer::serve as serve_explorer;
 pub use mempool::Mempool;
-pub use net::NetError;
-pub use node::{BlockRecord, Node, NodeError, Prepared, Sent};
+pub use mempool_v2::{Added, MempoolConfig, MempoolError, MempoolV2};
+pub use metrics::{
+    block_span, dht_span, init_metrics, names, peer_span, record_block_produced,
+    record_block_validation, record_checkpoint_size, record_dht_bootstrap, record_dht_find_node,
+    record_dht_pruned, record_dht_query_received, record_dht_query_sent,
+    record_explorer_http_request, record_mempool_evicted, record_mempool_promoted,
+    record_p2p_message_received, record_p2p_message_sent, record_peer_banned,
+    record_peer_connected, record_peer_disconnected, record_reorg, record_rpc_request,
+    record_snapshot_size, record_store_append, record_sync_complete, record_tx_validation,
+    rpc_span, set_dht_routing_table_size, set_explorer_ws_clients, set_mempool_counts,
+    set_peer_count, set_peer_score, sync_span, TimerGuard,
+};
+pub use net::{
+    decode_bodies, decode_getbodies, decode_getheaders, decode_headers, decode_inventory,
+    encode_bodies, encode_getbodies, encode_getheaders, encode_headers, encode_inventory,
+    exchange_full_dump, serve_headers_first, sync_headers_first, NetError, SyncStats,
+};
+pub use node::{BlockHeader, BlockRecord, MerkleBlock, Node, NodeError, Prepared, Sent};
 pub use p2p::{GossipEvent, GossipKind, Mesh, P2pError};
-pub use relay::{apply_relay, RelayMsg, RelaySession};
+pub use p2p_hardening::{P2pHardening, P2pHardeningConfig, PeerStats};
+pub use relay::{apply_relay, handle_relay_query, RelayMsg, RelaySession};
+pub use spv::{
+    build_locator, request_merkle_block, sync_headers_via_relay, sync_headers_via_relay_with_clock,
+    verify_merkle_block,
+};

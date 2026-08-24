@@ -53,11 +53,16 @@ pub mod pow;
 pub mod reachability;
 pub mod snapshot;
 pub mod validation;
+pub mod vrf;
 
 pub use block::{Block, BlockId};
-pub use dag::{BlockPreview, Dag, DagError, GhostdagData, KParam};
+pub use dag::{BlockPreview, Dag, DagError, GhostdagData, KParam, VrfConfig};
 pub use difficulty::{Retarget, TimedWork};
 pub use pow::{meets_target, mine};
 pub use reachability::Reachability;
 pub use snapshot::{decode_block, decode_snapshot, encode_block, DagSnapshot, SnapshotError};
 pub use validation::BlockValidator;
+pub use vrf::{
+    vrf_generate_keypair, vrf_keypair_from_seed, vrf_prove, vrf_verify, Scalar, VrfError,
+    VrfEvaluation, VrfOutput, VrfProof, VrfPublicKey, VrfSecretKey,
+};

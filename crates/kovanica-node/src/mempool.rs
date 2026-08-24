@@ -7,67 +7,64 @@
 //! applied against the current UTXO state and only the ones that hold are
 //! included. Ordering for assembly is by id, so block construction is
 //! deterministic across nodes.
-
-use std::collections::HashMap;
+//!
+//! This is the legacy `Mempool` type kept for backward compatibility.
+//! New code should use [`MempoolV2`] which adds orphan handling, fee-based
+//! eviction, and capacity limits.
 
 use kovanica_state::{Transaction, TxId, UtxoSet};
 
-/// A set of pending transactions.
+use crate::mempool_v2::{Added, MempoolV2};
+
+/// A set of pending transactions (legacy API).
 #[derive(Debug, Default)]
 pub struct Mempool {
-    pending: HashMap<TxId, Transaction>,
+    inner: MempoolV2,
 }
 
 impl Mempool {
     /// An empty mempool.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: MempoolV2::default(),
+        }
     }
 
     /// Add a transaction. Returns `false` if one with the same id was already
     /// present (a no-op).
     pub fn add(&mut self, tx: Transaction) -> bool {
-        let id = tx.id();
-        if self.pending.contains_key(&id) {
-            return false;
-        }
-        self.pending.insert(id, tx);
-        true
+        matches!(self.inner.add(tx), Ok(Added::Pending))
     }
 
     /// Whether a transaction with this id is pending.
     pub fn contains(&self, id: &TxId) -> bool {
-        self.pending.contains_key(id)
+        self.inner.contains_pending(id)
     }
 
     /// The pending transaction with this id, if present.
     pub fn get(&self, id: &TxId) -> Option<Transaction> {
-        self.pending.get(id).cloned()
+        self.inner.get(id).cloned()
     }
 
     /// Number of pending transactions.
     pub fn len(&self) -> usize {
-        self.pending.len()
+        self.inner.len_pending()
     }
 
     /// Whether the mempool is empty.
     pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
+        self.inner.len_pending() == 0
     }
 
     /// The pending transactions in a deterministic order (by id), for
     /// reproducible block assembly.
     pub fn ordered(&self) -> Vec<Transaction> {
-        let mut txs: Vec<Transaction> = self.pending.values().cloned().collect();
-        txs.sort_by_key(|tx| tx.id());
-        txs
+        self.inner.ordered_pending()
     }
 
     /// Remove the given transactions (e.g. after they were included in a block).
     pub fn remove_all(&mut self, ids: &[TxId]) {
-        for id in ids {
-            self.pending.remove(id);
-        }
+        self.inner.remove_all(ids);
     }
 
     /// Drop transactions that can never be valid against the current selected-tip
@@ -76,13 +73,7 @@ impl Mempool {
     /// "missing input" as permanently invalid on *this* branch (a later re-gossip
     /// can re-introduce it after a re-org). Returns how many were removed.
     pub fn evict_invalid(&mut self, utxo: &UtxoSet) -> usize {
-        let before = self.pending.len();
-        self.pending.retain(|_, tx| {
-            tx.inputs()
-                .iter()
-                .all(|input| utxo.contains(&input.outpoint))
-        });
-        before - self.pending.len()
+        self.inner.evict_invalid(utxo)
     }
 }
 

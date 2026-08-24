@@ -5,6 +5,10 @@
 //! transaction input must carry a signature that [`verify`]s against that
 //! address over the transaction's signature hash.
 //!
+//! For humans, an address renders as `kvnc…dag` — base58 over the 32 key
+//! bytes ([`Address::to_kvnc`]) — while the wire and ledger formats keep the
+//! raw bytes (64 hex). [`Address::parse`] accepts either rendering.
+//!
 //! [`KeyPair`] is a thin, deterministic wrapper over an ed25519 signing key —
 //! deterministic construction ([`KeyPair::from_seed`] / [`KeyPair::from_u64`])
 //! keeps tests and tooling reproducible without a random source. Verification
@@ -46,14 +50,12 @@ impl Address {
         format!("kvnc{}dag", b58_encode(&self.0))
     }
 
-    /// Parse 64-hex **or** `kvnc…dag`.
+    /// Parse 64-hex **or** `kvnc…dag` (case-insensitive wrapper).
     pub fn parse(s: &str) -> Result<Self, &'static str> {
         let t = s.trim();
         if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()) {
             let mut out = [0u8; 32];
-            let Ok(raw) = hex::decode(t) else {
-                return Err("address is not hex");
-            };
+            let raw = hex::decode(t).map_err(|_| "address is not hex")?;
             if raw.len() != 32 {
                 return Err("address must be 32 bytes");
             }
@@ -168,6 +170,7 @@ fn b58_decode(s: &str) -> Result<Vec<u8>, &'static str> {
     if s.is_empty() {
         return Err("empty kvnc payload");
     }
+    // 40 accumulator bytes (LSB first) so overflow past 32 is detectable.
     let mut acc = [0u8; 40];
     for c in s.bytes() {
         let val = B58
@@ -183,6 +186,11 @@ fn b58_decode(s: &str) -> Result<Vec<u8>, &'static str> {
         if carry != 0 {
             return Err("kvnc address overflow");
         }
+    }
+    // Reject anything wider than 32 bytes: without this check a payload
+    // encoding 33–40 bytes would silently truncate onto a wrong address.
+    if acc[..acc.len() - 32].iter().any(|b| *b != 0) {
+        return Err("kvnc address too long");
     }
     Ok(acc[acc.len() - 32..].to_vec())
 }
@@ -227,11 +235,36 @@ mod tests {
         let addr = KeyPair::from_u64(1).address();
         let shown = addr.to_kvnc();
         assert!(shown.starts_with("kvnc"), "{shown}");
-        assert!(shown.starts_with("kvnc"), "{shown}");
         assert!(shown.ends_with("dag"), "{shown}");
         assert!(shown.len() < 4 + 64 + 3, "should be shorter than hex wrap");
         assert_eq!(Address::parse(&shown).unwrap(), addr);
+        assert_eq!(Address::parse(&format!("  {shown}  ")).unwrap(), addr);
         assert_eq!(Address::parse(&addr.to_hex()).unwrap(), addr);
         assert!(Address::parse("not-an-address").is_err());
+        assert!(Address::parse("").is_err());
+    }
+
+    #[test]
+    fn kvnc_roundtrips_many_addresses() {
+        for seed in 0..64u64 {
+            let addr = KeyPair::from_u64(seed).address();
+            assert_eq!(
+                Address::parse(&addr.to_kvnc()).unwrap(),
+                addr,
+                "seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn b58_rejects_invalid_characters_and_overflow() {
+        // '0', 'O', 'I', 'l' are not in the base58 alphabet.
+        assert!(Address::parse("kvnc0OIl111dag").is_err());
+        // 55 high digits exceed even the 40-byte accumulator.
+        let long = "z".repeat(55);
+        assert!(Address::parse(&format!("kvnc{long}dag")).is_err());
+        // 50 high digits fit the accumulator but exceed 32 bytes of value.
+        let wide = "z".repeat(50);
+        assert!(Address::parse(&format!("kvnc{wide}dag")).is_err());
     }
 }
