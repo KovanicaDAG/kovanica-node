@@ -75,7 +75,7 @@ impl Default for DnsSeedConfig {
             seeds: vec![
                 "seed.kovanica.online".to_string(),
                 "seed2.kovanica.online".to_string(),
-                "seed.kovanica.net".to_string(),
+                "seed3.kovanica.online".to_string(),
             ],
             default_port: 9000,
             fallbacks: vec![
