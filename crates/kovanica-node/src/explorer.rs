@@ -19,6 +19,7 @@ use crate::dht::{NodeId, PeerContact, RoutingTable};
 use crate::dns_seed::{DnsSeedConfig, DnsSeedResolver};
 use crate::metrics::{
     init_metrics, record_explorer_http_request, render_prometheus, set_explorer_ws_clients,
+    set_peer_count,
 };
 use crate::net::{
     encode_records, pull_blocks_timeout, serve_exchange, serve_headers_first, sync_headers_first,
@@ -788,6 +789,9 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
 
     // Prometheus metrics endpoint
     if method == "GET" && path == "/metrics" {
+        // Sample live gauges on every scrape so Prometheus always sees fresh
+        // values even when no block/mempool event fired recently.
+        set_peer_count(app.mesh.total_peer_count());
         return respond_prometheus_metrics(&mut stream);
     }
 
