@@ -1,9 +1,12 @@
 plugins {
-    // Versions must match android-light-node's catalogs: composite include
-    // chains both modules into one build, and Gradle rejects a second AGP /
-    // Kotlin version on the shared buildscript classpath.
-    id("com.android.library") version "8.10.1"
-    id("org.jetbrains.kotlin.android") version "2.2.20"
+    // No versions here: when include'd into android-light-node (the only
+    // Gradle consumer today), the root settings' pluginManagement forces
+    // AGP/Kotlin versions via eachPlugin — a second explicit `version`
+    // on the shared buildscript classpath is rejected by Gradle
+    // ("already on the classpath with an unknown version"). Standalone
+    // builds must supply versions via their own pluginManagement.
+    id("com.android.library")
+    id("org.jetbrains.kotlin.android")
 }
 
 android {
