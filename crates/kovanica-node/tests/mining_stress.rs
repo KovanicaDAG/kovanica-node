@@ -16,7 +16,9 @@ fn send_request_raw(app: &mut Explorer, req_bytes: &[u8]) -> (u16, String) {
     let (server_stream, _) = listener.accept().expect("accept server");
 
     client.write_all(req_bytes).expect("write request");
-    client.shutdown(std::net::Shutdown::Write).expect("shutdown write");
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("shutdown write");
 
     let _ = handle(app, server_stream);
 
@@ -116,13 +118,7 @@ fn mine_and_submit(
     payload_hex: &str,
 ) -> (u16, String, BlockId) {
     let payload_bytes = hex::decode(payload_hex).expect("Valid payload hex");
-    let template_block = Block::new(
-        parents.to_vec(),
-        work,
-        timestamp_ms,
-        0,
-        payload_bytes,
-    );
+    let template_block = Block::new(parents.to_vec(), work, timestamp_ms, 0, payload_bytes);
     let mined = pow::mine(&template_block);
     let nonce = mined.nonce();
     let block_id = mined.id();
@@ -195,7 +191,10 @@ fn test_http_large_and_boundary_payloads() {
         oversized_json
     );
     let (status, body) = send_request_raw(&mut app, oversized_req.as_bytes());
-    assert_eq!(status, 400, "Oversized body should be rejected with 400: {body}");
+    assert_eq!(
+        status, 400,
+        "Oversized body should be rejected with 400: {body}"
+    );
     assert!(body.contains("\"ok\":false"));
 }
 
@@ -233,13 +232,8 @@ fn test_http_slow_and_chunked_body_streaming() {
     );
 
     // Send body in tiny 7-byte chunks with 2ms delay between chunks
-    let (status, body) = send_request_slow_body(
-        &mut app,
-        headers.as_bytes(),
-        submit_json.as_bytes(),
-        7,
-        2,
-    );
+    let (status, body) =
+        send_request_slow_body(&mut app, headers.as_bytes(), submit_json.as_bytes(), 7, 2);
     assert_eq!(status, 200, "Slow-chunked body request failed: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(resp["ok"], true);
@@ -273,8 +267,14 @@ fn test_http_malformed_json_matrix() {
             json_body
         );
         let (status, body) = send_request_raw(&mut app, req.as_bytes());
-        assert_eq!(status, 400, "Case '{name}' should return 400, got {status}: {body}");
-        assert!(body.contains("\"ok\":false"), "Case '{name}' response should contain ok:false");
+        assert_eq!(
+            status, 400,
+            "Case '{name}' should return 400, got {status}: {body}"
+        );
+        assert!(
+            body.contains("\"ok\":false"),
+            "Case '{name}' response should contain ok:false"
+        );
     }
 
     // Extraneous unknown fields alongside valid block fields should be tolerated
@@ -308,7 +308,10 @@ fn test_http_malformed_json_matrix() {
         valid_with_extras
     );
     let (status, body) = send_request_raw(&mut app, req.as_bytes());
-    assert_eq!(status, 200, "Valid request with extra fields should succeed: {body}");
+    assert_eq!(
+        status, 200,
+        "Valid request with extra fields should succeed: {body}"
+    );
     assert!(body.contains("\"ok\":true"));
 }
 
@@ -380,8 +383,14 @@ fn test_http_invalid_hex_and_type_coercions() {
             json_str
         );
         let (status, body) = send_request_raw(&mut app, req.as_bytes());
-        assert_eq!(status, 400, "Case '{name}' should return 400, got {status}: {body}");
-        assert!(body.contains("\"ok\":false"), "Case '{name}' should contain ok:false");
+        assert_eq!(
+            status, 400,
+            "Case '{name}' should return 400, got {status}: {body}"
+        );
+        assert!(
+            body.contains("\"ok\":false"),
+            "Case '{name}' should contain ok:false"
+        );
     }
 
     // String coercion test: work, timestamp_ms, nonce passed as valid numeric strings
@@ -394,7 +403,10 @@ fn test_http_invalid_hex_and_type_coercions() {
         coerced_valid_json
     );
     let (status, body) = send_request_raw(&mut app, req.as_bytes());
-    assert_eq!(status, 200, "Numeric string fields should be coerced successfully: {body}");
+    assert_eq!(
+        status, 200,
+        "Numeric string fields should be coerced successfully: {body}"
+    );
     assert!(body.contains("\"ok\":true"));
 }
 
@@ -415,7 +427,10 @@ fn test_boundary_work_values() {
 
         // Submit block with work: 0
         let (status, body, _) = mine_and_submit(&mut app, &[parent_id], 0, ts, payload_hex);
-        assert_eq!(status, 200, "work:0 block should be accepted when PoW is off: {body}");
+        assert_eq!(
+            status, 200,
+            "work:0 block should be accepted when PoW is off: {body}"
+        );
         assert!(body.contains("\"ok\":true"));
     }
 
@@ -433,7 +448,10 @@ fn test_boundary_work_values() {
 
         // meets_target treats work 0 as work 1 (accepts all hashes)
         let (status, body, _) = mine_and_submit(&mut app, &[parent_id], 0, ts, payload_hex);
-        assert_eq!(status, 200, "work:0 block with PoW enabled should succeed: {body}");
+        assert_eq!(
+            status, 200,
+            "work:0 block with PoW enabled should succeed: {body}"
+        );
         assert!(body.contains("\"ok\":true"));
     }
 
@@ -450,7 +468,10 @@ fn test_boundary_work_values() {
         let payload_hex = tmpl["payload"].as_str().unwrap();
 
         let (status, body, _) = mine_and_submit(&mut app, &[parent_id], 1, ts, payload_hex);
-        assert_eq!(status, 200, "work:1 block with PoW enabled should succeed: {body}");
+        assert_eq!(
+            status, 200,
+            "work:1 block with PoW enabled should succeed: {body}"
+        );
         assert!(body.contains("\"ok\":true"));
     }
 
@@ -477,7 +498,10 @@ fn test_boundary_work_values() {
             submit_json
         );
         let (status, body) = send_request_raw(&mut app, req.as_bytes());
-        assert_eq!(status, 400, "Invalid nonce for high work should fail: {body}");
+        assert_eq!(
+            status, 400,
+            "Invalid nonce for high work should fail: {body}"
+        );
         assert!(body.contains("proof of work target not met") || body.contains("\"ok\":false"));
     }
 }
@@ -504,19 +528,33 @@ fn test_boundary_timestamps() {
 
     // 2.6 Future timestamp within 2 hours: now + 1 hour (<= 2h limit)
     let tmpl2 = get_mining_template(&mut app);
-    let tip2 = BlockId::from_bytes(hex::decode(tmpl2["parents"][0].as_str().unwrap()).unwrap().try_into().unwrap());
+    let tip2 = BlockId::from_bytes(
+        hex::decode(tmpl2["parents"][0].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
     let payload2_hex = tmpl2["payload"].as_str().unwrap();
     let valid_future_ts = now_ms.saturating_add(60 * 60 * 1000); // +1h
     let (status, body, _) = mine_and_submit(&mut app, &[tip2], work, valid_future_ts, payload2_hex);
-    assert_eq!(status, 200, "Future timestamp within 2h should succeed: {body}");
+    assert_eq!(
+        status, 200,
+        "Future timestamp within 2h should succeed: {body}"
+    );
     assert!(body.contains("\"ok\":true"));
 
     // 2.7 Future timestamp beyond 2 hours: now + 2 hours + 60 seconds (> 2h limit)
     let tmpl3 = get_mining_template(&mut app);
-    let tip3 = BlockId::from_bytes(hex::decode(tmpl3["parents"][0].as_str().unwrap()).unwrap().try_into().unwrap());
+    let tip3 = BlockId::from_bytes(
+        hex::decode(tmpl3["parents"][0].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
     let payload3_hex = tmpl3["payload"].as_str().unwrap();
     let invalid_future_ts = now_ms.saturating_add(MAX_FUTURE_DRIFT_MS + 60_000); // +2h 1min
-    let (status, body, _) = mine_and_submit(&mut app, &[tip3], work, invalid_future_ts, payload3_hex);
+    let (status, body, _) =
+        mine_and_submit(&mut app, &[tip3], work, invalid_future_ts, payload3_hex);
     assert_eq!(status, 400, "Timestamp > 2h in future must fail: {body}");
     assert!(body.contains("more than 2h ahead of local clock") || body.contains("\"ok\":false"));
 
@@ -549,7 +587,8 @@ fn test_boundary_parents_and_dag_topology() {
     };
 
     // First child of genesis
-    let (status1, body1, child1_id) = mine_and_submit(&mut app, &[genesis_id], work, ts + 10, payload_hex);
+    let (status1, body1, child1_id) =
+        mine_and_submit(&mut app, &[genesis_id], work, ts + 10, payload_hex);
     assert_eq!(status1, 200, "Child 1 creation failed: {body1}");
 
     // Second parallel child of genesis (fork)
@@ -559,13 +598,8 @@ fn test_boundary_parents_and_dag_topology() {
         let node = app.mesh.node("alpha").unwrap();
         node.mining_template_for(Some(custom_miner)).unwrap()
     };
-    let (status2, body2, child2_id) = mine_and_submit(
-        &mut app,
-        &[genesis_id],
-        work,
-        ts + 20,
-        &custom_tmpl.payload,
-    );
+    let (status2, body2, child2_id) =
+        mine_and_submit(&mut app, &[genesis_id], work, ts + 20, &custom_tmpl.payload);
     assert_eq!(status2, 200, "Child 2 creation failed: {body2}");
 
     // Merge both children in reverse/out-of-order: [child2_id, child1_id]
@@ -580,7 +614,10 @@ fn test_boundary_parents_and_dag_topology() {
         ts + 30,
         &merge_payload,
     );
-    assert_eq!(merge_status, 200, "Merging out-of-order tips should succeed: {merge_body}");
+    assert_eq!(
+        merge_status, 200,
+        "Merging out-of-order tips should succeed: {merge_body}"
+    );
     assert!(merge_body.contains("\"ok\":true"));
 
     let node_after = app.mesh.node("alpha").unwrap();
@@ -612,7 +649,10 @@ fn test_dag_consistency_after_corrupted_bursts() {
             _ => "POST /api/mine/submit HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 60\r\n\r\n{\"parents\":[\"0000000000000000000000000000000000000000000000000000000000000000\"],\"work\":1,\"timestamp_ms\":10,\"nonce\":0,\"payload\":\"00\"}",
         };
         let (status, body) = send_request_raw(&mut app, bad_payload.as_bytes());
-        assert_eq!(status, 400, "Corrupted request {i} returned {status}: {body}");
+        assert_eq!(
+            status, 400,
+            "Corrupted request {i} returned {status}: {body}"
+        );
     }
 
     // Verify node state is completely untouched
@@ -630,7 +670,10 @@ fn test_dag_consistency_after_corrupted_bursts() {
     let payload_hex = tmpl["payload"].as_str().unwrap();
 
     let (status, body, valid_id) = mine_and_submit(&mut app, &[parent_id], work, ts, payload_hex);
-    assert_eq!(status, 200, "Valid submission after corrupted burst failed: {body}");
+    assert_eq!(
+        status, 200,
+        "Valid submission after corrupted burst failed: {body}"
+    );
     assert!(body.contains("\"ok\":true"));
 
     let node_final = app.mesh.node("alpha").unwrap();
@@ -649,7 +692,14 @@ fn test_mining_template_and_continuous_block_pipeline() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|p| BlockId::from_bytes(hex::decode(p.as_str().unwrap()).unwrap().try_into().unwrap()))
+            .map(|p| {
+                BlockId::from_bytes(
+                    hex::decode(p.as_str().unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                )
+            })
             .collect();
         let work = tmpl["work"].as_u64().unwrap() as u128;
         let ts = tmpl["timestamp_ms"].as_u64().unwrap();
@@ -688,7 +738,14 @@ fn test_mempool_drain_and_reorg_consistency() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|p| BlockId::from_bytes(hex::decode(p.as_str().unwrap()).unwrap().try_into().unwrap()))
+        .map(|p| {
+            BlockId::from_bytes(
+                hex::decode(p.as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            )
+        })
         .collect();
     let work = tmpl["work"].as_u64().unwrap() as u128;
     let ts = tmpl["timestamp_ms"].as_u64().unwrap();
@@ -701,13 +758,19 @@ fn test_mempool_drain_and_reorg_consistency() {
     let node_after = app.mesh.node("alpha").unwrap();
     assert_eq!(node_after.selected_tip().unwrap(), mined_id);
     assert_eq!(node_after.pending_count(), 0, "Mempool should be drained");
-    assert_eq!(node_after.balance(&recipient).unwrap(), 100u128 * 100_000_000u128);
+    assert_eq!(
+        node_after.balance(&recipient).unwrap(),
+        100u128 * 100_000_000u128
+    );
 
     // Resubmitting same block should be idempotent and not double-spend or change balance
-    let (idempotent_status, idempotent_body, _) = mine_and_submit(&mut app, &parents, work, ts, payload_hex);
+    let (idempotent_status, idempotent_body, _) =
+        mine_and_submit(&mut app, &parents, work, ts, payload_hex);
     assert_eq!(idempotent_status, 200);
     assert!(idempotent_body.contains(&mined_id.to_hex()));
     let node_recheck = app.mesh.node("alpha").unwrap();
-    assert_eq!(node_recheck.balance(&recipient).unwrap(), 100u128 * 100_000_000u128);
+    assert_eq!(
+        node_recheck.balance(&recipient).unwrap(),
+        100u128 * 100_000_000u128
+    );
 }
-

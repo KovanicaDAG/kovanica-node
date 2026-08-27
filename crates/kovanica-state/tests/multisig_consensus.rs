@@ -147,8 +147,7 @@ fn test_multisig_2_of_3_all_subsets_success() {
 
     for (k_a, k_b) in subsets {
         let mut utxo = UtxoSet::new();
-        let coinbase =
-            Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+        let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
         let coin = OutPoint::new(coinbase.id(), 0);
         apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -494,8 +493,10 @@ fn test_valid_script_wrong_address_hash_rejected() {
 
     let mut utxo = UtxoSet::new();
     // Locked to Script B
-    let coinbase =
-        Transaction::coinbase(vec![TxOutput::new(1_000, script_b.address())], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(
+        vec![TxOutput::new(1_000, script_b.address())],
+        b"cb".to_vec(),
+    );
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -793,10 +794,7 @@ fn test_malformed_signature_length_rejected() {
     );
 
     let err = apply_block(&mut utxo, &[tx], 0).unwrap_err();
-    assert!(matches!(
-        err,
-        LedgerError::BadSignatureSize { len: 63, .. }
-    ));
+    assert!(matches!(err, LedgerError::BadSignatureSize { len: 63, .. }));
 }
 
 // =========================================================================
@@ -1022,7 +1020,7 @@ fn test_single_tx_mixed_inputs_p2pk_and_p2sh() {
     let cb = Transaction::coinbase(
         vec![
             TxOutput::new(1_000, kp_a.address()), // P2PK
-            TxOutput::new(2_000, p2sh_addr),       // P2SH
+            TxOutput::new(2_000, p2sh_addr),      // P2SH
         ],
         b"cb".to_vec(),
     );
@@ -1177,23 +1175,19 @@ fn test_multisig_double_spend_in_parallel_blocks_resolved_by_linearization() {
 
     // Linearize and apply DAG
     let order = dag.linearize();
-    let (winner, loser, winner_addr, loser_addr) = if order.iter().position(|b| *b == id_a)
-        < order.iter().position(|b| *b == id_b)
-    {
-        (id_a, id_b, alice, bob)
-    } else {
-        (id_b, id_a, bob, alice)
-    };
+    let (winner, loser, winner_addr, loser_addr) =
+        if order.iter().position(|b| *b == id_a) < order.iter().position(|b| *b == id_b) {
+            (id_a, id_b, alice, bob)
+        } else {
+            (id_b, id_a, bob, alice)
+        };
 
     let run = apply_dag(&dag, 1_000);
     assert_eq!(run.accepted.len(), 3); // Genesis + Block 1 + winner
     assert_eq!(run.rejected.len(), 1); // Loser
     assert_eq!(run.accepted[2], winner);
     assert_eq!(run.rejected[0].0, loser);
-    assert!(matches!(
-        run.rejected[0].1,
-        LedgerError::MissingInput(_)
-    ));
+    assert!(matches!(run.rejected[0].1, LedgerError::MissingInput(_)));
 
     assert_eq!(run.utxo.balance(&winner_addr), 900);
     assert_eq!(run.utxo.balance(&loser_addr), 0);

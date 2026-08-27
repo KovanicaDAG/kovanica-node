@@ -766,13 +766,14 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
     };
 
     // Extract headers and body
-    let (headers_raw, body_initial) = if let Some(pos) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") {
-        (&buf[..pos], &buf[pos + 4..n])
-    } else if let Some(pos) = buf[..n].windows(2).position(|w| w == b"\n\n") {
-        (&buf[..pos], &buf[pos + 2..n])
-    } else {
-        (&buf[..n], &[][..])
-    };
+    let (headers_raw, body_initial) =
+        if let Some(pos) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") {
+            (&buf[..pos], &buf[pos + 4..n])
+        } else if let Some(pos) = buf[..n].windows(2).position(|w| w == b"\n\n") {
+            (&buf[..pos], &buf[pos + 2..n])
+        } else {
+            (&buf[..n], &[][..])
+        };
 
     let headers_str = String::from_utf8_lossy(headers_raw);
 
@@ -861,7 +862,10 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
         );
     }
     if method == "GET" && path == "/api/mine/template" {
-        let node_name = query.get("node").map(|s| s.as_str()).unwrap_or(&app.selected);
+        let node_name = query
+            .get("node")
+            .map(|s| s.as_str())
+            .unwrap_or(&app.selected);
         let Some(node) = app.mesh.node(node_name) else {
             let err = format!("{{\"ok\":false,\"error\":\"unknown node {}\"}}", node_name);
             return respond(&mut stream, 400, "application/json", err.as_bytes());
@@ -988,7 +992,10 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
         let json_body: serde_json::Value = match serde_json::from_str(&body_str) {
             Ok(val) => val,
             Err(e) => {
-                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("invalid json body: {e}")));
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid json body: {e}"))
+                );
                 return respond(&mut stream, 400, "application/json", err.as_bytes());
             }
         };
@@ -997,7 +1004,10 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
         let parents_val = match json_body.get("parents") {
             Some(serde_json::Value::Array(arr)) if !arr.is_empty() => arr,
             _ => {
-                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing or empty 'parents' field"));
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing or empty 'parents' field")
+                );
                 return respond(&mut stream, 400, "application/json", err.as_bytes());
             }
         };
@@ -1005,20 +1015,29 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
         let mut parents = Vec::with_capacity(parents_val.len());
         for p_val in parents_val {
             let Some(p_str) = p_val.as_str() else {
-                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("parent block id must be a hex string"));
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("parent block id must be a hex string")
+                );
                 return respond(&mut stream, 400, "application/json", err.as_bytes());
             };
             let bytes = match hex::decode(p_str.trim()) {
                 Ok(b) => b,
                 Err(_) => {
-                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("invalid hex in parent block id: {p_str}")));
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr(&format!("invalid hex in parent block id: {p_str}"))
+                    );
                     return respond(&mut stream, 400, "application/json", err.as_bytes());
                 }
             };
             let arr: [u8; 32] = match bytes.try_into() {
                 Ok(a) => a,
                 Err(_) => {
-                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("parent block id must be 32 bytes: {p_str}")));
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr(&format!("parent block id must be 32 bytes: {p_str}"))
+                    );
                     return respond(&mut stream, 400, "application/json", err.as_bytes());
                 }
             };
@@ -1030,12 +1049,18 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
             Some(v) => match parse_json_u128(v) {
                 Some(w) => w,
                 None => {
-                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("invalid 'work' field"));
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr("invalid 'work' field")
+                    );
                     return respond(&mut stream, 400, "application/json", err.as_bytes());
                 }
             },
             None => {
-                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'work' field"));
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'work' field")
+                );
                 return respond(&mut stream, 400, "application/json", err.as_bytes());
             }
         };
@@ -1045,12 +1070,18 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
             Some(v) => match parse_json_u64(v) {
                 Some(ts) => ts,
                 None => {
-                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("invalid 'timestamp_ms' field"));
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr("invalid 'timestamp_ms' field")
+                    );
                     return respond(&mut stream, 400, "application/json", err.as_bytes());
                 }
             },
             None => {
-                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'timestamp_ms' field"));
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'timestamp_ms' field")
+                );
                 return respond(&mut stream, 400, "application/json", err.as_bytes());
             }
         };
@@ -1060,12 +1091,18 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
             Some(v) => match parse_json_u64(v) {
                 Some(nc) => nc,
                 None => {
-                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("invalid 'nonce' field"));
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr("invalid 'nonce' field")
+                    );
                     return respond(&mut stream, 400, "application/json", err.as_bytes());
                 }
             },
             None => {
-                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'nonce' field"));
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'nonce' field")
+                );
                 return respond(&mut stream, 400, "application/json", err.as_bytes());
             }
         };
@@ -1075,19 +1112,28 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
             let payload_bytes = match hex::decode(payload_val.trim()) {
                 Ok(b) => b,
                 Err(e) => {
-                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("invalid hex in 'payload': {e}")));
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr(&format!("invalid hex in 'payload': {e}"))
+                    );
                     return respond(&mut stream, 400, "application/json", err.as_bytes());
                 }
             };
             match decode_block_payload(&payload_bytes) {
                 Ok(t) => t,
                 Err(e) => {
-                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("undecodable block payload: {e:?}")));
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr(&format!("undecodable block payload: {e:?}"))
+                    );
                     return respond(&mut stream, 400, "application/json", err.as_bytes());
                 }
             }
         } else {
-            let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'payload' field"));
+            let err = format!(
+                "{{\"ok\":false,\"error\":{}}}",
+                jstr("missing 'payload' field")
+            );
             return respond(&mut stream, 400, "application/json", err.as_bytes());
         };
 
@@ -1115,7 +1161,13 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
                 encode_block_payload(&record.txs),
             );
             if !kovanica_dag::pow::meets_target(&block.id(), record.work) {
-                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("proof of work target not met for block {}", block.id())));
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!(
+                        "proof of work target not met for block {}",
+                        block.id()
+                    ))
+                );
                 return respond(&mut stream, 400, "application/json", err.as_bytes());
             }
         }
@@ -1152,7 +1204,7 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
 fn estimate_fee(node: &Node, _amount: u64) -> Result<(u64, u64, u64), String> {
     let mut block_tx_count = 0;
     let mut blocks_scanned = 0;
-    
+
     if let Ok(mut current) = node.selected_tip() {
         for _ in 0..10 {
             if let Some(record) = node.block_record(&current) {
@@ -1172,11 +1224,15 @@ fn estimate_fee(node: &Node, _amount: u64) -> Result<(u64, u64, u64), String> {
     let min = node.min_fee();
     // Assuming > 20 txs per block average is congested for this testnet
     let is_congested = blocks_scanned > 0 && (block_tx_count as f64 / blocks_scanned as f64) > 20.0;
-    
+
     let pending = node.pending_txs();
     if pending.is_empty() {
         let base = if is_congested { min * 2 } else { min };
-        return Ok((base, std::cmp::max(min + 1, base * 2), std::cmp::max(min + 2, base * 3)));
+        return Ok((
+            base,
+            std::cmp::max(min + 1, base * 2),
+            std::cmp::max(min + 2, base * 3),
+        ));
     }
 
     let mut fees: Vec<u64> = pending
@@ -1204,13 +1260,17 @@ fn estimate_fee(node: &Node, _amount: u64) -> Result<(u64, u64, u64), String> {
 
     if fees.is_empty() {
         let base = if is_congested { min * 2 } else { min };
-        return Ok((base, std::cmp::max(min + 1, base * 2), std::cmp::max(min + 2, base * 3)));
+        return Ok((
+            base,
+            std::cmp::max(min + 1, base * 2),
+            std::cmp::max(min + 2, base * 3),
+        ));
     }
 
     fees.sort();
     let p50_idx = (fees.len() as f64 * 0.5).floor() as usize;
     let p90_idx = (fees.len() as f64 * 0.9).floor() as usize;
-    
+
     let p50 = fees[p50_idx.min(fees.len() - 1)];
     let p90 = fees[p90_idx.min(fees.len() - 1)];
 
@@ -1372,7 +1432,10 @@ fn dispatch(
             let amount = parse_u64(q, "amount", 0)?;
             let n = app.mesh.node(&node).ok_or("unknown node")?;
             let (slow, normal, fast) = estimate_fee(n, amount)?;
-            return Ok(format!("{{\"ok\":true,\"slow\":{},\"normal\":{},\"fast\":{}}}", slow, normal, fast));
+            return Ok(format!(
+                "{{\"ok\":true,\"slow\":{},\"normal\":{},\"fast\":{}}}",
+                slow, normal, fast
+            ));
         }
         other => return Err(format!("unknown action {other}")),
     }
@@ -2067,7 +2130,14 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|p| BlockId::from_bytes(hex::decode(p.as_str().unwrap()).unwrap().try_into().unwrap()))
+            .map(|p| {
+                BlockId::from_bytes(
+                    hex::decode(p.as_str().unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                )
+            })
             .collect::<Vec<_>>();
         let work = template_json["work"].as_u64().unwrap() as u128;
         let ts = template_json["timestamp_ms"].as_u64().unwrap();
@@ -2125,7 +2195,8 @@ mod tests {
         assert!(body.contains("\"ok\":false"));
 
         // 3. Unknown node
-        let unknown_node = "GET /api/mine/template?node=nonexistent HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        let unknown_node =
+            "GET /api/mine/template?node=nonexistent HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
         let (status, body) = send_req(&mut app, unknown_node);
         assert_eq!(status, 400);
         assert!(body.contains("\"ok\":false"));

@@ -632,11 +632,13 @@ fn test_empirical_malformed_inputs_rejection() {
         let (status, _body, json) = send_http_request(&mut app, req);
         assert_eq!(
             status, 400,
-            "Case '{}' must be rejected with HTTP 400. Got {}", desc, status
+            "Case '{}' must be rejected with HTTP 400. Got {}",
+            desc, status
         );
         assert_eq!(
             json["ok"], false,
-            "Case '{}' must return ok: false JSON", desc
+            "Case '{}' must return ok: false JSON",
+            desc
         );
     }
 }

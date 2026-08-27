@@ -80,15 +80,16 @@ fn mine_from_template(tmpl: &serde_json::Value) -> (Vec<BlockId>, u128, u64, u64
     let payload_hex = tmpl["payload"].as_str().expect("payload hex").to_string();
     let payload_bytes = hex::decode(&payload_hex).expect("valid hex payload");
 
-    let template_block = Block::new(
-        parents.clone(),
+    let template_block = Block::new(parents.clone(), work, timestamp_ms, 0, payload_bytes);
+    let mined = pow::mine(&template_block);
+    (
+        parents,
         work,
         timestamp_ms,
-        0,
-        payload_bytes,
-    );
-    let mined = pow::mine(&template_block);
-    (parents, work, timestamp_ms, mined.nonce(), payload_hex, mined.id())
+        mined.nonce(),
+        payload_hex,
+        mined.id(),
+    )
 }
 
 // ============================================================================
@@ -247,7 +248,10 @@ fn test_adversarial_nonexistent_parent_id_rejection() {
         body
     );
     let (status, resp_body, json) = send_raw_http(&mut app, req.as_bytes());
-    assert_eq!(status, 400, "Nonexistent parent must return HTTP 400: {resp_body}");
+    assert_eq!(
+        status, 400,
+        "Nonexistent parent must return HTTP 400: {resp_body}"
+    );
     assert_eq!(json["ok"], false);
     assert!(
         resp_body.contains("missing parent")
@@ -267,7 +271,10 @@ fn test_adversarial_nonexistent_parent_id_rejection() {
         mixed_body
     );
     let (mixed_status, mixed_resp, mixed_json) = send_raw_http(&mut app, mixed_req.as_bytes());
-    assert_eq!(mixed_status, 400, "Mixed valid/nonexistent parents must return HTTP 400: {mixed_resp}");
+    assert_eq!(
+        mixed_status, 400,
+        "Mixed valid/nonexistent parents must return HTTP 400: {mixed_resp}"
+    );
     assert_eq!(mixed_json["ok"], false);
 }
 
@@ -427,7 +434,13 @@ fn test_adversarial_timestamp_drift_and_coercion() {
 
     // 2. Extreme future timestamp (> 2 hours wall-clock drift)
     let drift_too_far = now_ms + MAX_FUTURE_DRIFT_MS + 120_000; // 2 hours + 2 min
-    let block_too_far = Block::new(vec![parent_id], work, drift_too_far, 0, payload_bytes.clone());
+    let block_too_far = Block::new(
+        vec![parent_id],
+        work,
+        drift_too_far,
+        0,
+        payload_bytes.clone(),
+    );
     let mined_too_far = pow::mine(&block_too_far);
     let far_body = format!(
         "{{\"parents\":[\"{parent_hex}\"],\"work\":{work},\"timestamp_ms\":{drift_too_far},\"nonce\":{},\"payload\":\"{payload_hex}\"}}",
@@ -439,7 +452,10 @@ fn test_adversarial_timestamp_drift_and_coercion() {
         far_body
     );
     let (far_status, far_resp, far_json) = send_raw_http(&mut app, far_req.as_bytes());
-    assert_eq!(far_status, 400, "Future drift > 2h must be rejected with HTTP 400: {far_resp}");
+    assert_eq!(
+        far_status, 400,
+        "Future drift > 2h must be rejected with HTTP 400: {far_resp}"
+    );
     assert_eq!(far_json["ok"], false);
     assert!(
         far_resp.contains("more than 2h ahead of local clock")
@@ -459,12 +475,21 @@ fn test_adversarial_timestamp_drift_and_coercion() {
         max_body
     );
     let (max_status, max_resp, max_json) = send_raw_http(&mut app, max_req.as_bytes());
-    assert_eq!(max_status, 400, "Timestamp u64::MAX must return HTTP 400: {max_resp}");
+    assert_eq!(
+        max_status, 400,
+        "Timestamp u64::MAX must return HTTP 400: {max_resp}"
+    );
     assert_eq!(max_json["ok"], false);
 
     // 4. Valid future timestamp within 2h limit (now + 30 min)
     let valid_future_ts = now_ms + (30 * 60 * 1000);
-    let block_valid_future = Block::new(vec![parent_id], work, valid_future_ts, 0, payload_bytes.clone());
+    let block_valid_future = Block::new(
+        vec![parent_id],
+        work,
+        valid_future_ts,
+        0,
+        payload_bytes.clone(),
+    );
     let mined_valid = pow::mine(&block_valid_future);
     let valid_future_body = format!(
         "{{\"parents\":[\"{parent_hex}\"],\"work\":{work},\"timestamp_ms\":{valid_future_ts},\"nonce\":{},\"payload\":\"{payload_hex}\"}}",
@@ -476,7 +501,10 @@ fn test_adversarial_timestamp_drift_and_coercion() {
         valid_future_body
     );
     let (vf_status, vf_resp, vf_json) = send_raw_http(&mut app, valid_future_req.as_bytes());
-    assert_eq!(vf_status, 200, "Valid timestamp within 2h should succeed: {vf_resp}");
+    assert_eq!(
+        vf_status, 200,
+        "Valid timestamp within 2h should succeed: {vf_resp}"
+    );
     assert_eq!(vf_json["ok"], true);
     assert_eq!(vf_json["block"], mined_valid.id().to_hex());
 }
@@ -490,10 +518,20 @@ fn test_adversarial_template_endpoint_queries() {
     let mut app = Explorer::boot();
 
     // 1. Unknown node queries
-    let unknown_nodes = ["ghost", "nonexistent", "node_999", "alpha-invalid", "%20", "null"];
+    let unknown_nodes = [
+        "ghost",
+        "nonexistent",
+        "node_999",
+        "alpha-invalid",
+        "%20",
+        "null",
+    ];
     for node in unknown_nodes {
         let (status, resp_body, json) = fetch_template(&mut app, &format!("?node={node}"));
-        assert_eq!(status, 400, "Query for unknown node '{node}' must return HTTP 400: {resp_body}");
+        assert_eq!(
+            status, 400,
+            "Query for unknown node '{node}' must return HTTP 400: {resp_body}"
+        );
         assert_eq!(json["ok"], false);
         assert!(
             resp_body.contains("unknown node") || json["error"].is_string(),
@@ -504,7 +542,10 @@ fn test_adversarial_template_endpoint_queries() {
     // 2. Valid nodes (alpha, beta, gamma)
     for valid_node in ["alpha", "beta", "gamma"] {
         let (status, resp_body, json) = fetch_template(&mut app, &format!("?node={valid_node}"));
-        assert_eq!(status, 200, "Valid node '{valid_node}' template failed: {resp_body}");
+        assert_eq!(
+            status, 200,
+            "Valid node '{valid_node}' template failed: {resp_body}"
+        );
         assert_eq!(json["ok"], true);
         assert!(json["parents"].is_array() && !json["parents"].as_array().unwrap().is_empty());
         assert!(json["work"].is_number() || json["work"].is_string());
@@ -519,7 +560,10 @@ fn test_adversarial_template_endpoint_queries() {
 
     // 3a. Valid custom miner address
     let (m_status, m_body, m_json) = fetch_template(&mut app, &format!("?miner={custom_hex}"));
-    assert_eq!(m_status, 200, "Valid custom miner address query failed: {m_body}");
+    assert_eq!(
+        m_status, 200,
+        "Valid custom miner address query failed: {m_body}"
+    );
     assert_eq!(m_json["ok"], true);
     assert_eq!(m_json["miner"], custom_hex);
 
@@ -527,7 +571,10 @@ fn test_adversarial_template_endpoint_queries() {
     let bad_miners = ["invalid_hex", "12345", "00", "not_a_key", ""];
     for bad_m in bad_miners {
         let (b_status, b_body, b_json) = fetch_template(&mut app, &format!("?miner={bad_m}"));
-        assert_eq!(b_status, 200, "Malformed miner '{bad_m}' should fall back gracefully: {b_body}");
+        assert_eq!(
+            b_status, 200,
+            "Malformed miner '{bad_m}' should fall back gracefully: {b_body}"
+        );
         assert_eq!(b_json["ok"], true);
     }
 }
@@ -549,11 +596,15 @@ fn test_fuzz_burst_and_server_stability() {
     let mut rng_seed = 0x12345678u64;
     for i in 0..100 {
         // Simple deterministic PRNG
-        rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng_seed = rng_seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let garbage_len = (rng_seed % 500) as usize + 1;
         let mut garbage_bytes = vec![0u8; garbage_len];
         for b in &mut garbage_bytes {
-            rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng_seed = rng_seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             *b = (rng_seed >> 32) as u8;
         }
 
@@ -567,7 +618,11 @@ fn test_fuzz_burst_and_server_stability() {
             ).into_bytes()
         } else {
             let query_str = String::from_utf8_lossy(&garbage_bytes[..garbage_len.min(50)]);
-            format!("GET /api/mine/template?node={} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", query_str).into_bytes()
+            format!(
+                "GET /api/mine/template?node={} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+                query_str
+            )
+            .into_bytes()
         };
 
         let (status, resp_body, _) = send_raw_http(&mut app, &req_bytes);

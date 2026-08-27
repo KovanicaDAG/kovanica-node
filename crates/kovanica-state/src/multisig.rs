@@ -272,7 +272,12 @@ mod tests {
         // Insufficient signatures
         assert!(verify_threshold_signatures(&script, std::slice::from_ref(&sig1), &msg).is_err());
         // Excess signatures
-        assert!(verify_threshold_signatures(&script, &[sig1.clone(), sig2.clone(), sig3.clone()], &msg).is_err());
+        assert!(verify_threshold_signatures(
+            &script,
+            &[sig1.clone(), sig2.clone(), sig3.clone()],
+            &msg
+        )
+        .is_err());
         // Duplicate signature
         assert!(verify_threshold_signatures(&script, &[sig1.clone(), sig1.clone()], &msg).is_err());
 

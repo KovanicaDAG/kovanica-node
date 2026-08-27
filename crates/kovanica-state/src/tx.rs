@@ -528,7 +528,13 @@ mod tests {
         let script = vec![1, 2, 0xAA];
         let outputs = vec![TxOutput::new(50, addr(3))];
 
-        let tx1 = Transaction::signed_multisig(op, script.clone(), &[&kp1], outputs.clone(), b"m".to_vec());
+        let tx1 = Transaction::signed_multisig(
+            op,
+            script.clone(),
+            &[&kp1],
+            outputs.clone(),
+            b"m".to_vec(),
+        );
         let tx2 = Transaction::signed_multisig(op, script.clone(), &[&kp2], outputs, b"m".to_vec());
 
         assert_eq!(tx1.sighash(), tx2.sighash());
@@ -612,4 +618,3 @@ mod tests {
         );
     }
 }
-

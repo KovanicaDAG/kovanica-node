@@ -85,9 +85,7 @@ pub use ledger::{
     LedgerCheckpointError, LedgerError, LedgerInsertError, LedgerRun, LedgerSnapshotError,
     StakedVrf, DEFAULT_HALVING_ERA, MULTISIG_ACTIVATION_SCORE,
 };
-pub use multisig::{
-    verify_threshold_signatures, MultisigScript, MAX_MULTISIG_KEYS,
-};
+pub use multisig::{verify_threshold_signatures, MultisigScript, MAX_MULTISIG_KEYS};
 pub use spv::{
     generate_merkle_proof, merkle_root, BlockFilter, BlockHeader, MerkleProof, SpvClient, SpvError,
 };

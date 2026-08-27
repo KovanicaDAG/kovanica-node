@@ -124,7 +124,9 @@ impl Address {
 
     /// The 32-byte payload (Ed25519 public key for P2PK, BLAKE3 script hash for P2SH).
     pub fn payload(&self) -> &[u8; 32] {
-        (&self.0[1..33]).try_into().expect("payload slice is 32 bytes")
+        (&self.0[1..33])
+            .try_into()
+            .expect("payload slice is 32 bytes")
     }
 
     /// Lowercase hex rendering of the 33-byte address (66 characters).
@@ -439,4 +441,3 @@ mod tests {
         assert!(Address::parse(&format!("kvnc{wide}dag")).is_err());
     }
 }
-

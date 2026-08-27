@@ -2058,8 +2058,7 @@ mod tests {
         assert_eq!(template.transactions.len(), 1);
         assert!(template.transactions[0].is_coinbase());
 
-        let decoded_txs =
-            decode_block_payload(&hex::decode(&template.payload).unwrap()).unwrap();
+        let decoded_txs = decode_block_payload(&hex::decode(&template.payload).unwrap()).unwrap();
         assert_eq!(decoded_txs, template.transactions);
 
         let json = template.to_json();

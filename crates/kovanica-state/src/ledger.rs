@@ -192,11 +192,7 @@ pub enum LedgerError {
         reason: &'static str,
     },
     /// Witness item has invalid signature length
-    BadSignatureSize {
-        tx: TxId,
-        input: usize,
-        len: usize,
-    },
+    BadSignatureSize { tx: TxId, input: usize, len: usize },
     /// Duplicate signature found in witness stack
     DuplicateSignature { tx: TxId, input: usize },
     /// Multisig transaction submitted prior to consensus activation blue score

@@ -14,7 +14,9 @@ fn send_request(app: &mut Explorer, req: &str) -> (u16, String) {
     let (server_stream, _) = listener.accept().expect("accept server");
 
     client.write_all(req.as_bytes()).expect("write request");
-    client.shutdown(std::net::Shutdown::Write).expect("shutdown write");
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("shutdown write");
 
     let _ = handle(app, server_stream);
 
