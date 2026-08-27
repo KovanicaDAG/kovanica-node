@@ -484,7 +484,7 @@ function minePanel(s) {
     </div>
     <p class="muted">Prefer manual? After downloading, mark it executable and run:</p>
     <pre class="mono" style="background:var(--bg);padding:10px;overflow:auto;font-size:11px">chmod +x kovanica-node-linux-x64
-KOVANICA_LISTEN=0.0.0.0:9000 KOVANICA_PEERS=seed.kovanica.online:9000 \\
+KOVANICA_LISTEN=0.0.0.0:9000 KOVANICA_PEERS=seed.kovanica.online:9000,seed3.kovanica.online:9000 \\
 KOVANICA_MINE=1 KOVANICA_MINE_SECS=60 KOVANICA_POW=1 KOVANICA_DATA=~/.kovanica \\
 ./kovanica-node-linux-x64 explorer 127.0.0.1:18080</pre>
     <p class="muted" style="margin-top:12px">Verify your node is synced: <code class="mono">curl http://127.0.0.1:18080/api/head</code>

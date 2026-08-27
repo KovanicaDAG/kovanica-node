@@ -38,7 +38,7 @@ const NETWORK: &str = "kovanica-testnet";
 const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 /// Single P2P path: plaintext TCP. Not 80/443/3010/8080 and not libp2p :30333.
 const P2P_LISTEN_DEFAULT: &str = "0.0.0.0:9000";
-const P2P_BOOTSTRAP: &str = "seed.kovanica.online:9000";
+const P2P_BOOTSTRAP: &str = "seed.kovanica.online:9000,seed3.kovanica.online:9000";
 
 /// WebSocket message types for real-time updates
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -624,7 +624,11 @@ fn peer_list() -> Vec<String> {
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty())
             .collect(),
-        Err(_) => vec![P2P_BOOTSTRAP.to_string()],
+        Err(_) => P2P_BOOTSTRAP
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
     }
 }
 
@@ -1689,7 +1693,10 @@ mod tests {
         assert!(env_off("none"));
         assert!(env_off("0"));
         assert!(!env_off(P2P_LISTEN_DEFAULT));
-        assert_eq!(P2P_BOOTSTRAP, "seed.kovanica.online:9000");
+        assert_eq!(
+            P2P_BOOTSTRAP,
+            "seed.kovanica.online:9000,seed3.kovanica.online:9000"
+        );
     }
 
     #[test]

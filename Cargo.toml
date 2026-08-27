@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kovanica-dag", "crates/kovanica-state", "crates/kovanica-node"]
+members = ["crates/kovanica-dag", "crates/kovanica-state", "crates/kovanica-node", "crates/kovanica-cli"]
 
 [workspace.package]
 version = "0.1.0"
