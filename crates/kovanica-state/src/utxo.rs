@@ -94,7 +94,7 @@ impl UtxoSet {
 
     /// Returns the length of the encoded UTXO set (for skipping during decode).
     pub fn encoded_len(&self) -> usize {
-        8 + self.map.len() * (32 + 4 + 8 + 32)
+        8 + self.map.len() * (32 + 4 + 8 + 33)
     }
 
     /// Decode a UTXO set from a checkpoint encoding, advancing `bytes` past the
@@ -107,7 +107,7 @@ impl UtxoSet {
             let tx = TxId::from_bytes(reader.read_array::<32>()?);
             let index = reader.read_u32()?;
             let value = reader.read_u64()?;
-            let owner = Address::from_bytes(reader.read_array::<32>()?);
+            let owner = Address::from_versioned_bytes(reader.read_array::<33>()?);
             map.insert(OutPoint::new(tx, index), TxOutput::new(value, owner));
         }
         *bytes = &bytes[reader.pos..];

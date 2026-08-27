@@ -103,15 +103,51 @@ impl fmt::Debug for Sig {
     }
 }
 
-/// A spend: which previous output is being consumed, and the signature
-/// authorising it. The signature is over the transaction's [`Transaction::sighash`]
-/// and must verify against the spent output's owning [`Address`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// A spend: which previous output is being consumed, and the witness stack
+/// authorising it.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TxInput {
     /// The previous output being spent.
     pub outpoint: OutPoint,
-    /// Signature authorising the spend.
-    pub signature: Sig,
+    /// Witness stack authorising the spend:
+    /// - For Version 0x00 (P2PK): `vec![signature_64_bytes]`.
+    /// - For Version 0x01 (P2SH): `vec![redeem_script, sig_1, ..., sig_M]`.
+    pub witness: Vec<Vec<u8>>,
+}
+
+impl TxInput {
+    /// Construct a TxInput with an explicit witness stack.
+    pub fn new(outpoint: OutPoint, witness: Vec<Vec<u8>>) -> Self {
+        Self { outpoint, witness }
+    }
+
+    /// Construct a single-signature input (Version 0x00 P2PK):
+    /// the witness stack contains exactly one 64-byte Ed25519 signature.
+    pub fn single_sig(outpoint: OutPoint, signature: [u8; 64]) -> Self {
+        Self {
+            outpoint,
+            witness: vec![signature.to_vec()],
+        }
+    }
+
+    /// Construct a multisig input (Version 0x01 P2SH):
+    /// the witness stack contains the raw redeem script followed by M signatures.
+    pub fn multisig(outpoint: OutPoint, redeem_script: Vec<u8>, signatures: Vec<Vec<u8>>) -> Self {
+        let mut witness = Vec::with_capacity(1 + signatures.len());
+        witness.push(redeem_script);
+        witness.extend(signatures);
+        Self { outpoint, witness }
+    }
+
+    /// Number of elements in the witness stack.
+    pub fn witness_len(&self) -> usize {
+        self.witness.len()
+    }
+
+    /// Whether the witness stack is empty.
+    pub fn is_empty_witness(&self) -> bool {
+        self.witness.is_empty()
+    }
 }
 
 /// A newly created output: an amount and the address that may later spend it.
@@ -143,6 +179,15 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    /// Construct a transaction with explicit inputs, outputs, and tag.
+    pub fn new(inputs: Vec<TxInput>, outputs: Vec<TxOutput>, tag: Vec<u8>) -> Self {
+        Self {
+            inputs,
+            outputs,
+            tag,
+        }
+    }
+
     /// A coinbase (issuance) transaction: no inputs, the given outputs and tag.
     ///
     /// The `tag` should be unique per coinbase (e.g. the block height/label) so
@@ -158,15 +203,13 @@ impl Transaction {
     /// Build a signed transaction spending `spends` (each an outpoint plus the
     /// keypair that owns it) to produce `outputs`.
     ///
-    /// The signature hash covers the inputs' outpoints, the outputs, and the tag
-    /// — but not the signatures themselves — so signing has no circular
-    /// dependency and every input signs the same hash.
+    /// Single-sig spenders receive a 1-element witness stack `[sig_bytes]`.
     pub fn signed(spends: &[(OutPoint, &KeyPair)], outputs: Vec<TxOutput>, tag: Vec<u8>) -> Self {
         let inputs = spends
             .iter()
             .map(|(outpoint, _)| TxInput {
                 outpoint: *outpoint,
-                signature: Sig::zero(),
+                witness: Vec::new(),
             })
             .collect();
         let mut tx = Self {
@@ -176,21 +219,48 @@ impl Transaction {
         };
         let sighash = tx.sighash();
         for (i, (_, keypair)) in spends.iter().enumerate() {
-            tx.inputs[i].signature = Sig::from_bytes(keypair.sign(&sighash));
+            tx.inputs[i].witness = vec![keypair.sign(&sighash).to_vec()];
         }
         tx
     }
 
-    /// An unsigned spend: signatures are zeroed. The wallet signs
+    /// Build a signed multisig transaction spending `outpoint` locked to `redeem_script`
+    /// with signatures produced by `signers`.
+    pub fn signed_multisig(
+        outpoint: OutPoint,
+        redeem_script: Vec<u8>,
+        signers: &[&KeyPair],
+        outputs: Vec<TxOutput>,
+        tag: Vec<u8>,
+    ) -> Self {
+        let input = TxInput {
+            outpoint,
+            witness: Vec::new(),
+        };
+        let mut tx = Self {
+            inputs: vec![input],
+            outputs,
+            tag,
+        };
+        let sighash = tx.sighash();
+        let mut signatures = Vec::with_capacity(signers.len());
+        for signer in signers {
+            signatures.push(signer.sign(&sighash).to_vec());
+        }
+        tx.inputs[0] = TxInput::multisig(outpoint, redeem_script, signatures);
+        tx
+    }
+
+    /// An unsigned spend: witness stacks are empty. The wallet signs
     /// [`sighash`](Self::sighash) and attaches the result with
-    /// [`attach_signature`](Self::attach_signature).
+    /// [`attach_signature`](Self::attach_signature) or [`attach_witness`](Self::attach_witness).
     pub fn unsigned(outpoints: &[OutPoint], outputs: Vec<TxOutput>, tag: Vec<u8>) -> Self {
         Self {
             inputs: outpoints
                 .iter()
                 .map(|outpoint| TxInput {
                     outpoint: *outpoint,
-                    signature: Sig::zero(),
+                    witness: Vec::new(),
                 })
                 .collect(),
             outputs,
@@ -198,17 +268,28 @@ impl Transaction {
         }
     }
 
-    /// Attach a signature to input `index`. Used by a wallet that signed
-    /// [`sighash`](Self::sighash) off-node.
+    /// Attach a single signature to input `index` (as a 1-item witness).
     pub fn attach_signature(&mut self, index: usize, signature: Sig) {
         if let Some(input) = self.inputs.get_mut(index) {
-            input.signature = signature;
+            input.witness = vec![signature.to_bytes().to_vec()];
+        }
+    }
+
+    /// Attach a full witness stack to input `index`.
+    pub fn attach_witness(&mut self, index: usize, witness: Vec<Vec<u8>>) {
+        if let Some(input) = self.inputs.get_mut(index) {
+            input.witness = witness;
         }
     }
 
     /// The transaction's inputs (empty for a coinbase).
     pub fn inputs(&self) -> &[TxInput] {
         &self.inputs
+    }
+
+    /// Mutable access to the transaction's inputs.
+    pub fn inputs_mut(&mut self) -> &mut [TxInput] {
+        &mut self.inputs
     }
 
     /// The transaction's outputs.
@@ -226,16 +307,20 @@ impl Transaction {
         self.inputs.is_empty()
     }
 
-    /// Serialise into `buf`. With `with_signatures` the per-input signatures are
-    /// included (used for the id); without, the result is the signature preimage
-    /// (used for the sighash).
+    /// Serialise into `buf`.
+    /// - With `with_signatures = true`: includes dynamic witness items (used for `id()` and block payload).
+    /// - With `with_signatures = false`: completely omits witness vectors (used for `sighash()`).
     fn encode_into(&self, buf: &mut Vec<u8>, with_signatures: bool) {
         buf.extend_from_slice(&(self.inputs.len() as u64).to_le_bytes());
         for input in &self.inputs {
             buf.extend_from_slice(input.outpoint.tx.as_bytes());
             buf.extend_from_slice(&input.outpoint.index.to_le_bytes());
             if with_signatures {
-                buf.extend_from_slice(&input.signature.0);
+                buf.extend_from_slice(&(input.witness.len() as u64).to_le_bytes());
+                for item in &input.witness {
+                    buf.extend_from_slice(&(item.len() as u64).to_le_bytes());
+                    buf.extend_from_slice(item);
+                }
             }
         }
         buf.extend_from_slice(&(self.outputs.len() as u64).to_le_bytes());
@@ -247,14 +332,14 @@ impl Transaction {
         buf.extend_from_slice(&self.tag);
     }
 
-    /// The canonical byte encoding (including signatures).
+    /// The canonical byte encoding (including signatures / witness).
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         self.encode_into(&mut buf, true);
         buf
     }
 
-    /// The signature hash: BLAKE3 over the signature-free encoding. Inputs sign
+    /// The signature hash: BLAKE3 over the witness-free encoding. Inputs sign
     /// this, and it is what [`crate::keys::verify`] checks each spend against.
     pub fn sighash(&self) -> [u8; 32] {
         let mut buf = Vec::new();
@@ -360,24 +445,32 @@ impl<'a> Reader<'a> {
     }
 
     fn read_transaction(&mut self) -> Result<Transaction, DecodeError> {
-        // Each input is 32 (tx) + 4 (index) + 64 (sig) = 100 bytes.
-        let n_inputs = self.read_count(100)?;
+        // Minimum input size: 32 (tx) + 4 (index) + 8 (witness count) = 44 bytes.
+        let n_inputs = self.read_count(44)?;
         let mut inputs = Vec::with_capacity(n_inputs);
         for _ in 0..n_inputs {
             let tx = TxId::from_bytes(self.read_array::<32>()?);
             let index = self.read_u32()?;
-            let signature = Sig::from_bytes(self.read_array::<64>()?);
+            // Minimum witness item size: 8 bytes length prefix.
+            let n_witness = self.read_count(8)?;
+            let mut witness = Vec::with_capacity(n_witness);
+            for _ in 0..n_witness {
+                let item_len = self.read_count(1)?;
+                let item = self.read_array_dyn(item_len)?;
+                witness.push(item);
+            }
             inputs.push(TxInput {
                 outpoint: OutPoint { tx, index },
-                signature,
+                witness,
             });
         }
-        // Each output is 8 (value) + 32 (owner) = 40 bytes.
-        let n_outputs = self.read_count(40)?;
+        // Minimum output size: 8 (value) + 33 (owner address) = 41 bytes.
+        let n_outputs = self.read_count(41)?;
         let mut outputs = Vec::with_capacity(n_outputs);
         for _ in 0..n_outputs {
             let value = self.read_u64()?;
-            let owner = Address::from_bytes(self.read_array::<32>()?);
+            let owner_bytes = self.read_array::<33>()?;
+            let owner = Address::from_versioned_bytes(owner_bytes);
             outputs.push(TxOutput { value, owner });
         }
         let tag_len = self.read_count(1)?;
@@ -428,6 +521,21 @@ mod tests {
     }
 
     #[test]
+    fn sighash_ignores_multisig_witness() {
+        let op = OutPoint::new(TxId::from_bytes([1u8; 32]), 0);
+        let kp1 = KeyPair::from_u64(10);
+        let kp2 = KeyPair::from_u64(20);
+        let script = vec![1, 2, 0xAA];
+        let outputs = vec![TxOutput::new(50, addr(3))];
+
+        let tx1 = Transaction::signed_multisig(op, script.clone(), &[&kp1], outputs.clone(), b"m".to_vec());
+        let tx2 = Transaction::signed_multisig(op, script.clone(), &[&kp2], outputs, b"m".to_vec());
+
+        assert_eq!(tx1.sighash(), tx2.sighash());
+        assert_ne!(tx1.id(), tx2.id());
+    }
+
+    #[test]
     fn payload_roundtrips() {
         let kp = KeyPair::from_u64(1);
         let op = OutPoint::new(TxId::from_bytes([7u8; 32]), 3);
@@ -440,6 +548,24 @@ mod tests {
         let txs = vec![coinbase, transfer];
         let bytes = encode_block_payload(&txs);
         assert_eq!(decode_block_payload(&bytes).unwrap(), txs);
+    }
+
+    #[test]
+    fn multisig_payload_roundtrips() {
+        let kp1 = KeyPair::from_u64(1);
+        let kp2 = KeyPair::from_u64(2);
+        let op = OutPoint::new(TxId::from_bytes([7u8; 32]), 3);
+        let script = vec![2, 2, 1, 2, 3];
+        let multisig_tx = Transaction::signed_multisig(
+            op,
+            script,
+            &[&kp1, &kp2],
+            vec![TxOutput::new(100, Address::p2sh([0x33u8; 32]))],
+            b"tag".to_vec(),
+        );
+        let bytes = encode_block_payload(std::slice::from_ref(&multisig_tx));
+        let decoded = decode_block_payload(&bytes).unwrap();
+        assert_eq!(decoded, vec![multisig_tx]);
     }
 
     #[test]
@@ -471,4 +597,19 @@ mod tests {
             Err(DecodeError::TrailingBytes)
         );
     }
+
+    #[test]
+    fn bounded_reader_rejects_giant_count_without_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // 1 transaction
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // 1 input
+        bytes.extend_from_slice(&[0u8; 32]); // tx
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // index
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // giant witness count!
+        assert_eq!(
+            decode_block_payload(&bytes),
+            Err(DecodeError::UnexpectedEof)
+        );
+    }
 }
+

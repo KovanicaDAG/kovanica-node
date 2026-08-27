@@ -29,7 +29,7 @@ pub const HELP: &str = "commands: help | genesis <k> <subsidy> <amount> <seed> |
 genesis_finality <k> <subsidy> <amount> <seed> <finality_depth> | \
 address <seed> | balance <seed|addr-hex> | send <from-seed> <amount> <to-seed> | \
 pool <from-seed> <amount> <to-seed> | produce | pending | tips | tip | len | \
-save <path> | load <path> | checkpoint <path> | load_checkpoint <path>";
+staking [vrf-pk-hex] | save <path> | load <path> | checkpoint <path> | load_checkpoint <path>";
 
 /// Run one command line against `node`, returning the response line. Never
 /// panics on bad input; malformed commands produce an `err ...` response.
@@ -130,6 +130,29 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
 
         "tip" => Ok(node.selected_tip().map_err(|e| e.to_string())?.to_string()),
 
+        // Read-only staking summary: hybrid status, this node's validator key,
+        // and bonded stakes (total, plus optionally one key's) at the tip view.
+        "staking" => {
+            let mut out = format!(
+                "hybrid={} total_stake={}",
+                node.hybrid_enabled(),
+                node.total_stake().map_err(|e| e.to_string())?
+            );
+            if let Some(pk) = node.validator_public_key() {
+                out.push_str(&format!(" validator={}", hex::encode(pk.as_bytes())));
+            }
+            if let [pk_hex] = args[..] {
+                let mut pk = [0u8; 32];
+                hex::decode_to_slice(pk_hex, &mut pk)
+                    .map_err(|e| format!("bad vrf-pk-hex: {e}"))?;
+                out.push_str(&format!(
+                    " stake_of={}",
+                    node.stake_of(&pk).map_err(|e| e.to_string())?
+                ));
+            }
+            Ok(out)
+        }
+
         "len" => Ok(node.block_count().map_err(|e| e.to_string())?.to_string()),
 
         "save" => {
@@ -178,14 +201,10 @@ fn u16_arg(s: &str) -> Result<u16, String> {
         .map_err(|_| format!("'{s}' is not a small number"))
 }
 
-/// A balance target is either a 64-char hex address or an actor seed.
+/// A balance target is either an address (Base58, versioned/legacy hex) or an actor seed.
 fn parse_target(token: &str) -> Result<Address, String> {
-    if token.len() == 64 {
-        let bytes = hex::decode(token).map_err(|_| format!("'{token}' is not hex"))?;
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| "address must be 32 bytes".to_string())?;
-        Ok(Address::from_bytes(arr))
+    if let Ok(addr) = Address::parse(token) {
+        Ok(addr)
     } else {
         Ok(Node::address(u64_arg(token)?))
     }

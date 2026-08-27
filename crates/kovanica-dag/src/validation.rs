@@ -54,7 +54,10 @@ use crate::dag::Dag;
 /// structural validator), or use any closure of the same shape. Returning
 /// `Err(reason)` rejects the block; the reason is surfaced as
 /// [`DagError::InvalidBlock`](crate::DagError::InvalidBlock).
-pub trait BlockValidator {
+///
+/// `Send` so a DAG (and anything wrapping it) can cross threads — required by
+/// the FFI layer, where a node handle is shared with foreign callers.
+pub trait BlockValidator: Send {
     /// Validate `block` against `dag` — the DAG as it is *before* `block` is
     /// added (with `block`'s parents already confirmed present).
     fn validate(&self, block: &Block, dag: &Dag) -> Result<(), String>;
@@ -62,7 +65,7 @@ pub trait BlockValidator {
 
 impl<F> BlockValidator for F
 where
-    F: Fn(&Block, &Dag) -> Result<(), String>,
+    F: Fn(&Block, &Dag) -> Result<(), String> + Send,
 {
     fn validate(&self, block: &Block, dag: &Dag) -> Result<(), String> {
         self(block, dag)

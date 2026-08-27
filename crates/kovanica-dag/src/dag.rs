@@ -329,6 +329,14 @@ impl Dag {
         self.difficulty = Some(retarget);
     }
 
+    /// Disable consensus-enforced difficulty. Useful when a higher layer takes
+    /// over work-target admission (e.g. the ledger's hybrid PoW/staked-VRF
+    /// policy) while still needing [`Self::work_target_with`] for its own
+    /// checks.
+    pub fn clear_difficulty(&mut self) {
+        self.difficulty = None;
+    }
+
     /// The enforced difficulty policy, if any (see [`Dag::set_difficulty`]).
     pub fn difficulty(&self) -> Option<Retarget> {
         self.difficulty
@@ -451,8 +459,18 @@ impl Dag {
     /// [`Dag::insert`]'s difficulty check. `parents` must be present in the DAG.
     pub fn next_work_target(&self, parents: &[BlockId]) -> Option<u128> {
         let retarget = self.difficulty?;
-        let sp = parents.iter().copied().max_by_key(|p| self.chain_key(p))?;
-        Some(retarget.next_work(&self.chain_samples(sp, retarget.window)))
+        Some(self.work_target_with(parents, &retarget))
+    }
+
+    /// The work target an explicit `retarget` policy implies for a block with
+    /// these parents — independent of whether difficulty enforcement is
+    /// enabled. This is what the ledger's hybrid admission path pins PoW-path
+    /// blocks to while dag-level difficulty is cleared.
+    pub fn work_target_with(&self, parents: &[BlockId], retarget: &Retarget) -> u128 {
+        match parents.iter().copied().max_by_key(|p| self.chain_key(p)) {
+            Some(sp) => retarget.next_work(&self.chain_samples(sp, retarget.window)),
+            None => retarget.min_work,
+        }
     }
 
     /// The GHOSTDAG `k` parameter.

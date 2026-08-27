@@ -58,6 +58,7 @@ fn sample_messages() -> Vec<RelayMsg> {
             work: 5,
             timestamp_ms: 2000,
             nonce: 12345,
+            vrf: None,
             txs: vec![sample_tx.clone()],
         }),
         RelayMsg::Tx(sample_tx.clone()),

@@ -218,20 +218,23 @@ pub fn handle_relay_query(node: &Node, msg: &RelayMsg) -> Option<RelayMsg> {
                 None
             }
         }
-        RelayMsg::DhtPing { sender, nonce } => Some(RelayMsg::DhtPong {
-            sender: *sender,
-            nonce: *nonce,
-        }),
+        RelayMsg::DhtPing { sender, nonce } => {
+            let local_id = node.dht_node_id().unwrap_or(*sender);
+            Some(RelayMsg::DhtPong {
+                sender: local_id,
+                nonce: *nonce,
+            })
+        }
         RelayMsg::DhtFindNode {
             sender,
             target,
             nonce,
         } => {
-            // Use Node's DHT routing table if available
+            let local_id = node.dht_node_id().unwrap_or(*sender);
             if let Some(table) = node.dht_routing_table() {
                 let nodes = table.closest_peers(target, table.k);
                 Some(RelayMsg::DhtNodes {
-                    sender: *sender,
+                    sender: local_id,
                     target: *target,
                     nonce: *nonce,
                     nodes,
@@ -239,7 +242,7 @@ pub fn handle_relay_query(node: &Node, msg: &RelayMsg) -> Option<RelayMsg> {
             } else {
                 // Node doesn't have DHT routing table; return empty nodes
                 Some(RelayMsg::DhtNodes {
-                    sender: *sender,
+                    sender: local_id,
                     target: *target,
                     nonce: *nonce,
                     nodes: Vec::new(),

@@ -173,6 +173,7 @@ impl KBucket {
         // Check if already in contacts
         if let Some(pos) = self.contacts.iter().position(|c| c.node_id == node_id) {
             let mut existing = self.contacts.remove(pos).unwrap();
+            existing.addr = contact.addr;
             existing.touch();
             self.contacts.push_front(existing);
             return UpdateResult::Updated;
@@ -185,6 +186,7 @@ impl KBucket {
             .position(|c| c.node_id == node_id)
         {
             let mut existing = self.replacement_cache.remove(pos).unwrap();
+            existing.addr = contact.addr;
             existing.touch();
             // Move to contacts if there's space
             if !self.is_full() {
@@ -250,6 +252,11 @@ impl KBucket {
             let mut contact = self.contacts.remove(pos).unwrap();
             contact.mark_failed();
             if contact.is_dead() {
+                // If replacement candidate exists, promote it to keep bucket full
+                if let Some(mut replacement) = self.replacement_cache.pop_front() {
+                    replacement.touch();
+                    self.contacts.push_front(replacement);
+                }
                 return Some(contact);
             }
             self.contacts.push_back(contact); // Move to back (least recent)
@@ -290,6 +297,12 @@ impl KBucket {
                 true
             }
         });
+        while self.contacts.len() < self.k && !self.replacement_cache.is_empty() {
+            if let Some(mut rep) = self.replacement_cache.pop_front() {
+                rep.touch();
+                self.contacts.push_front(rep);
+            }
+        }
         dead
     }
 }
@@ -374,6 +387,7 @@ impl RoutingTable {
 
         // Sort by actual XOR distance
         candidates.sort_by_key(|c| c.node_id.distance(target));
+        candidates.dedup_by_key(|c| c.node_id);
         candidates.truncate(count);
         candidates
     }
@@ -640,7 +654,13 @@ impl NodeLookup {
     pub fn add_initial(&mut self, contacts: Vec<PeerContact>) {
         for contact in contacts {
             let dist = contact.node_id.distance(&self.target);
-            self.shortlist.push((NodeId(dist), contact));
+            if !self
+                .shortlist
+                .iter()
+                .any(|(_, c)| c.node_id == contact.node_id)
+            {
+                self.shortlist.push((NodeId(dist), contact));
+            }
         }
         // Sort by distance
         self.shortlist.sort_by_key(|(dist, _)| *dist);
@@ -663,16 +683,17 @@ impl NodeLookup {
     /// Add results from a query response.
     pub fn add_results(&mut self, contacts: Vec<PeerContact>) {
         for contact in contacts {
-            if contact.node_id == self.target {
-                continue;
-            }
             let dist = contact.node_id.distance(&self.target);
             // Check if already in shortlist
-            if !self
+            if let Some(pos) = self
                 .shortlist
                 .iter()
-                .any(|(_, c)| c.node_id == contact.node_id)
+                .position(|(_, c)| c.node_id == contact.node_id)
             {
+                if contact.last_seen_ms >= self.shortlist[pos].1.last_seen_ms {
+                    self.shortlist[pos].1 = contact;
+                }
+            } else {
                 self.shortlist.push((NodeId(dist), contact));
             }
         }
@@ -930,5 +951,65 @@ mod tests {
         // Should have more candidates
         let more = lookup.next_candidates();
         assert!(!more.is_empty());
+    }
+
+    #[test]
+    fn test_kbucket_prune_dead_promotes_replacement() {
+        let mut bucket = KBucket::new(2);
+        let id1 = NodeId::from_bytes([1u8; 32]);
+        let id2 = NodeId::from_bytes([2u8; 32]);
+        let id3 = NodeId::from_bytes([3u8; 32]);
+
+        let mut c1 = PeerContact::new(id1, "127.0.0.1:9001".to_string());
+        c1.failed_queries = 3; // Dead
+        let c2 = PeerContact::new(id2, "127.0.0.1:9002".to_string());
+        let c3 = PeerContact::new(id3, "127.0.0.1:9003".to_string());
+
+        assert_eq!(bucket.update_contact(c1), UpdateResult::Added);
+        assert_eq!(bucket.update_contact(c2), UpdateResult::Added);
+        assert!(bucket.is_full());
+
+        // c3 goes into replacement cache
+        assert_eq!(bucket.update_contact(c3), UpdateResult::Cached);
+
+        // Pruning dead peers should evict c1 and promote c3 from replacement cache
+        let dead = bucket.prune_dead();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].node_id, id1);
+
+        // Bucket should remain at capacity 2
+        assert_eq!(bucket.len(), 2);
+        let contacts = bucket.contacts();
+        assert!(contacts.iter().any(|c| c.node_id == id2));
+        assert!(contacts.iter().any(|c| c.node_id == id3));
+    }
+
+    #[test]
+    fn test_node_lookup_add_results_updates_existing_contact() {
+        let target = NodeId::random();
+        let mut lookup = NodeLookup::new(target, 8, 3);
+
+        let id = NodeId::from_bytes([42u8; 32]);
+        let c1 = PeerContact {
+            node_id: id,
+            addr: "127.0.0.1:9001".to_string(),
+            last_seen_ms: 100,
+            failed_queries: 0,
+        };
+        lookup.add_initial(vec![c1]);
+
+        // Add updated contact with newer timestamp and new address
+        let c2 = PeerContact {
+            node_id: id,
+            addr: "127.0.0.1:9099".to_string(),
+            last_seen_ms: 200,
+            failed_queries: 0,
+        };
+        lookup.add_results(vec![c2]);
+
+        let closest = lookup.closest();
+        assert_eq!(closest.len(), 1);
+        assert_eq!(closest[0].addr, "127.0.0.1:9099");
+        assert_eq!(closest[0].last_seen_ms, 200);
     }
 }

@@ -631,6 +631,54 @@ fn test_routing_table_replenishment() {
 }
 
 #[test]
+fn test_replenish_peers_skips_existing_closest_and_fills_target() {
+    let mut mesh = Mesh::new();
+    let id_a = NodeId::from_bytes([0u8; 32]);
+    let id_b = NodeId::from_bytes({
+        let mut b = [0u8; 32];
+        b[31] = 1;
+        b
+    });
+    let id_c = NodeId::from_bytes({
+        let mut b = [0u8; 32];
+        b[31] = 2;
+        b
+    });
+    let id_d = NodeId::from_bytes({
+        let mut b = [0u8; 32];
+        b[31] = 3;
+        b
+    });
+
+    mesh.add_with_dht("alpha", create_test_node(id_a, 8), id_a);
+    mesh.add_with_dht("beta", create_test_node(id_b, 8), id_b);
+    mesh.add_with_dht("gamma", create_test_node(id_c, 8), id_c);
+    mesh.add_with_dht("delta", create_test_node(id_d, 8), id_d);
+
+    // Alpha learns all three peers in DHT
+    for name in ["beta", "gamma", "delta"] {
+        mesh.dht_bootstrap("alpha", name).unwrap();
+    }
+
+    // Alpha connects to the closest peer (beta) first
+    mesh.connect("alpha", "beta").unwrap();
+    mesh.drain(10);
+    assert_eq!(mesh.peers_of("alpha").len(), 1);
+
+    // Now replenish to target 2 peers.
+    // The closest peer (beta) is already connected. Replenish MUST skip beta and connect to gamma!
+    let added = mesh.replenish_peers_from_dht(2);
+    assert!(added >= 1, "Should add new peer connection(s)");
+    assert_eq!(
+        mesh.peers_of("alpha").len(),
+        2,
+        "Alpha should now have exactly 2 peers"
+    );
+    assert!(mesh.peers_of("alpha").contains(&"beta".to_string()));
+    assert!(mesh.peers_of("alpha").contains(&"gamma".to_string()));
+}
+
+#[test]
 fn test_partition_healing() {
     // Two initially partitioned sub-clusters bridged by a single mutual contact
     let mut mesh = Mesh::new();
@@ -820,14 +868,10 @@ fn test_relay_handle_dht_query() {
         sender: NodeId::random(),
         nonce: 111,
     };
-    let ping_sender = match &ping {
-        RelayMsg::DhtPing { sender, .. } => *sender,
-        _ => unreachable!(),
-    };
     let resp = kovanica_node::relay::handle_relay_query(&node, &ping).unwrap();
     match resp {
         RelayMsg::DhtPong { sender, nonce } => {
-            assert_eq!(sender, ping_sender);
+            assert_eq!(sender, node_id);
             assert_eq!(nonce, 111);
         }
         _ => panic!("Expected DhtPong"),
@@ -842,12 +886,27 @@ fn test_relay_handle_dht_query() {
     };
     let resp = kovanica_node::relay::handle_relay_query(&node, &find_node).unwrap();
     match resp {
-        RelayMsg::DhtNodes { nodes, .. } => {
+        RelayMsg::DhtNodes { sender, nodes, .. } => {
+            assert_eq!(sender, node_id);
             // Should return closest nodes from routing table
             assert!(!nodes.is_empty());
         }
         _ => panic!("Expected DhtNodes"),
     }
+
+    // Direct test for Node::handle_dht_msg
+    let dht_ping = DhtMsg::Ping {
+        sender: NodeId::random(),
+        nonce: 333,
+    };
+    let dht_resp = node.handle_dht_msg(dht_ping).unwrap();
+    assert_eq!(
+        dht_resp,
+        DhtMsg::Pong {
+            sender: node_id,
+            nonce: 333
+        }
+    );
 }
 
 #[test]
@@ -1045,4 +1104,110 @@ fn test_adversarial_eclipse_resistance() {
     let contacts = table.all_contacts();
     let has_honest = contacts.iter().any(|c| c.node_id == honest_id);
     assert!(has_honest, "Honest peer should be protected from eclipse");
+}
+
+#[test]
+fn test_dht_routing_convergence_partial_split_and_churn() {
+    let mut mesh = Mesh::new();
+
+    // Cluster 1 nodes
+    let id_s1 = NodeId::random();
+    let id_a1 = NodeId::random();
+    let id_a2 = NodeId::random();
+
+    // Cluster 2 nodes
+    let id_s2 = NodeId::random();
+    let id_b1 = NodeId::random();
+    let id_b2 = NodeId::random();
+
+    // Bridge node
+    let id_bridge = NodeId::random();
+
+    mesh.add_with_dht("seed1", create_test_node(id_s1, 8), id_s1);
+    mesh.add_with_dht("alpha1", create_test_node(id_a1, 8), id_a1);
+    mesh.add_with_dht("alpha2", create_test_node(id_a2, 8), id_a2);
+
+    mesh.add_with_dht("seed2", create_test_node(id_s2, 8), id_s2);
+    mesh.add_with_dht("beta1", create_test_node(id_b1, 8), id_b1);
+    mesh.add_with_dht("beta2", create_test_node(id_b2, 8), id_b2);
+
+    mesh.add_with_dht("bridge", create_test_node(id_bridge, 8), id_bridge);
+
+    // Bootstrap within cluster 1
+    mesh.dht_bootstrap("alpha1", "seed1").unwrap();
+    mesh.dht_bootstrap("alpha2", "seed1").unwrap();
+    mesh.connect("alpha1", "seed1").unwrap();
+    mesh.connect("alpha2", "seed1").unwrap();
+
+    // Bootstrap within cluster 2
+    mesh.dht_bootstrap("beta1", "seed2").unwrap();
+    mesh.dht_bootstrap("beta2", "seed2").unwrap();
+    mesh.connect("beta1", "seed2").unwrap();
+    mesh.connect("beta2", "seed2").unwrap();
+
+    // Bridge connects to both seed1 and seed2
+    mesh.dht_bootstrap("bridge", "seed1").unwrap();
+    mesh.dht_bootstrap("bridge", "seed2").unwrap();
+    mesh.connect("bridge", "seed1").unwrap();
+    mesh.connect("bridge", "seed2").unwrap();
+    mesh.drain(10);
+
+    // Simulate high IP churn in cluster 2: beta2 updates its address
+    let new_b2_addr = "192.168.10.99:9000".to_string();
+    if let Some(table) = mesh.dht_table_mut("seed2") {
+        table.update_contact(PeerContact::new(id_b2, new_b2_addr.clone()));
+    }
+    if let Some(table) = mesh.dht_table_mut("bridge") {
+        table.update_contact(PeerContact::new(id_b2, new_b2_addr.clone()));
+    }
+
+    // Now introduce an uncontactable dying node and verify 3-strike eviction
+    let id_dead = NodeId::random();
+    let mut evicted = false;
+    if let Some(table) = mesh.dht_table_mut("bridge") {
+        table.update_contact(PeerContact::new(id_dead, "10.255.255.1:9000".to_string()));
+        for i in 0..3 {
+            let res = table.mark_failed(&id_dead);
+            if i == 2 {
+                evicted = res.is_some();
+            }
+        }
+    }
+    assert!(evicted, "Dead peer should be evicted on 3rd strike");
+
+    // Also test prune_unreachable_peers on a contact with 3 failures
+    let id_dead2 = NodeId::random();
+    if let Some(table) = mesh.dht_table_mut("bridge") {
+        let mut contact = PeerContact::new(id_dead2, "10.255.255.2:9000".to_string());
+        contact.failed_queries = 3;
+        table.update_contact(contact);
+    }
+    let pruned = mesh.prune_unreachable_peers();
+    assert_eq!(pruned, 1, "Dead peer with 3 strikes should be pruned");
+
+    // Perform iterative lookup from alpha1 in cluster 1 targeting beta2 in cluster 2
+    let found = mesh.dht_find_node("bridge", &id_b2).unwrap();
+    assert!(found.iter().any(|c| c.node_id == id_b2));
+
+    // Alpha1 bootstraps via bridge and performs find_node for beta2
+    mesh.dht_bootstrap("alpha1", "bridge").unwrap();
+    let found_from_a1 = mesh.dht_find_node("alpha1", &id_b2).unwrap();
+    assert!(
+        found_from_a1.iter().any(|c| c.node_id == id_b2),
+        "Alpha1 must locate Beta2 across partitioned cluster views via bridge"
+    );
+
+    // Add isolated node gamma that has no initial P2P connections
+    let id_gamma = NodeId::random();
+    mesh.add_with_dht("gamma", create_test_node(id_gamma, 8), id_gamma);
+    mesh.dht_bootstrap("gamma", "bridge").unwrap();
+    assert_eq!(mesh.peers_of("gamma").len(), 0);
+
+    // Verify replenishment connects isolated node from DHT table (target 2 peers)
+    let added = mesh.replenish_peers_from_dht(2);
+    assert!(
+        added >= 2,
+        "Isolated node gamma should establish at least 2 connections via DHT"
+    );
+    assert_eq!(mesh.peers_of("gamma").len(), 2);
 }

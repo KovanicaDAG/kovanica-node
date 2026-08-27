@@ -640,22 +640,31 @@ impl Mesh {
         let node_names: Vec<String> = self.nodes.keys().cloned().collect();
 
         for name in node_names {
-            let current_peers = self.peers_of(&name).len();
-            if current_peers >= target_peer_count {
+            let existing_peers: std::collections::HashSet<String> =
+                self.peers_of(&name).into_iter().collect();
+            if existing_peers.len() >= target_peer_count {
                 continue;
             }
 
+            let mut needed = target_peer_count - existing_peers.len();
+
             if let Some(table) = self.dht_tables.get(&name) {
                 let local_id = table.local_id;
-                let needed = target_peer_count - current_peers;
-                let contacts = table.closest_peers(&local_id, needed);
+                let candidate_count = table.all_contacts().len();
+                let contacts = table.closest_peers(&local_id, candidate_count);
 
                 for contact in contacts {
+                    if needed == 0 {
+                        break;
+                    }
                     // Try to find the peer in our mesh by NodeId
                     if let Some(peer_name) = self.find_node_by_id(&contact.node_id) {
-                        if peer_name != name {
-                            let _ = self.connect(&name, &peer_name);
+                        if peer_name != name
+                            && !existing_peers.contains(&peer_name)
+                            && self.connect(&name, &peer_name).is_ok()
+                        {
                             total_added += 1;
+                            needed -= 1;
                         }
                     }
                 }
@@ -677,7 +686,7 @@ impl Mesh {
         self.enqueue(from, to, Envelope::Hello { advertised });
     }
 
-    fn announce_block(&mut self, from: &str, record: BlockRecord) {
+    pub fn announce_block(&mut self, from: &str, record: BlockRecord) {
         let id = record_id(&record);
         self.seen_blocks
             .entry(from.to_string())
@@ -801,11 +810,6 @@ impl Mesh {
         let seen = self.seen_blocks.entry(to.to_string()).or_default();
         if !seen.insert(id) {
             return;
-        }
-        if let Some(node) = self.nodes.get_mut(to) {
-            if node.receive_block(record.clone()).is_err() {
-                return;
-            }
         }
         if let Some(node) = self.nodes.get_mut(to) {
             if node.receive_block(record.clone()).is_err() {

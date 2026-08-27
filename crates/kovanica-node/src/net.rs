@@ -23,8 +23,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use kovanica_dag::BlockId;
-use kovanica_state::{decode_block_payload, encode_block_payload};
+use kovanica_dag::{BlockId, VrfOutput, VrfProof};
+use kovanica_state::{decode_block_payload, encode_block_payload, StakedVrf};
 
 use crate::node::{BlockHeader, BlockRecord, Node};
 
@@ -164,6 +164,28 @@ fn read_record_from<R: Read>(r: &mut R) -> Result<BlockRecord, NetError> {
     r.read_exact(&mut timestamp_ms).map_err(io)?;
     let mut nonce = [0u8; 8];
     r.read_exact(&mut nonce).map_err(io)?;
+    // VRF flag byte + optional staked fields, mirroring decode_record.
+    let mut flag = [0u8; 1];
+    r.read_exact(&mut flag).map_err(io)?;
+    let vrf = match flag[0] {
+        0 => None,
+        VRF_FLAG_STAKED => Some({
+            let mut vrf_pk = [0u8; 32];
+            r.read_exact(&mut vrf_pk).map_err(io)?;
+            let mut proof_bytes = [0u8; 96];
+            r.read_exact(&mut proof_bytes).map_err(io)?;
+            let proof = VrfProof::from_bytes(&proof_bytes)
+                .map_err(|e| NetError::Decode(format!("staked block vrf proof: {e}")))?;
+            let mut output_bytes = [0u8; 32];
+            r.read_exact(&mut output_bytes).map_err(io)?;
+            StakedVrf {
+                vrf_pk,
+                proof,
+                output: VrfOutput::from_bytes(output_bytes),
+            }
+        }),
+        other => return Err(NetError::Decode(format!("unknown vrf flag byte {other}"))),
+    };
     let payload_len = read_u64(r)? as usize;
     if payload_len > 16 * 1024 * 1024 {
         return Err(NetError::Decode("payload too large".into()));
@@ -176,6 +198,7 @@ fn read_record_from<R: Read>(r: &mut R) -> Result<BlockRecord, NetError> {
         work: u128::from_le_bytes(work),
         timestamp_ms: u64::from_le_bytes(timestamp_ms),
         nonce: u64::from_le_bytes(nonce),
+        vrf,
         txs,
     })
 }
@@ -223,8 +246,10 @@ fn io(e: std::io::Error) -> NetError {
 }
 
 /// Wire encoding of block records: count, then per record — parents
-/// (count + 32-byte ids), work (u128), timestamp (u64), nonce (u64), and the
-/// block payload (length-prefixed, the same encoding a block carries).
+/// (count + 32-byte ids), work (u128), timestamp (u64), nonce (u64), a VRF
+/// flag byte (0 = none, 1 = staked block carrying a 32-byte key + 96-byte
+/// proof + 32-byte output), and the block payload (length-prefixed, the same
+/// encoding a block carries).
 pub fn encode_records(records: &[BlockRecord]) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&(records.len() as u64).to_le_bytes());
@@ -242,6 +267,15 @@ pub(crate) fn encode_record(record: &BlockRecord, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&record.work.to_le_bytes());
     buf.extend_from_slice(&record.timestamp_ms.to_le_bytes());
     buf.extend_from_slice(&record.nonce.to_le_bytes());
+    match &record.vrf {
+        None => buf.push(0),
+        Some(sv) => {
+            buf.push(1);
+            buf.extend_from_slice(&sv.vrf_pk);
+            buf.extend_from_slice(&sv.proof.to_bytes());
+            buf.extend_from_slice(sv.output.as_bytes());
+        }
+    }
     let payload = encode_block_payload(&record.txs);
     buf.extend_from_slice(&(payload.len() as u64).to_le_bytes());
     buf.extend_from_slice(&payload);
@@ -250,8 +284,8 @@ pub(crate) fn encode_record(record: &BlockRecord, buf: &mut Vec<u8>) {
 fn decode_records(bytes: &[u8]) -> Result<Vec<BlockRecord>, NetError> {
     let mut r = Cursor { buf: bytes, pos: 0 };
     // Each record is at least 8 (parents len) + 16 (work) + 8 (timestamp) +
-    // 8 (nonce) + 8 (payload len) = 48 bytes.
-    let count = r.read_count(48)?;
+    // 8 (nonce) + 1 (vrf flag) + 8 (payload len) = 49 bytes.
+    let count = r.read_count(49)?;
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         records.push(decode_record(&mut r)?);
@@ -260,6 +294,27 @@ fn decode_records(bytes: &[u8]) -> Result<Vec<BlockRecord>, NetError> {
         return Err(NetError::Decode("trailing bytes".into()));
     }
     Ok(records)
+}
+
+/// The VRF flag byte's staked-block value, and its field sizes on the wire.
+const VRF_FLAG_STAKED: u8 = 1;
+
+fn decode_vrf_fields(r: &mut Cursor<'_>) -> Result<Option<StakedVrf>, NetError> {
+    match r.read_array::<1>()?[0] {
+        0 => Ok(None),
+        VRF_FLAG_STAKED => {
+            let vrf_pk = r.read_array::<32>()?;
+            let proof = VrfProof::from_bytes(&r.read_array::<96>()?)
+                .map_err(|e| NetError::Decode(format!("staked block vrf proof: {e}")))?;
+            let output = VrfOutput::from_bytes(r.read_array::<32>()?);
+            Ok(Some(StakedVrf {
+                vrf_pk,
+                proof,
+                output,
+            }))
+        }
+        other => Err(NetError::Decode(format!("unknown vrf flag byte {other}"))),
+    }
 }
 
 fn decode_record(r: &mut Cursor<'_>) -> Result<BlockRecord, NetError> {
@@ -271,6 +326,7 @@ fn decode_record(r: &mut Cursor<'_>) -> Result<BlockRecord, NetError> {
     let work = u128::from_le_bytes(r.read_array::<16>()?);
     let timestamp_ms = u64::from_le_bytes(r.read_array::<8>()?);
     let nonce = u64::from_le_bytes(r.read_array::<8>()?);
+    let vrf = decode_vrf_fields(r)?;
     let payload_len = r.read_count(1)?;
     let payload = r.read_slice(payload_len)?;
     let txs = decode_block_payload(payload).map_err(|e| NetError::Decode(e.to_string()))?;
@@ -279,6 +335,7 @@ fn decode_record(r: &mut Cursor<'_>) -> Result<BlockRecord, NetError> {
         work,
         timestamp_ms,
         nonce,
+        vrf,
         txs,
     })
 }

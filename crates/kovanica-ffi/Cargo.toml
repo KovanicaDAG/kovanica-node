@@ -1,0 +1,22 @@
+[package]
+name = "kovanica-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "UniFFI bindings: Kovanica light node (SPV-style sync + hybrid PoW/VRF-staked validation) for mobile apps"
+
+[lib]
+name = "kovanica_ffi"
+# staticlib: linked into the iOS/macOS xcframework (App Store forbids shipping
+# our own dylibs on iOS). cdylib: Android (JNA) + the bindgen/drift-guard
+# library build. "lib": the workspace test suite.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+kovanica-dag = { path = "../kovanica-dag" }
+kovanica-state = { path = "../kovanica-state" }
+kovanica-node = { path = "../kovanica-node" }
+hex.workspace = true
+thiserror.workspace = true
+uniffi = { version = "0.32", features = ["cli"] }

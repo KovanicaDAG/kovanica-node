@@ -12,11 +12,13 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kovanica_dag::{pow, Block, BlockId, Dag};
+use kovanica_dag::{pow, Block, BlockId, Dag, VrfPublicKey, VrfSecretKey};
+use kovanica_dag::{vrf_keypair_from_seed, vrf_prove};
+use kovanica_state::stake::{Freeze, StakeState, UNBOND_MATURITY, UNBOND_PREFIX};
 use kovanica_state::{
     apply_block, decode_block_payload, encode_block_payload, verify, Address, HalvingSchedule,
-    KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore, OutPoint, Sig, Transaction, TxId,
-    TxOutput, UtxoSet, DEFAULT_HALVING_ERA,
+    HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore, OutPoint, Sig,
+    StakedVrf, Transaction, TxId, TxOutput, UtxoSet, DEFAULT_HALVING_ERA,
 };
 
 use crate::mempool_v2::{MempoolConfig, MempoolV2};
@@ -77,6 +79,18 @@ pub enum NodeError {
     },
     /// A mempool operation failed.
     Mempool(String),
+    /// An unbond requested more than the matured bonded stake covers.
+    InsufficientStake {
+        /// The unbond amount that was requested.
+        requested: u64,
+        /// The sum of currently matured, owned frozen outpoints.
+        available: u64,
+    },
+    /// A frozen outpoint backing `vrf_pk` is not owned by the signing key.
+    UnbondOwnerMismatch {
+        /// The offending frozen outpoint.
+        outpoint: OutPoint,
+    },
 }
 
 impl core::fmt::Display for NodeError {
@@ -99,6 +113,13 @@ impl core::fmt::Display for NodeError {
                 "block timestamp ({timestamp_ms} ms) is more than 2h ahead of local clock ({now_ms} ms)"
             ),
             NodeError::Mempool(err) => write!(f, "mempool error: {err}"),
+            NodeError::InsufficientStake { requested, available } => write!(
+                f,
+                "insufficient matured stake: requested {requested}, available {available}"
+            ),
+            NodeError::UnbondOwnerMismatch { outpoint } => {
+                write!(f, "frozen outpoint {outpoint:?} is not owned by the signing key")
+            }
         }
     }
 }
@@ -142,8 +163,33 @@ pub struct BlockRecord {
     /// The block's proof-of-work nonce. Carried so a peer reconstructs the exact
     /// same id (and, under enforced PoW, the block still meets its target).
     pub nonce: u64,
+    /// The staked-VRF bundle for hybrid-admitted blocks (`None` on PoW blocks).
+    pub vrf: Option<StakedVrf>,
     /// The block's transactions.
     pub txs: Vec<Transaction>,
+}
+
+/// Direction of a [`WalletEvent`] relative to the queried address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalletDirection {
+    /// The address received value (an output pays to it).
+    Received,
+    /// The address spent previously-received value.
+    Sent,
+}
+
+/// One history entry for an address, as reconstructed by
+/// [`Node::history_of`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalletEvent {
+    /// Transaction the event comes from.
+    pub tx_id: TxId,
+    /// Block that sealed the transaction.
+    pub block_id: BlockId,
+    /// Credit or debit, relative to the queried address.
+    pub direction: WalletDirection,
+    /// Value moved, in base units.
+    pub amount: u64,
 }
 
 /// A MerkleBlock response for SPV clients: proves transaction inclusion in a block
@@ -160,6 +206,84 @@ pub struct MerkleBlock {
     pub proof: Option<kovanica_state::spv::MerkleProof>,
     /// The matching transaction data.
     pub matched_tx: Option<Transaction>,
+}
+
+/// A candidate block template for external miners/stratum pools.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiningTemplate {
+    /// Current tips of the DAG that will be the parents of the new block.
+    pub parents: Vec<BlockId>,
+    /// Proof-of-work target difficulty weight.
+    pub work: u128,
+    /// Candidate timestamp in milliseconds (monotonically advanced beyond parents).
+    pub timestamp_ms: u64,
+    /// Canonical binary block payload encoded as lowercase hexadecimal string.
+    pub payload: String,
+    /// Transactions included in the candidate block (coinbase first, then selected mempool txs).
+    pub transactions: Vec<Transaction>,
+    /// Address receiving the coinbase subsidy + fees, if configured.
+    pub miner: Option<Address>,
+    /// Block subsidy at current height in atoms.
+    pub subsidy: u64,
+    /// Total collected transaction fees in atoms.
+    pub fees: u64,
+}
+
+impl MiningTemplate {
+    /// Serialize this mining template to a JSON string matching the API schema.
+    pub fn to_json(&self) -> String {
+        let parents_json = format!(
+            "[{}]",
+            self.parents
+                .iter()
+                .map(|p| format!("\"{}\"", p.to_hex()))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let miner_json = match self.miner {
+            Some(m) => format!("\"{}\"", m.to_hex()),
+            None => "null".to_string(),
+        };
+        let txs_json = format!(
+            "[{}]",
+            self.transactions
+                .iter()
+                .map(|tx| {
+                    let outputs_json = format!(
+                        "[{}]",
+                        tx.outputs()
+                            .iter()
+                            .map(|o| format!(
+                                "{{\"value\":{},\"owner\":\"{}\"}}",
+                                o.value,
+                                o.owner.to_hex()
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    format!(
+                        "{{\"id\":\"{}\",\"coinbase\":{},\"inputs\":{},\"outputs\":{}}}",
+                        tx.id(),
+                        tx.is_coinbase(),
+                        tx.inputs().len(),
+                        outputs_json
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        format!(
+            "{{\"ok\":true,\"parents\":{},\"work\":{},\"timestamp_ms\":{},\"payload\":\"{}\",\"transactions\":{},\"miner\":{},\"subsidy\":{},\"fees\":{}}}",
+            parents_json,
+            self.work,
+            self.timestamp_ms,
+            self.payload,
+            txs_json,
+            miner_json,
+            self.subsidy,
+            self.fees,
+        )
+    }
 }
 
 /// A block header: the block's consensus fields plus a commitment to its
@@ -198,6 +322,8 @@ pub struct Node {
     clock: Clock,
     /// Address that receives the per-block KVNC subsidy coinbase.
     miner: Option<Address>,
+    /// This node's VRF signing key for staked-block production (hybrid mode).
+    validator_sk: Option<VrfSecretKey>,
     /// DHT NodeId for peer discovery (optional).
     dht_node_id: Option<crate::dht::NodeId>,
     /// DHT routing table for peer discovery (optional).
@@ -205,8 +331,8 @@ pub struct Node {
 }
 
 /// Blocks per subsidy-halving era. Issuance is `cap >> (height / HALVING_ERA)`.
-pub const HALVING_ERA: u64 = 1_000;
-/// Floor: `max(1, subsidy / 500_000)`. On the 50 KVNC testnet that is 0.0001 KVNC.
+pub const HALVING_ERA: u64 = 500_000;
+/// Floor: `max(1, subsidy / 500_000)`. On the 200 KVNC testnet that is 0.0004 KVNC.
 pub const MIN_FEE_DIVISOR: u64 = 500_000;
 
 impl Default for Node {
@@ -216,6 +342,7 @@ impl Default for Node {
             mempool: MempoolV2::default(),
             clock: Clock::default(),
             miner: None,
+            validator_sk: None,
             dht_node_id: None,
             dht_routing_table: None,
         }
@@ -235,6 +362,7 @@ impl Node {
             mempool: MempoolV2::new(config),
             clock: Clock::default(),
             miner: None,
+            validator_sk: None,
             dht_node_id: None,
             dht_routing_table: None,
         }
@@ -267,7 +395,7 @@ impl Node {
     /// keeps them monotone even if the clock is behind or a parent is ahead, so
     /// they still satisfy the difficulty layer's "not older than any parent" rule
     /// (see [`kovanica_dag::Dag::set_difficulty`]).
-    fn next_timestamp(&self, dag: &Dag, parents: &[BlockId]) -> u64 {
+    pub fn next_timestamp(&self, dag: &Dag, parents: &[BlockId]) -> u64 {
         let floor = parents
             .iter()
             .filter_map(|p| dag.block(p).map(|b| b.timestamp_ms()))
@@ -436,6 +564,34 @@ impl Node {
         self.miner
     }
 
+    /// Set this node's staked-validator identity from a 32-byte VRF seed. The
+    /// derived public key must be bonded (see `bond_stake`) before the node can
+    /// win sortition; production falls back to PoW whenever the draw misses.
+    pub fn set_validator_seed(&mut self, seed: [u8; 32]) {
+        let (sk, _pk) = vrf_keypair_from_seed(&seed);
+        self.validator_sk = Some(sk);
+    }
+
+    /// This validator's VRF public key, if a seed was set.
+    pub fn validator_public_key(&self) -> Option<VrfPublicKey> {
+        self.validator_sk.as_ref().map(|sk| sk.verifying_key())
+    }
+
+    /// Enable hybrid PoW / staked-VRF admission on the ledger. See
+    /// [`HybridConfig`] and [`Ledger::set_hybrid`].
+    pub fn enable_hybrid(&mut self, config: HybridConfig) -> Result<(), NodeError> {
+        self.ledger
+            .as_mut()
+            .ok_or(NodeError::NotInitialized)?
+            .set_hybrid(config);
+        Ok(())
+    }
+
+    /// Whether hybrid admission is enabled on the underlying ledger.
+    pub fn hybrid_enabled(&self) -> bool {
+        self.ledger.as_ref().is_some_and(Ledger::hybrid_enabled)
+    }
+
     /// Protocol minimum fee for the next transfer, in atoms.
     pub fn min_fee(&self) -> u64 {
         let cap = self.ledger().map(|l| l.subsidy()).unwrap_or(1);
@@ -477,6 +633,160 @@ impl Node {
     /// The current tips.
     pub fn tips(&self) -> Result<Vec<BlockId>, NodeError> {
         Ok(self.ledger()?.dag().tips())
+    }
+
+    /// Total bonded stake in the selected tip's view.
+    pub fn total_stake(&self) -> Result<u64, NodeError> {
+        let ledger = self.ledger()?;
+        let tip = ledger.dag().selected_tip();
+        Ok(ledger
+            .stake_state(&tip)
+            .map(StakeState::total_stake)
+            .unwrap_or(0))
+    }
+
+    /// `vrf_pk`'s bonded stake in the selected tip's view.
+    pub fn stake_of(&self, vrf_pk: &[u8; 32]) -> Result<u64, NodeError> {
+        let ledger = self.ledger()?;
+        let tip = ledger.dag().selected_tip();
+        Ok(ledger
+            .stake_state(&tip)
+            .map(|s| s.stake_of(vrf_pk))
+            .unwrap_or(0))
+    }
+
+    /// Whether `outpoint` is frozen (bonded) in the selected tip's view —
+    /// a spendable-looking UTXO that only an unbond transaction may move.
+    pub fn outpoint_is_frozen(&self, outpoint: &OutPoint) -> Result<bool, NodeError> {
+        let ledger = self.ledger()?;
+        let tip = ledger.dag().selected_tip();
+        Ok(ledger
+            .stake_state(&tip)
+            .is_some_and(|s| s.is_frozen(outpoint)))
+    }
+
+    /// The current chain height: the selected tip's blue score.
+    pub fn chain_height(&self) -> Result<u64, NodeError> {
+        Ok(self.ledger()?.tip_blue_score())
+    }
+
+    /// Earliest height at which some bonded stake of `vrf_pk` unlocks next, or
+    /// `None` when nothing is pending — either nothing is bonded or every bond
+    /// has already matured. UI countdown material.
+    pub fn pending_unbond_height(&self, vrf_pk: &[u8; 32]) -> Result<Option<u64>, NodeError> {
+        let ledger = self.ledger()?;
+        let tip = ledger.dag().selected_tip();
+        let now = ledger.tip_blue_score();
+        Ok(ledger.stake_state(&tip).and_then(|s| {
+            s.iter_frozen()
+                .filter(|(_, f)| f.vrf_pk == *vrf_pk)
+                .map(|(_, f)| f.bond_height + UNBOND_MATURITY)
+                .filter(|matures_at| *matures_at > now)
+                .min()
+        }))
+    }
+
+    /// Unbond up to `amount` of the stake backing `vrf_pk`, **immediately** as
+    /// a new block on the current tips. Only matured frozen outpoints owned by
+    /// `kp` are used (oldest first); change stays unfrozen and returns to `to`.
+    ///
+    /// Errors with [`NodeError::InsufficientStake`] when the matured, owned
+    /// total does not cover `amount` (immature bonds do not count), and with
+    /// [`NodeError::UnbondOwnerMismatch`] when a frozen outpoint backing
+    /// `vrf_pk` belongs to someone else — unbonds must not silently skip it.
+    pub fn unbond_with(
+        &mut self,
+        kp: &KeyPair,
+        vrf_pk: &[u8; 32],
+        amount: u64,
+        to: Address,
+    ) -> Result<Sent, NodeError> {
+        if amount == 0 {
+            return Err(NodeError::ZeroAmount);
+        }
+        let (next_height, frozen, owners) = {
+            let ledger = self.ledger()?;
+            let tip = ledger.dag().selected_tip();
+            let next_height = ledger.tip_blue_score() + 1;
+            let frozen: Vec<(OutPoint, Freeze)> = ledger
+                .stake_state(&tip)
+                .map(|s| {
+                    s.iter_frozen()
+                        .filter(|(_, f)| f.vrf_pk == *vrf_pk)
+                        .map(|(op, f)| (*op, *f))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Frozen outputs are UTXOs; resolve each owner for the guard below.
+            let state = ledger.ledger_state();
+            let mut owners = std::collections::HashMap::new();
+            for (op, f) in &frozen {
+                match state.get(op) {
+                    Some(out) => {
+                        owners.insert(*op, out.owner);
+                    }
+                    None => {
+                        let _ = f;
+                    }
+                }
+            }
+            (next_height, frozen, owners)
+        };
+        for (op, _) in &frozen {
+            if owners.get(op) != Some(&kp.address()) {
+                return Err(NodeError::UnbondOwnerMismatch { outpoint: *op });
+            }
+        }
+
+        // FIFO over matured coins only; immature coins are skipped.
+        let mut ordered: Vec<(OutPoint, Freeze)> = frozen;
+        ordered.sort_by_key(|(_, f)| f.bond_height);
+        let mut picks: Vec<OutPoint> = Vec::new();
+        let mut total = 0u64;
+        for (op, f) in ordered {
+            if f.bond_height + UNBOND_MATURITY > next_height {
+                continue;
+            }
+            total = total.saturating_add(f.value);
+            picks.push(op);
+            if total >= amount {
+                break;
+            }
+        }
+        if total < amount {
+            return Err(NodeError::InsufficientStake {
+                requested: amount,
+                available: total,
+            });
+        }
+
+        // Value-conserving unbond: fee 0, change (if any) back to `to` as an
+        // ordinary unfrozen output.
+        let mut outputs = vec![TxOutput::new(amount, to)];
+        if total > amount {
+            outputs.push(TxOutput::new(total - amount, to));
+        }
+        let unsigned = Transaction::unsigned(&picks, outputs, UNBOND_PREFIX.to_vec());
+        let tx_id = unsigned.id();
+        let sig = Sig::from_bytes(kp.sign(&unsigned.sighash()));
+        let mut tx = unsigned;
+        for i in 0..tx.inputs().len() {
+            tx.attach_signature(i, sig);
+        }
+
+        let parents = self.ledger()?.dag().tips();
+        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
+        let dag = self.ledger()?.dag();
+        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let block = self
+            .ledger
+            .as_mut()
+            .ok_or(NodeError::NotInitialized)?
+            .insert(parents, work, timestamp, nonce, &[tx])
+            .map_err(NodeError::Insert)?;
+        self.evict_mempool();
+        Ok(Sent { block, tx: tx_id })
     }
 
     /// The selected (heaviest) tip.
@@ -523,13 +833,23 @@ impl Node {
         amount: u64,
         to_addr: Address,
     ) -> Result<Transaction, NodeError> {
+        self.build_transfer_with(&KeyPair::from_u64(from_seed), amount, to_addr)
+    }
+
+    /// Build a signed transfer from an explicit keypair to an arbitrary
+    /// address. The signing counterpart of [`Self::prepare_transfer`].
+    fn build_transfer_with(
+        &self,
+        kp: &KeyPair,
+        amount: u64,
+        to_addr: Address,
+    ) -> Result<Transaction, NodeError> {
         if amount == 0 {
             return Err(NodeError::ZeroAmount);
         }
-        let from = KeyPair::from_u64(from_seed);
-        let unsigned = self.prepare_transfer(from.address(), amount, to_addr)?;
+        let unsigned = self.prepare_transfer(kp.address(), amount, to_addr)?;
         let mut tx = unsigned.tx;
-        let sig = Sig::from_bytes(from.sign(&unsigned.sighash));
+        let sig = Sig::from_bytes(kp.sign(&unsigned.sighash));
         for i in 0..tx.inputs().len() {
             tx.attach_signature(i, sig);
         }
@@ -624,9 +944,12 @@ impl Node {
         Ok(rows)
     }
 
-    /// Send from a seed actor to an arbitrary address (faucet / demo).
-    pub fn send_to(&mut self, from_seed: u64, amount: u64, to: Address) -> Result<Sent, NodeError> {
-        let tx = self.build_transfer_to(from_seed, amount, to)?;
+    /// Send `amount` from an explicit keypair to an arbitrary address
+    /// **immediately**, as a new block built on the current tips. The
+    /// seed-based [`Node::send_to`] is a thin wrapper over this — wallets that
+    /// hold real secrets call it directly.
+    pub fn send_with(&mut self, kp: &KeyPair, amount: u64, to: Address) -> Result<Sent, NodeError> {
+        let tx = self.build_transfer_with(kp, amount, to)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
         let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
@@ -639,6 +962,12 @@ impl Node {
             .map_err(NodeError::Insert)?;
         self.evict_mempool();
         Ok(Sent { block, tx: tx_id })
+    }
+
+    /// Send `amount` from actor `from_seed` to an arbitrary address
+    /// **immediately**, as a new block built on the current tips.
+    pub fn send_to(&mut self, from_seed: u64, amount: u64, to: Address) -> Result<Sent, NodeError> {
+        self.send_with(&KeyPair::from_u64(from_seed), amount, to)
     }
 
     /// Send `amount` from actor `from_seed` to actor `to_seed` **immediately**,
@@ -716,12 +1045,29 @@ impl Node {
         }
         let fees: u64 = selected.iter().map(|tx| fee_of(&original, tx)).sum();
 
-        let dag = self.ledger.as_ref().expect("checked above").dag();
-        let parents = dag.tips();
-        let timestamp = self.next_timestamp(dag, &parents);
-        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let (parents, timestamp) = {
+            let ledger = self.ledger.as_ref().expect("checked above");
+            let parents = ledger.dag().tips();
+            let ts = self.next_timestamp(ledger.dag(), &parents);
+            (parents, ts)
+        };
         let mut block_txs = self.issuance_txs(timestamp, fees);
         block_txs.extend(selected);
+
+        // Hybrid mode: try the staked-VRF path first — signing is cheap and
+        // needs no mining rig, which is exactly what a light/mobile validator
+        // can do. When there is no bonded winner here, fall back to PoW.
+        if self.hybrid_enabled() && self.validator_sk.is_some() {
+            let start = std::time::Instant::now();
+            if let Some(id) = self.try_insert_staked(parents.clone(), timestamp, &block_txs)? {
+                self.note_block_produced(&id, start.elapsed());
+                self.mempool.remove_all(&selected_ids);
+                return Ok(Some(id));
+            }
+        }
+
+        let dag = self.ledger.as_ref().expect("checked above").dag();
+        let work = dag.next_work_target(&parents).unwrap_or(1);
         let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &block_txs);
         let ledger = self.ledger.as_mut().expect("checked above");
         let start = std::time::Instant::now();
@@ -729,21 +1075,58 @@ impl Node {
             .insert(parents, work, timestamp, nonce, &block_txs)
             .map_err(NodeError::Insert)?;
         let duration = start.elapsed();
-        let height = ledger
-            .dag()
-            .ghostdag(&block)
+        self.note_block_produced(&block, duration);
+        self.mempool.remove_all(&selected_ids);
+        Ok(Some(block))
+    }
+
+    /// Shared production bookkeeping: validation metrics, mempool eviction.
+    fn note_block_produced(&mut self, id: &BlockId, duration: std::time::Duration) {
+        let height = self
+            .ledger
+            .as_ref()
+            .and_then(|l| l.dag().ghostdag(id))
             .map(|g| g.blue_score)
             .unwrap_or(0);
-        let blue_score = height;
-        record_block_produced(height, blue_score, duration);
-        self.mempool.remove_all(&selected_ids);
+        record_block_produced(height, height, duration);
         self.evict_mempool();
         set_mempool_counts(
             self.mempool.len_pending(),
             self.mempool.len_orphans(),
             self.mempool.total_bytes(),
         );
-        Ok(Some(block))
+    }
+
+    /// Attempt a staked-VRF block on `parents` at `timestamp_ms` carrying
+    /// `block_txs`. Signs the tip input with this node's validator key and
+    /// submits via [`Ledger::insert_with_vrf`]. Returns `Ok(None)` when the
+    /// sortition draw missed (not eligible / already produced for this tip) —
+    /// the caller falls back to PoW. Any other insert error propagates.
+    fn try_insert_staked(
+        &mut self,
+        parents: Vec<BlockId>,
+        timestamp_ms: u64,
+        block_txs: &[Transaction],
+    ) -> Result<Option<BlockId>, NodeError> {
+        let sk = self
+            .validator_sk
+            .as_ref()
+            .expect("caller checks validator_sk");
+        let eval = vrf_prove(sk, &Dag::vrf_input(&parents));
+        let sv = StakedVrf {
+            vrf_pk: *sk.verifying_key().as_bytes(),
+            proof: eval.proof,
+            output: eval.output,
+        };
+        let ledger = self.ledger.as_mut().expect("checked above");
+        match ledger.insert_with_vrf(parents, timestamp_ms, sv, block_txs) {
+            Ok(id) => Ok(Some(id)),
+            Err(
+                LedgerInsertError::NotEligible { .. }
+                | LedgerInsertError::DuplicateStakedBlock { .. },
+            ) => Ok(None),
+            Err(e) => Err(NodeError::Insert(e)),
+        }
     }
 
     /// Insert a block with no user transactions. If subsidy > 0, mints that many
@@ -751,6 +1134,17 @@ impl Node {
     pub fn produce_empty(&mut self) -> Result<BlockId, NodeError> {
         let parents = self.ledger()?.dag().tips();
         let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
+
+        // Hybrid mode: staked-VRF first (see `produce_block`), PoW fallback.
+        if self.hybrid_enabled() && self.validator_sk.is_some() {
+            let txs = self.issuance_txs(timestamp, 0);
+            let start = std::time::Instant::now();
+            if let Some(id) = self.try_insert_staked(parents.clone(), timestamp, &txs)? {
+                self.note_block_produced(&id, start.elapsed());
+                return Ok(id);
+            }
+        }
+
         let dag = self.ledger()?.dag();
         let work = dag.next_work_target(&parents).unwrap_or(1);
         let txs = self.issuance_txs(timestamp, 0);
@@ -761,25 +1155,61 @@ impl Node {
             .insert(parents, work, timestamp, nonce, &txs)
             .map_err(NodeError::Insert)?;
         let duration = start.elapsed();
-        let height = ledger
-            .dag()
-            .ghostdag(&id)
-            .map(|g| g.blue_score)
-            .unwrap_or(0);
-        let blue_score = height;
-        record_block_produced(height, blue_score, duration);
-        self.evict_mempool();
-        set_mempool_counts(
-            self.mempool.len_pending(),
-            self.mempool.len_orphans(),
-            self.mempool.total_bytes(),
-        );
+        self.note_block_produced(&id, duration);
         Ok(id)
     }
 
+    /// Build a candidate block template on current DAG tips with valid mempool
+    /// transactions and coinbase issuance, without searching for a nonce.
+    pub fn mining_template(&self) -> Result<MiningTemplate, NodeError> {
+        self.mining_template_for(self.miner)
+    }
+
+    /// Build a candidate block template paying coinbase to the specified miner.
+    pub fn mining_template_for(&self, miner: Option<Address>) -> Result<MiningTemplate, NodeError> {
+        let ledger = self.ledger.as_ref().ok_or(NodeError::NotInitialized)?;
+        let subsidy = ledger.subsidy();
+        let mut working = ledger.ledger_state();
+        let original = ledger.ledger_state();
+
+        let mut selected = Vec::new();
+        for tx in self.mempool.ordered_pending() {
+            if apply_block(&mut working, std::slice::from_ref(&tx), subsidy).is_ok() {
+                selected.push(tx);
+            }
+        }
+        let fees: u64 = selected.iter().map(|tx| fee_of(&original, tx)).sum();
+
+        let parents = ledger.dag().tips();
+        let timestamp_ms = self.next_timestamp(ledger.dag(), &parents);
+        let work = ledger.dag().next_work_target(&parents).unwrap_or(1);
+
+        let mut block_txs = self.issuance_txs_for(miner, timestamp_ms, fees);
+        block_txs.extend(selected);
+
+        let payload_bytes = encode_block_payload(&block_txs);
+        let payload = hex::encode(payload_bytes);
+
+        Ok(MiningTemplate {
+            parents,
+            work,
+            timestamp_ms,
+            payload,
+            transactions: block_txs,
+            miner,
+            subsidy,
+            fees,
+        })
+    }
+
     /// Coinbase claiming subsidy + `extra_fees` for `miner`. Empty if nothing to mint.
-    fn issuance_txs(&self, timestamp_ms: u64, extra_fees: u64) -> Vec<Transaction> {
-        let Some(miner) = self.miner else {
+    pub fn issuance_txs_for(
+        &self,
+        miner: Option<Address>,
+        timestamp_ms: u64,
+        extra_fees: u64,
+    ) -> Vec<Transaction> {
+        let Some(miner) = miner else {
             return Vec::new();
         };
         let subsidy = self.issuance().unwrap_or(0);
@@ -791,6 +1221,11 @@ impl Node {
             vec![TxOutput::new(total, miner)],
             timestamp_ms.to_le_bytes().to_vec(),
         )]
+    }
+
+    /// Coinbase claiming subsidy + `extra_fees` for `self.miner`. Empty if nothing to mint.
+    fn issuance_txs(&self, timestamp_ms: u64, extra_fees: u64) -> Vec<Transaction> {
+        self.issuance_txs_for(self.miner, timestamp_ms, extra_fees)
     }
 
     /// A pending mempool transaction by id, if present.
@@ -950,6 +1385,108 @@ impl Node {
             .collect()
     }
 
+    /// The compact block filter for a known block: one entry per distinct
+    /// output address in its payload. `k` is the Golomb-Rice parameter (8 is
+    /// the reference choice; higher = denser, larger).
+    pub fn block_filter(&self, id: &BlockId, k: u8) -> Option<kovanica_state::spv::BlockFilter> {
+        let ledger = self.ledger.as_ref()?;
+        let block = ledger.dag().block(id)?;
+        let txs = decode_block_payload(block.payload()).ok()?;
+        let mut addrs: Vec<[u8; 32]> = txs
+            .iter()
+            .flat_map(|tx| tx.outputs().iter().map(|o| *o.owner.payload()))
+            .collect();
+        addrs.sort_unstable();
+        addrs.dedup();
+        Some(kovanica_state::spv::BlockFilter::from_addresses(&addrs, k))
+    }
+
+    /// A Merkle-inclusion proof for `tx_id` inside block `id`, for light
+    /// clients to verify against the block header's merkle root.
+    pub fn merkle_proof(
+        &self,
+        id: &BlockId,
+        tx_id: &TxId,
+    ) -> Option<kovanica_state::spv::MerkleProof> {
+        let ledger = self.ledger.as_ref()?;
+        let block = ledger.dag().block(id)?;
+        let txs = decode_block_payload(block.payload()).ok()?;
+        let index = txs.iter().position(|tx| &tx.id() == tx_id)?;
+        kovanica_state::spv::generate_merkle_proof(&txs, index)
+    }
+
+    /// Reconstruct the transaction history of `owner` by scanning stored
+    /// blocks in linearized (canonical) order.
+    ///
+    /// A **credit** ([`WalletDirection::Received`]) is emitted for every
+    /// output paying to `owner`; a **debit** ([`WalletDirection::Sent`]) for
+    /// every transaction consuming an output previously seen as owned by
+    /// `owner` during the scan. Change back to the sender shows up as a
+    /// credit, matching plain UTXO accounting. Blocks with pruned payloads
+    /// are skipped. Scanning stops after `max_blocks` blocks; `0` scans all
+    /// of them.
+    ///
+    /// This is a full rescan per call — cheap at light-node scale; callers
+    /// wanting incremental history should cache results app-side.
+    pub fn history_of(
+        &self,
+        owner: &Address,
+        max_blocks: usize,
+    ) -> Result<Vec<WalletEvent>, NodeError> {
+        use std::collections::HashMap;
+
+        let ledger = self.ledger()?;
+        let dag = ledger.dag();
+
+        // outpoint -> value of outputs the scan has seen owned by `owner`.
+        let mut mine: HashMap<OutPoint, u64> = HashMap::new();
+        let mut events = Vec::new();
+
+        for (scanned, id) in dag.linearize().into_iter().enumerate() {
+            if max_blocks > 0 && scanned >= max_blocks {
+                break;
+            }
+
+            let Some(block) = dag.block(&id) else {
+                continue;
+            };
+            let Ok(txs) = decode_block_payload(block.payload()) else {
+                continue;
+            };
+
+            for tx in &txs {
+                let mut spent = 0u64;
+                for input in tx.inputs() {
+                    if let Some(value) = mine.get(&input.outpoint) {
+                        spent += *value;
+                    }
+                }
+                if spent > 0 {
+                    events.push(WalletEvent {
+                        tx_id: tx.id(),
+                        block_id: id,
+                        direction: WalletDirection::Sent,
+                        amount: spent,
+                    });
+                }
+
+                for (index, output) in tx.outputs().iter().enumerate() {
+                    if output.owner == *owner {
+                        mine.insert(OutPoint::new(tx.id(), index as u32), output.value);
+                        events.push(WalletEvent {
+                            tx_id: tx.id(),
+                            block_id: id,
+                            direction: WalletDirection::Received,
+                            amount: output.value,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
     /// Export SPV block headers along the selected chain starting after the common
     /// ancestor found in `locator`, up to `stop` (or tip), bounded by `limit`.
     pub fn headers_from(
@@ -1080,6 +1617,18 @@ impl Node {
             work: block.work(),
             timestamp_ms: block.timestamp_ms(),
             nonce: block.nonce(),
+            vrf: match (
+                block.vrf_public_key(),
+                block.vrf_proof(),
+                block.vrf_output(),
+            ) {
+                (Some(pk), Some(proof), Some(output)) => Some(StakedVrf {
+                    vrf_pk: *pk.as_bytes(),
+                    proof: proof.clone(),
+                    output: *output,
+                }),
+                _ => None,
+            },
             txs,
         })
     }
@@ -1117,32 +1666,36 @@ impl Node {
         }
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
 
-        // Reject blocks built on pruned history: if the selected parent's payload
-        // has been evicted, we cannot serve its body and the block is effectively
-        // building on history we no longer have. This mirrors the finality check
-        // but uses the payload pruning depth instead.
-        // Check if block already exists (idempotent receive)
-        let block_id = {
-            let block = Block::new(
+        // Build the received block exactly once, VRF fields included, so the id
+        // matches what the producer (and every other peer) computed.
+        let payload = encode_block_payload(&record.txs);
+        let block = match &record.vrf {
+            Some(sv) => Block::new_with_vrf(
                 record.parents.clone(),
                 record.work,
                 record.timestamp_ms,
                 record.nonce,
-                encode_block_payload(&record.txs),
-            );
-            block.id()
+                VrfPublicKey::from_bytes(&sv.vrf_pk).map_err(|_| {
+                    NodeError::Insert(LedgerInsertError::BadStakeProof { vrf_pk: sv.vrf_pk })
+                })?,
+                sv.proof.clone(),
+                sv.output,
+                payload,
+            ),
+            None => Block::new(
+                record.parents.clone(),
+                record.work,
+                record.timestamp_ms,
+                record.nonce,
+                payload,
+            ),
         };
+        let block_id = block.id();
         if ledger.dag().contains(&block_id) {
             return Ok(block_id);
         }
 
-        let preview = match ledger.dag().preview(&Block::new(
-            record.parents.clone(),
-            record.work,
-            record.timestamp_ms,
-            record.nonce,
-            encode_block_payload(&record.txs),
-        )) {
+        let preview = match ledger.dag().preview(&block) {
             Ok(p) => p,
             Err(e) => return Err(NodeError::Insert(LedgerInsertError::Dag(e))),
         };
@@ -1159,13 +1712,7 @@ impl Node {
         }
 
         let start = std::time::Instant::now();
-        let result = ledger.insert(
-            record.parents,
-            record.work,
-            record.timestamp_ms,
-            record.nonce,
-            &record.txs,
-        );
+        let result = ledger.insert_prepared_block(block, &record.txs);
         let duration = start.elapsed();
         match result {
             Ok(id) => {
@@ -1205,6 +1752,26 @@ impl Node {
         Ok(())
     }
 
+    /// This node's active hybrid policy, if any (mirrors the ledger's).
+    pub fn hybrid_config(&self) -> Option<kovanica_state::HybridConfig> {
+        self.ledger.as_ref().and_then(Ledger::hybrid_config)
+    }
+
+    /// Like [`Node::load`], but hybrid admission runs during replay so
+    /// staked-VRF blocks re-admit with their original ids. Required for
+    /// snapshots produced under a hybrid policy.
+    pub fn load_with_hybrid(
+        &mut self,
+        path: &str,
+        config: kovanica_state::HybridConfig,
+    ) -> Result<(), NodeError> {
+        let bytes = fs::read(path).map_err(|e| NodeError::Io(e.to_string()))?;
+        let ledger = Ledger::read_snapshot_with_hybrid(&bytes, config)
+            .map_err(|e| NodeError::Snapshot(e.to_string()))?;
+        self.ledger = Some(ledger);
+        Ok(())
+    }
+
     /// Replace the node's ledger with one loaded from a finality checkpoint at
     /// `path`. This is faster than a full snapshot load when the DAG is deep,
     /// as it only replays blocks above the finality boundary.
@@ -1239,6 +1806,7 @@ impl Node {
                 mempool: MempoolV2::default(),
                 clock: Clock::default(),
                 miner: None,
+                validator_sk: None,
                 dht_node_id: None,
                 dht_routing_table: None,
             },
@@ -1255,6 +1823,7 @@ impl Node {
             mempool: MempoolV2::default(),
             clock: Clock::default(),
             miner: None,
+            validator_sk: None,
             dht_node_id: None,
             dht_routing_table: None,
         })
@@ -1335,18 +1904,16 @@ impl Node {
     /// Returns a response message if one should be sent back.
     pub fn handle_dht_msg(&self, msg: crate::dht::DhtMsg) -> Option<crate::dht::DhtMsg> {
         let table = self.dht_routing_table()?;
+        let local_id = table.local_id;
         match msg {
-            crate::dht::DhtMsg::Ping { sender, nonce } => {
-                Some(crate::dht::DhtMsg::Pong { sender, nonce })
-            }
-            crate::dht::DhtMsg::FindNode {
-                sender,
-                target,
+            crate::dht::DhtMsg::Ping { nonce, .. } => Some(crate::dht::DhtMsg::Pong {
+                sender: local_id,
                 nonce,
-            } => {
+            }),
+            crate::dht::DhtMsg::FindNode { target, nonce, .. } => {
                 let nodes = table.closest_peers(&target, table.k);
                 Some(crate::dht::DhtMsg::Nodes {
-                    sender,
+                    sender: local_id,
                     target,
                     nonce,
                     nodes,
@@ -1463,5 +2030,70 @@ mod tests {
         // Non-existent block
         let unknown_block = BlockId::from_bytes([99u8; 32]);
         assert!(node.merkle_block(&unknown_block, &sent.tx).is_err());
+    }
+
+    #[test]
+    fn test_mining_template_uninitialized() {
+        let node = Node::new();
+        assert!(matches!(
+            node.mining_template(),
+            Err(NodeError::NotInitialized)
+        ));
+    }
+
+    #[test]
+    fn test_mining_template_genesis_and_coinbase() {
+        let mut node = Node::new();
+        let miner_kp = KeyPair::from_u64(1);
+        node.set_miner(miner_kp.address());
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+
+        let template = node.mining_template().unwrap();
+        assert_eq!(template.parents, vec![genesis]);
+        assert!(template.work >= 1);
+        assert!(template.timestamp_ms > 0);
+        assert_eq!(template.subsidy, 1000);
+        assert_eq!(template.fees, 0);
+        assert_eq!(template.miner, Some(miner_kp.address()));
+        assert_eq!(template.transactions.len(), 1);
+        assert!(template.transactions[0].is_coinbase());
+
+        let decoded_txs =
+            decode_block_payload(&hex::decode(&template.payload).unwrap()).unwrap();
+        assert_eq!(decoded_txs, template.transactions);
+
+        let json = template.to_json();
+        assert!(json.contains("\"ok\":true"));
+        assert!(json.contains(&genesis.to_hex()));
+        assert!(json.contains(&template.payload));
+        assert!(json.contains(&miner_kp.address().to_hex()));
+        assert!(json.contains("\"subsidy\":1000"));
+    }
+
+    #[test]
+    fn test_mining_template_with_mempool_tx_and_fees() {
+        let mut node = Node::new();
+        let miner_kp = KeyPair::from_u64(1);
+        node.set_miner(miner_kp.address());
+        node.genesis(3, 1000, 1000, 1).unwrap();
+
+        // Submit a spend to the mempool
+        node.pool(1, 100, 2).unwrap();
+        assert_eq!(node.mempool.len_pending(), 1);
+
+        let template = node.mining_template().unwrap();
+        assert_eq!(template.transactions.len(), 2);
+        assert!(template.transactions[0].is_coinbase());
+        assert!(!template.transactions[1].is_coinbase());
+        assert!(template.fees >= node.min_fee());
+
+        // Custom miner check
+        let custom_miner = KeyPair::from_u64(99).address();
+        let custom_template = node.mining_template_for(Some(custom_miner)).unwrap();
+        assert_eq!(custom_template.miner, Some(custom_miner));
+        assert_eq!(
+            custom_template.transactions[0].outputs()[0].owner,
+            custom_miner
+        );
     }
 }

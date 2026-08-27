@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use kovanica_dag::BlockId;
-use kovanica_state::{Address, Transaction};
+use kovanica_dag::{Block, BlockId};
+use kovanica_state::{decode_block_payload, encode_block_payload, Address, Transaction};
 
 use crate::dht::{NodeId, PeerContact, RoutingTable};
 use crate::dns_seed::{DnsSeedConfig, DnsSeedResolver};
@@ -24,7 +24,7 @@ use crate::metrics::{
 use crate::net::{
     encode_records, pull_blocks_timeout, serve_exchange, serve_headers_first, sync_headers_first,
 };
-use crate::node::{Node, HALVING_ERA};
+use crate::node::{BlockRecord, Node, HALVING_ERA};
 use crate::p2p::Mesh;
 
 const UI: &str = include_str!("explorer.html");
@@ -32,8 +32,8 @@ const BIP39: &str = include_str!("bip39-english.txt");
 const DOCS: &str = include_str!("../../../TESTNET.md");
 /// 1 KVNC = 10^8 base units (atoms).
 const ATOM: u64 = 100_000_000;
-const GENESIS_SUBSIDY: u64 = 50 * ATOM;
-const GENESIS_PREMINE: u64 = 50 * ATOM;
+const GENESIS_SUBSIDY: u64 = 200 * ATOM;
+const GENESIS_PREMINE: u64 = 200 * ATOM;
 const NETWORK: &str = "kovanica-testnet";
 const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 /// Single P2P path: plaintext TCP. Not 80/443/3010/8080 and not libp2p :30333.
@@ -103,39 +103,38 @@ pub fn serve(addr: impl ToSocketAddrs) -> std::io::Result<()> {
     }
 }
 
-struct Explorer {
-    mesh: Mesh,
-    selected: String,
-    mining: bool,
-    mine_every: u64,
-    ticks: u64,
-    rotate: usize,
-    faucet: bool,
-    allow_reset: bool,
-    operator: bool,
-    listen: Vec<TcpListener>,
-    listen_addr: String,
-    peers: Vec<String>,
-    origins: HashMap<String, u64>,
+pub struct Explorer {
+    pub mesh: Mesh,
+    pub selected: String,
+    pub mining: bool,
+    pub mine_every: u64,
+    pub ticks: u64,
+    pub rotate: usize,
+    pub faucet: bool,
+    pub allow_reset: bool,
+    pub operator: bool,
+    pub listen: Vec<TcpListener>,
+    pub listen_addr: String,
+    pub peers: Vec<String>,
+    pub origins: HashMap<String, u64>,
     /// Peers that answered our last sync attempt (live connectivity).
-    live_peers: HashSet<String>,
-    ws_clients: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,
+    pub live_peers: HashSet<String>,
+    pub ws_clients: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,
     /// DHT routing table for the explorer's alpha node.
-    dht_table: Option<RoutingTable>,
+    pub dht_table: Option<RoutingTable>,
     /// DHT NodeId for the explorer.
-    dht_node_id: Option<NodeId>,
+    pub dht_node_id: Option<NodeId>,
     /// DNS seed resolver for multi-seed discovery.
-    dns_resolver: Option<DnsSeedResolver<crate::dns_seed::StdDnsResolver>>,
+    pub dns_resolver: Option<DnsSeedResolver<crate::dns_seed::StdDnsResolver>>,
     /// Last time DHT bootstrap was attempted.
-    last_dht_bootstrap: u64,
+    pub last_dht_bootstrap: u64,
     /// Last time DHT peer replenishment was attempted.
-    last_dht_replenish: u64,
+    pub last_dht_replenish: u64,
 }
 
 impl Explorer {
     /// Test constructor: a fresh in-memory mesh, no persistence or sockets.
-    #[cfg(test)]
-    fn boot() -> Self {
+    pub fn boot() -> Self {
         let mut mesh = line_mesh();
         mesh.drain(16);
         Self {
@@ -489,7 +488,6 @@ fn load_or_genesis(name: &str) -> Node {
     genesis_node()
 }
 
-#[cfg(test)]
 fn line_mesh() -> Mesh {
     let mut mesh = Mesh::new();
     mesh.add("alpha", genesis_node());
@@ -616,6 +614,12 @@ fn bind_v6_only(addr: &str) -> std::io::Result<TcpListener> {
     Ok(listener)
 }
 
+pub const DEFAULT_PEERS: &[&str] = &[
+    "seed.kovanica.online:9000",
+    "seed2.kovanica.online:9000",
+    "seed3.kovanica.online:9000",
+];
+
 fn peer_list() -> Vec<String> {
     match std::env::var("KOVANICA_PEERS") {
         Ok(s) if env_off(s.trim()) => Vec::new(),
@@ -624,11 +628,7 @@ fn peer_list() -> Vec<String> {
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty())
             .collect(),
-        Err(_) => P2P_BOOTSTRAP
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|x| !x.is_empty())
-            .collect(),
+        Err(_) => DEFAULT_PEERS.iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -735,7 +735,27 @@ fn handle_websocket(app: &mut Explorer, mut stream: TcpStream, req: &str) -> std
     Ok(())
 }
 
-fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
+fn parse_json_u128(val: &serde_json::Value) -> Option<u128> {
+    if let Some(n) = val.as_u64() {
+        Some(n as u128)
+    } else if let Some(s) = val.as_str() {
+        s.parse::<u128>().ok()
+    } else {
+        val.as_f64().map(|n| n as u128)
+    }
+}
+
+fn parse_json_u64(val: &serde_json::Value) -> Option<u64> {
+    if let Some(n) = val.as_u64() {
+        Some(n)
+    } else if let Some(s) = val.as_str() {
+        s.parse::<u64>().ok()
+    } else {
+        val.as_f64().map(|n| n as u64)
+    }
+}
+
+pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut buf = [0u8; 8192];
@@ -744,9 +764,48 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
         Ok(n) => n,
         Err(_) => return Ok(()),
     };
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let mut lines = req.split("\r\n");
-    let first = lines.next().unwrap_or("");
+
+    // Extract headers and body
+    let (headers_raw, body_initial) = if let Some(pos) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") {
+        (&buf[..pos], &buf[pos + 4..n])
+    } else if let Some(pos) = buf[..n].windows(2).position(|w| w == b"\n\n") {
+        (&buf[..pos], &buf[pos + 2..n])
+    } else {
+        (&buf[..n], &[][..])
+    };
+
+    let headers_str = String::from_utf8_lossy(headers_raw);
+
+    let mut content_length = None;
+    for line in headers_str.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                if let Ok(cl) = v.trim().parse::<usize>() {
+                    content_length = Some(cl);
+                }
+            }
+        }
+    }
+
+    let mut body_bytes = body_initial.to_vec();
+    if let Some(cl) = content_length {
+        const MAX_BODY_SIZE: usize = 2 * 1024 * 1024; // 2MB max
+        let target_len = cl.min(MAX_BODY_SIZE);
+        while body_bytes.len() < target_len {
+            let to_read = target_len - body_bytes.len();
+            let mut chunk = vec![0u8; to_read.min(8192)];
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read_n) => {
+                    body_bytes.extend_from_slice(&chunk[..read_n]);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let first = headers_str.lines().next().unwrap_or("");
     let mut parts = first.split_whitespace();
     let method = parts.next().unwrap_or("GET");
     let target = parts.next().unwrap_or("/");
@@ -756,8 +815,8 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
     record_explorer_http_request(path, 200); // Will update with actual status later
 
     // WebSocket upgrade
-    if method == "GET" && path == "/ws" && req.contains("Upgrade: websocket") {
-        return handle_websocket(app, stream, &req);
+    if method == "GET" && path == "/ws" && headers_str.contains("Upgrade: websocket") {
+        return handle_websocket(app, stream, &headers_str);
     }
 
     // Prometheus metrics endpoint
@@ -800,6 +859,29 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
             "text/plain; charset=utf-8",
             DOCS.as_bytes(),
         );
+    }
+    if method == "GET" && path == "/api/mine/template" {
+        let node_name = query.get("node").map(|s| s.as_str()).unwrap_or(&app.selected);
+        let Some(node) = app.mesh.node(node_name) else {
+            let err = format!("{{\"ok\":false,\"error\":\"unknown node {}\"}}", node_name);
+            return respond(&mut stream, 400, "application/json", err.as_bytes());
+        };
+        let custom_miner = query.get("miner").and_then(|s| parse_addr(s).ok());
+        let template_res = if custom_miner.is_some() {
+            node.mining_template_for(custom_miner)
+        } else {
+            node.mining_template()
+        };
+        match template_res {
+            Ok(template) => {
+                let body = template.to_json();
+                return respond(&mut stream, 200, "application/json", body.as_bytes());
+            }
+            Err(e) => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&e.to_string()));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        }
     }
     if method == "GET" && path == "/api/bootstrap" {
         let n = app.mesh.node(&app.selected);
@@ -896,6 +978,161 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
             Err(e) => return respond(&mut stream, 400, "text/plain; charset=utf-8", e.as_bytes()),
         }
     }
+    if method == "POST" && path == "/api/mine/submit" {
+        let node_name = query
+            .get("node")
+            .cloned()
+            .unwrap_or_else(|| app.selected.clone());
+
+        // Parse JSON request body
+        let json_body: serde_json::Value = match serde_json::from_str(&body_str) {
+            Ok(val) => val,
+            Err(e) => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("invalid json body: {e}")));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        // Extract parents
+        let parents_val = match json_body.get("parents") {
+            Some(serde_json::Value::Array(arr)) if !arr.is_empty() => arr,
+            _ => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing or empty 'parents' field"));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let mut parents = Vec::with_capacity(parents_val.len());
+        for p_val in parents_val {
+            let Some(p_str) = p_val.as_str() else {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("parent block id must be a hex string"));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            };
+            let bytes = match hex::decode(p_str.trim()) {
+                Ok(b) => b,
+                Err(_) => {
+                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("invalid hex in parent block id: {p_str}")));
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            };
+            let arr: [u8; 32] = match bytes.try_into() {
+                Ok(a) => a,
+                Err(_) => {
+                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("parent block id must be 32 bytes: {p_str}")));
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            };
+            parents.push(BlockId::from_bytes(arr));
+        }
+
+        // Extract work
+        let work = match json_body.get("work") {
+            Some(v) => match parse_json_u128(v) {
+                Some(w) => w,
+                None => {
+                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("invalid 'work' field"));
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            },
+            None => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'work' field"));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        // Extract timestamp_ms
+        let timestamp_ms = match json_body.get("timestamp_ms") {
+            Some(v) => match parse_json_u64(v) {
+                Some(ts) => ts,
+                None => {
+                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("invalid 'timestamp_ms' field"));
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            },
+            None => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'timestamp_ms' field"));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        // Extract nonce
+        let nonce = match json_body.get("nonce") {
+            Some(v) => match parse_json_u64(v) {
+                Some(nc) => nc,
+                None => {
+                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("invalid 'nonce' field"));
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            },
+            None => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'nonce' field"));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        // Extract payload hex and decode transactions
+        let txs = if let Some(payload_val) = json_body.get("payload").and_then(|v| v.as_str()) {
+            let payload_bytes = match hex::decode(payload_val.trim()) {
+                Ok(b) => b,
+                Err(e) => {
+                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("invalid hex in 'payload': {e}")));
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            };
+            match decode_block_payload(&payload_bytes) {
+                Ok(t) => t,
+                Err(e) => {
+                    let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("undecodable block payload: {e:?}")));
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            }
+        } else {
+            let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'payload' field"));
+            return respond(&mut stream, 400, "application/json", err.as_bytes());
+        };
+
+        let record = BlockRecord {
+            parents,
+            work,
+            timestamp_ms,
+            nonce,
+            vrf: None,
+            txs,
+        };
+
+        let Some(node) = app.mesh.node_mut(&node_name) else {
+            let err = format!("{{\"ok\":false,\"error\":\"unknown node {}\"}}", node_name);
+            return respond(&mut stream, 400, "application/json", err.as_bytes());
+        };
+
+        // Check PoW target if node enforces proof of work
+        if node.proof_of_work() {
+            let block = Block::new(
+                record.parents.clone(),
+                record.work,
+                record.timestamp_ms,
+                record.nonce,
+                encode_block_payload(&record.txs),
+            );
+            if !kovanica_dag::pow::meets_target(&block.id(), record.work) {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&format!("proof of work target not met for block {}", block.id())));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        }
+
+        match node.receive_block(record.clone()) {
+            Ok(block_id) => {
+                app.mesh.announce_block(&node_name, record);
+                persist_all(&app.mesh);
+                let body = format!("{{\"ok\":true,\"block\":{}}}", jstr(&block_id.to_string()));
+                return respond(&mut stream, 200, "application/json", body.as_bytes());
+            }
+            Err(e) => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&e.to_string()));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        }
+    }
     if method == "POST" && path.starts_with("/api/") {
         let action = path.trim_start_matches("/api/");
         if let Some(node) = query.get("node") {
@@ -912,16 +1149,39 @@ fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> {
     respond(&mut stream, 404, "text/plain; charset=utf-8", b"not found")
 }
 
-fn estimate_fee(node: &Node, _amount: u64) -> Result<u64, String> {
+fn estimate_fee(node: &Node, _amount: u64) -> Result<(u64, u64, u64), String> {
+    let mut block_tx_count = 0;
+    let mut blocks_scanned = 0;
+    
+    if let Ok(mut current) = node.selected_tip() {
+        for _ in 0..10 {
+            if let Some(record) = node.block_record(&current) {
+                block_tx_count += record.txs.len();
+                blocks_scanned += 1;
+                if let Some(parent) = record.parents.first() {
+                    current = *parent;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    let min = node.min_fee();
+    // Assuming > 20 txs per block average is congested for this testnet
+    let is_congested = blocks_scanned > 0 && (block_tx_count as f64 / blocks_scanned as f64) > 20.0;
+    
     let pending = node.pending_txs();
     if pending.is_empty() {
-        return Ok(node.min_fee());
+        let base = if is_congested { min * 2 } else { min };
+        return Ok((base, std::cmp::max(min + 1, base * 2), std::cmp::max(min + 2, base * 3)));
     }
 
     let mut fees: Vec<u64> = pending
         .iter()
         .filter_map(|t| {
-            // Approximate fee from transaction
             if let Ok(ledger) = node.ledger() {
                 let utxo = ledger.ledger_state();
                 let mut sum_in = 0u64;
@@ -943,17 +1203,28 @@ fn estimate_fee(node: &Node, _amount: u64) -> Result<u64, String> {
         .collect();
 
     if fees.is_empty() {
-        return Ok(node.min_fee());
+        let base = if is_congested { min * 2 } else { min };
+        return Ok((base, std::cmp::max(min + 1, base * 2), std::cmp::max(min + 2, base * 3)));
     }
 
     fees.sort();
-    let _median = fees[fees.len() / 2];
+    let p50_idx = (fees.len() as f64 * 0.5).floor() as usize;
     let p90_idx = (fees.len() as f64 * 0.9).floor() as usize;
+    
+    let p50 = fees[p50_idx.min(fees.len() - 1)];
     let p90 = fees[p90_idx.min(fees.len() - 1)];
 
-    // Use p90 fee for faster confirmation, minimum at node's min_fee
-    let base = std::cmp::max(node.min_fee(), p90);
-    Ok(base)
+    let mut slow = std::cmp::max(min, p50);
+    let mut normal = std::cmp::max(min, p90);
+    let mut fast = std::cmp::max(min, (p90 as f64 * 1.2) as u64);
+
+    if is_congested {
+        slow = std::cmp::max(slow, min * 2);
+        normal = std::cmp::max(normal, min * 3);
+        fast = std::cmp::max(fast, min * 5);
+    }
+
+    Ok((slow, normal, fast))
 }
 
 fn dispatch(
@@ -1100,8 +1371,8 @@ fn dispatch(
         "fee_estimate" => {
             let amount = parse_u64(q, "amount", 0)?;
             let n = app.mesh.node(&node).ok_or("unknown node")?;
-            let fee = estimate_fee(n, amount)?;
-            return Ok(format!("{{\"ok\":true,\"fee\":{}}}", fee));
+            let (slow, normal, fast) = estimate_fee(n, amount)?;
+            return Ok(format!("{{\"ok\":true,\"slow\":{},\"normal\":{},\"fast\":{}}}", slow, normal, fast));
         }
         other => return Err(format!("unknown action {other}")),
     }
@@ -1550,12 +1821,12 @@ mod tests {
         assert!(json.contains("\"beta\""));
         assert!(json.contains("\"gamma\""));
         assert!(json.contains("\"genesis\""));
-        assert!(json.contains("\"supply\":5000000000"));
+        assert!(json.contains("\"supply\":20000000000"));
         assert!(json.contains("\"token\":\"KVNC\""));
         assert!(json.contains("\"ui\":\"v5\""));
         assert!(json.contains("\"pow\":true"));
         assert!(json.contains("\"network\":\"kovanica-testnet\""));
-        assert!(json.contains("\"subsidy\":5000000000"));
+        assert!(json.contains("\"subsidy\":20000000000"));
     }
 
     #[test]
@@ -1673,10 +1944,10 @@ mod tests {
 
     #[test]
     fn issuance_halves_each_era() {
-        assert_eq!(Node::issuance_at(50 * ATOM, 0), 50 * ATOM);
-        assert_eq!(Node::issuance_at(50 * ATOM, 999), 50 * ATOM);
-        assert_eq!(Node::issuance_at(50 * ATOM, 1000), 25 * ATOM);
-        assert_eq!(Node::issuance_at(50 * ATOM, 2000), (50 * ATOM) >> 2);
+        assert_eq!(Node::issuance_at(200 * ATOM, 0), 200 * ATOM);
+        assert_eq!(Node::issuance_at(200 * ATOM, 499_999), 200 * ATOM);
+        assert_eq!(Node::issuance_at(200 * ATOM, 500_000), 100 * ATOM);
+        assert_eq!(Node::issuance_at(200 * ATOM, 1_000_000), (200 * ATOM) >> 2);
     }
 
     #[test]
@@ -1745,5 +2016,118 @@ mod tests {
             std::net::TcpStream::connect(format!("[::1]:{port}")).expect("v6 loopback connect");
         use std::io::Write as _;
         let _ = c.write_all(b"x"); // accepted is all we prove; write may race close
+    }
+
+    fn send_req(app: &mut Explorer, req: &str) -> (u16, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+
+        client.write_all(req.as_bytes()).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let _ = handle(app, server_stream);
+
+        let mut resp = Vec::new();
+        let _ = client.read_to_end(&mut resp);
+        let resp_str = String::from_utf8_lossy(&resp).to_string();
+
+        let status = resp_str
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+
+        let body = if let Some(pos) = resp_str.find("\r\n\r\n") {
+            resp_str[pos + 4..].to_string()
+        } else {
+            String::new()
+        };
+        (status, body)
+    }
+
+    #[test]
+    fn test_http_mine_template_and_submit_flow() {
+        let mut app = Explorer::boot();
+        let (status, body) = send_req(
+            &mut app,
+            "GET /api/mine/template HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        );
+        assert_eq!(status, 200);
+        assert!(body.contains("\"ok\":true"));
+        assert!(body.contains("\"parents\""));
+        assert!(body.contains("\"work\""));
+        assert!(body.contains("\"timestamp_ms\""));
+        assert!(body.contains("\"payload\""));
+
+        let template_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let parents = template_json["parents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| BlockId::from_bytes(hex::decode(p.as_str().unwrap()).unwrap().try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let work = template_json["work"].as_u64().unwrap() as u128;
+        let ts = template_json["timestamp_ms"].as_u64().unwrap();
+        let payload_hex = template_json["payload"].as_str().unwrap();
+        let payload_bytes = hex::decode(payload_hex).unwrap();
+
+        let template_block = Block::new(parents.clone(), work, ts, 0, payload_bytes.clone());
+        let mined = kovanica_dag::pow::mine(&template_block);
+        let nonce = mined.nonce();
+        let block_id = mined.id();
+
+        let submit_body = format!(
+            "{{\"parents\":[{}],\"work\":{},\"timestamp_ms\":{},\"nonce\":{},\"payload\":\"{}\"}}",
+            parents
+                .iter()
+                .map(|p| format!("\"{}\"", p.to_hex()))
+                .collect::<Vec<_>>()
+                .join(","),
+            work,
+            ts,
+            nonce,
+            payload_hex
+        );
+
+        let post_req = format!(
+            "POST /api/mine/submit HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            submit_body.len(),
+            submit_body
+        );
+
+        let (sub_status, sub_body) = send_req(&mut app, &post_req);
+        assert_eq!(sub_status, 200);
+        assert!(sub_body.contains("\"ok\":true"));
+        assert!(sub_body.contains(&block_id.to_hex()));
+
+        // Node DAG tips should now include the new block
+        let alpha = app.mesh.node("alpha").unwrap();
+        assert!(alpha.has_block(&block_id));
+    }
+
+    #[test]
+    fn test_http_mine_submit_negative_cases() {
+        let mut app = Explorer::boot();
+
+        // 1. Invalid JSON
+        let bad_json_req = "POST /api/mine/submit HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\r\nnotjson";
+        let (status, body) = send_req(&mut app, bad_json_req);
+        assert_eq!(status, 400);
+        assert!(body.contains("\"ok\":false"));
+
+        // 2. Missing parents
+        let missing_parents = "POST /api/mine/submit HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"work\":1,\"nonce\":0,\"payload\":\"00\"}";
+        let (status, body) = send_req(&mut app, missing_parents);
+        assert_eq!(status, 400);
+        assert!(body.contains("\"ok\":false"));
+
+        // 3. Unknown node
+        let unknown_node = "GET /api/mine/template?node=nonexistent HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        let (status, body) = send_req(&mut app, unknown_node);
+        assert_eq!(status, 400);
+        assert!(body.contains("\"ok\":false"));
     }
 }

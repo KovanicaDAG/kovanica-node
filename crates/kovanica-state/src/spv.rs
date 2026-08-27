@@ -657,7 +657,7 @@ mod tests {
     fn block_filter_basic() {
         let kp = KeyPair::from_u64(1);
         let addr = kp.address();
-        let filter = BlockFilter::from_addresses(&[*addr.as_bytes()], 8);
-        assert!(filter.contains(addr.as_bytes()));
+        let filter = BlockFilter::from_addresses(&[*addr.payload()], 8);
+        assert!(filter.contains(addr.payload()));
     }
 }

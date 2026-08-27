@@ -14,13 +14,52 @@ pub trait DnsResolver: Send + Sync {
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, std::io::Error>;
 }
 
+/// Parse hostname/IP and port from a seed host string that may include explicit ports
+/// or IPv6 bracket formatting.
+pub(crate) fn parse_host_port(host: &str, default_port: u16) -> (String, u16) {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return (String::new(), default_port);
+    }
+
+    // Bracketed IPv6: "[::1]:9000" or "[::1]"
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some((ipv6, port_str)) = rest.split_once("]:") {
+            let port = port_str.parse::<u16>().unwrap_or(default_port);
+            return (ipv6.to_string(), port);
+        } else if let Some(ipv6) = rest.strip_suffix(']') {
+            return (ipv6.to_string(), default_port);
+        }
+    }
+
+    // Direct IP address without brackets (IPv4 e.g. "127.0.0.1" or IPv6 e.g. "2001:db8::1" or "::1")
+    if let Ok(_ip) = trimmed.parse::<std::net::IpAddr>() {
+        return (trimmed.to_string(), default_port);
+    }
+
+    // Host with explicit port e.g. "seed.kovanica.online:9000" or "127.0.0.1:9000"
+    if let Some((h, p)) = trimmed.rsplit_once(':') {
+        if !h.contains(':') {
+            if p.is_empty() {
+                return (h.to_string(), default_port);
+            }
+            if let Ok(port_num) = p.parse::<u16>() {
+                return (h.to_string(), port_num);
+            }
+        }
+    }
+
+    // Default: raw hostname (e.g. "seed.kovanica.online", "localhost")
+    (trimmed.to_string(), default_port)
+}
+
 /// Production DNS resolver using the standard library.
 pub struct StdDnsResolver;
 
 impl DnsResolver for StdDnsResolver {
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, std::io::Error> {
-        let addr = format!("{}:{}", host, port);
-        addr.to_socket_addrs().map(|iter| iter.collect())
+        let (h, p) = parse_host_port(host, port);
+        (h.as_str(), p).to_socket_addrs().map(|iter| iter.collect())
     }
 }
 
@@ -44,12 +83,29 @@ impl MockDnsResolver {
 
 impl DnsResolver for MockDnsResolver {
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, std::io::Error> {
-        let key = format!("{}:{}", host, port);
-        if let Some(addrs) = self.records.get(&key) {
+        let (h, p) = parse_host_port(host, port);
+        if let Some(addrs) = self.records.get(host) {
             return Ok(addrs.clone());
         }
-        // Also try without port for backward compatibility
-        if let Some(addrs) = self.records.get(host) {
+        let key_normalized = format!("{}:{}", h, p);
+        if let Some(addrs) = self.records.get(&key_normalized) {
+            return Ok(addrs.clone());
+        }
+        if h.contains(':') {
+            let key_bracketed = format!("[{}]:{}", h, p);
+            if let Some(addrs) = self.records.get(&key_bracketed) {
+                return Ok(addrs.clone());
+            }
+            let key_bracketed_host = format!("[{}]", h);
+            if let Some(addrs) = self.records.get(&key_bracketed_host) {
+                return Ok(addrs.clone());
+            }
+        }
+        if let Some(addrs) = self.records.get(&h) {
+            return Ok(addrs.clone());
+        }
+        let key_default = format!("{}:{}", host, port);
+        if let Some(addrs) = self.records.get(&key_default) {
             return Ok(addrs.clone());
         }
         Ok(Vec::new())
@@ -121,31 +177,26 @@ impl<R: DnsResolver> DnsSeedResolver<R> {
         }
 
         // Deduplicate by IP:port
-        all_addrs.sort_by_key(|a| a.ip());
-        all_addrs.dedup_by_key(|a| a.ip());
+        all_addrs.sort_by_key(|a| (a.ip(), a.port()));
+        all_addrs.dedup_by_key(|a| (a.ip(), a.port()));
 
         // Shuffle for load distribution (deterministic in tests via MockDnsResolver)
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        for addr in &all_addrs {
-            addr.hash(&mut hasher);
-        }
-        // Simple deterministic shuffle based on hash
         all_addrs.sort_by_key(|a| {
             let mut h = DefaultHasher::new();
             a.hash(&mut h);
             h.finish()
         });
 
-        // Apply max limit
-        if all_addrs.len() > self.config.max_addrs {
-            all_addrs.truncate(self.config.max_addrs);
-        }
-
         // If no DNS results, use fallbacks
         if all_addrs.is_empty() {
             all_addrs = self.config.fallbacks.clone();
+        }
+
+        // Apply max limit
+        if all_addrs.len() > self.config.max_addrs {
+            all_addrs.truncate(self.config.max_addrs);
         }
 
         all_addrs
@@ -229,11 +280,102 @@ mod tests {
     }
 
     #[test]
+    fn test_std_resolver_with_port() {
+        let resolver = StdDnsResolver;
+        let addrs = resolver.resolve("127.0.0.1:9000", 9000).unwrap();
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().any(|a| a.port() == 9000));
+    }
+
+    #[test]
+    fn test_mock_resolver_with_port_in_query() {
+        let mut records = HashMap::new();
+        let addr1: SocketAddr = "192.168.1.1:9000".parse().unwrap();
+        records.insert("seed.example.com".to_string(), vec![addr1]);
+
+        let resolver = MockDnsResolver::new(records);
+        let addrs = resolver.resolve("seed.example.com:9000", 9000).unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0], addr1);
+    }
+
+    #[test]
+    fn test_parse_host_port() {
+        assert_eq!(
+            parse_host_port("seed.example.com", 9000),
+            ("seed.example.com".into(), 9000)
+        );
+        assert_eq!(
+            parse_host_port("seed.example.com:8000", 9000),
+            ("seed.example.com".into(), 8000)
+        );
+        assert_eq!(
+            parse_host_port("127.0.0.1", 9000),
+            ("127.0.0.1".into(), 9000)
+        );
+        assert_eq!(
+            parse_host_port("127.0.0.1:8080", 9000),
+            ("127.0.0.1".into(), 8080)
+        );
+        assert_eq!(parse_host_port("::1", 9000), ("::1".into(), 9000));
+        assert_eq!(parse_host_port("[::1]", 9000), ("::1".into(), 9000));
+        assert_eq!(parse_host_port("[::1]:8080", 9000), ("::1".into(), 8080));
+        assert_eq!(
+            parse_host_port("2001:db8::1", 9000),
+            ("2001:db8::1".into(), 9000)
+        );
+        assert_eq!(
+            parse_host_port("[2001:db8::1]:7000", 9000),
+            ("2001:db8::1".into(), 7000)
+        );
+    }
+
+    #[test]
+    fn test_std_resolver_ipv6_bracketed_with_port() {
+        let resolver = StdDnsResolver;
+        let addrs = resolver.resolve("[::1]:9000", 9000).unwrap();
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().any(|a| a.port() == 9000 && a.is_ipv6()));
+    }
+
+    #[test]
+    fn test_std_resolver_ipv6_raw() {
+        let resolver = StdDnsResolver;
+        let addrs = resolver.resolve("::1", 9000).unwrap();
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().any(|a| a.port() == 9000 && a.is_ipv6()));
+    }
+
+    #[test]
     fn test_dns_seed_config_default() {
         let config = DnsSeedConfig::default();
         assert_eq!(config.seeds.len(), 3);
         assert_eq!(config.default_port, 9000);
         assert_eq!(config.fallbacks.len(), 2);
         assert_eq!(config.max_addrs, 50);
+    }
+
+    #[test]
+    fn test_parse_host_port_trailing_colon() {
+        assert_eq!(
+            parse_host_port("seed.example.com:", 9000),
+            ("seed.example.com".into(), 9000)
+        );
+        assert_eq!(
+            parse_host_port("127.0.0.1:", 9000),
+            ("127.0.0.1".into(), 9000)
+        );
+    }
+
+    #[test]
+    fn test_mock_resolver_ipv6_bracketed_record() {
+        let mut records = HashMap::new();
+        let addr1: SocketAddr = "[::1]:9000".parse().unwrap();
+        records.insert("[::1]:9000".to_string(), vec![addr1]);
+
+        let resolver = MockDnsResolver::new(records);
+        let addrs = resolver.resolve("::1", 9000).unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0], addr1);
     }
 }
