@@ -1,6 +1,9 @@
 plugins {
-    id("com.android.library") version "8.5.2"
-    id("org.jetbrains.kotlin.android") version "2.0.20"
+    // Versions must match android-light-node's catalogs: composite include
+    // chains both modules into one build, and Gradle rejects a second AGP /
+    // Kotlin version on the shared buildscript classpath.
+    id("com.android.library") version "8.10.1"
+    id("org.jetbrains.kotlin.android") version "2.2.20"
 }
 
 android {
