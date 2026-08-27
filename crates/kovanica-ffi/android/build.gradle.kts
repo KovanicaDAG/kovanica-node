@@ -23,6 +23,17 @@ android {
     // them; this module just compiles them in.
     sourceSets["main"].java.srcDirs("../bindings/kotlin")
     // jniLibs/src/main/jniLibs is the default — populated by build-android.sh.
+
+    // Match the consuming app's toolchain (both are 17) or KGP/AGP JVM-target
+    // validation fails on the shared classpath.
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
 }
 
 dependencies {
