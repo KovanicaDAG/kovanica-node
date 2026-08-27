@@ -606,7 +606,7 @@ impl Node {
     }
 
     /// Compute the subsidy at a given height (height 0 = genesis).
-    /// `cap` is the genesis subsidy. Halving era is `HALVING_ERA` (1000 blocks).
+    /// `cap` is the genesis subsidy. Halving era is `HALVING_ERA` (500_000 blocks).
     pub fn issuance_at(cap: u64, height: u64) -> u64 {
         let era = height / HALVING_ERA;
         if era >= 63 {
