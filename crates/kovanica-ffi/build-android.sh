@@ -46,9 +46,9 @@ for abi in $ABIS; do
   ARGS+=( -t "$target" )
 done
 
-# --no-cargo-install: cargo-ndk must not mutate our toolchain here; the
-# targets were pinned above. -o lays the .so files straight into jniLibs.
-cargo ndk --platform 24 --no-cargo-install \
+# Targets are pinned above via `rustup target add`; -o lays the .so files
+# straight into jniLibs.
+cargo ndk --platform 24 \
   "${ARGS[@]}" -o android/src/main/jniLibs \
   build --release -p kovanica-ffi
 
