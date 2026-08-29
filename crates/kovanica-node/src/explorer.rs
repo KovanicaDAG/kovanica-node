@@ -34,6 +34,8 @@ const DOCS: &str = include_str!("../../../TESTNET.md");
 const ATOM: u64 = 100_000_000;
 const GENESIS_SUBSIDY: u64 = 200 * ATOM;
 const GENESIS_PREMINE: u64 = 200 * ATOM;
+/// Founder actor seed used by `genesis_node()` (deterministic keys).
+const FOUNDER_SEED: u64 = 1;
 const NETWORK: &str = "kovanica-testnet";
 const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 /// Single P2P path: plaintext TCP. Not 80/443/3010/8080 and not libp2p :30333.
@@ -500,7 +502,7 @@ fn line_mesh() -> Mesh {
 
 fn genesis_node() -> Node {
     let mut node = Node::new();
-    node.genesis(3, GENESIS_SUBSIDY, GENESIS_PREMINE, 1)
+    node.genesis(3, GENESIS_SUBSIDY, GENESIS_PREMINE, FOUNDER_SEED)
         .expect("genesis");
     if env_flag("KOVANICA_POW", true) {
         let _ = node.set_proof_of_work(true);
@@ -907,7 +909,7 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
                 .map(|s| jstr(&s)),
         );
         let body = format!(
-            "{{\"network\":{},\"genesis\":{},\"tip\":{},\"listen\":{},\"peers\":{},\"pow\":{},\"min_fee\":{},\"atom\":{},\"token\":\"KVNC\",\"k\":3}}",
+            "{{\"network\":{},\"genesis\":{},\"tip\":{},\"listen\":{},\"peers\":{},\"pow\":{},\"min_fee\":{},\"atom\":{},\"token\":\"KVNC\",\"k\":3,\"subsidy\":{},\"founder_amount\":{},\"founder_seed\":{}}}",
             jstr(NETWORK),
             jstr(&genesis),
             jstr(&tip),
@@ -915,7 +917,10 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
             peers,
             pow,
             min_fee,
-            ATOM
+            ATOM,
+            GENESIS_SUBSIDY,
+            GENESIS_PREMINE,
+            FOUNDER_SEED
         );
         return respond(&mut stream, 200, "application/json", body.as_bytes());
     }
@@ -1297,7 +1302,7 @@ fn dispatch(
         .cloned()
         .unwrap_or_else(|| app.selected.clone());
     match action {
-        "produce" => match app.mesh.produce(&node).map_err(|e| e.to_string())? {
+        "mine" | "produce" => match app.mesh.produce(&node).map_err(|e| e.to_string())? {
             Some(_) => {}
             None => {
                 if !app.operator {
@@ -2058,6 +2063,16 @@ mod tests {
         q.insert("amount".into(), "1".into());
         let err = dispatch(&mut app, "tap", &q).unwrap_err();
         assert!(err.contains("unknown action"));
+    }
+
+    #[test]
+    fn mine_action_produces_a_block_like_produce() {
+        let mut app = Explorer::boot();
+        let before = app.mesh.node("alpha").unwrap().block_count().unwrap();
+        let mine_body = dispatch(&mut app, "mine", &std::collections::HashMap::new()).unwrap();
+        let after = app.mesh.node("alpha").unwrap().block_count().unwrap();
+        assert!(mine_body.contains("\"ok\":true"));
+        assert_eq!(after, before + 1, "mine must produce exactly one block");
     }
 
     #[test]
