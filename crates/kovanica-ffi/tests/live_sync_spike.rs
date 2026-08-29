@@ -43,7 +43,10 @@ fn default_config_genesis_diverges_from_live_network() {
     let node = LightNode::new(LightConfig::default()).expect("genesis ok");
     // The FFI default (subsidy 1000, premine 1000) does NOT reproduce the
     // live network: its genesis block id differs from the testnet genesis.
-    assert!(node.block_by_id(LIVE_GENESIS.to_string()).unwrap().is_none());
+    assert!(node
+        .block_by_id(LIVE_GENESIS.to_string())
+        .unwrap()
+        .is_none());
 }
 
 #[test]
