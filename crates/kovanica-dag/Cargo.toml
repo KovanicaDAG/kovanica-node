@@ -16,5 +16,13 @@ rand_core.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+criterion = "0.5"
+
+
+[[bench]]
+name = "dag_insert"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"

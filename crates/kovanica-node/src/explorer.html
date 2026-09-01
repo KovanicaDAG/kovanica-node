@@ -313,7 +313,7 @@ function blockCard(s) {
   if (!b) return "";
   return `<aside class="card">
     <p class="pill">Block</p>
-    <p class="mono">${b.id}</p>
+    <p class="mono"><a href="/api/block/${b.id}" target="_blank">${b.id}</a></p>
     <dl class="muted">
       <div style="display:flex;justify-content:space-between;margin-top:8px"><dt>Colour</dt><dd class="mono" style="color:var(--fg)">${b.colour}</dd></div>
       <div style="display:flex;justify-content:space-between"><dt>Blue score</dt><dd class="mono" style="color:var(--fg)">${b.blue_score}</dd></div>
@@ -323,7 +323,7 @@ function blockCard(s) {
       <div style="display:flex;justify-content:space-between"><dt>Nonce</dt><dd class="mono" style="color:var(--fg)">${b.nonce}</dd></div>
       <div style="display:flex;justify-content:space-between"><dt>Time</dt><dd class="mono" style="color:var(--fg)">${b.timestamp_ms}</dd></div>
     </dl>
-    <ul class="muted" style="padding:8px 0 0;margin:8px 0 0;list-style:none">${b.txs.map((t) => `<li class="mono">${t.coinbase ? "coinbase" : "tx"} · ${short(t.id)}</li>`).join("")}</ul>
+    <ul class="muted" style="padding:8px 0 0;margin:8px 0 0;list-style:none">${b.txs.map((t) => `<li class="mono">${t.coinbase ? "coinbase" : "tx"} · <a href="/api/tx/${t.id}" target="_blank">${short(t.id)}</a></li>`).join("")}</ul>
   </aside>`;
 }
 
@@ -349,7 +349,7 @@ function graphPanel(s) {
 function walletsPanel(s) {
   const rec = walletRecord();
   const rows = s.wallets.map((w) => `<div class="wallet">
-    <div><div>Actor ${w.seed}${w.seed===1?" · faucet":""}</div><div class="mono">${w.address}</div></div>
+    <div><div>Actor ${w.seed}${w.seed===1?" · faucet":""}</div><div class="mono"><a href="/api/address/${w.address}" target="_blank">${w.address}</a></div></div>
             <div class="mono">${fmtKvnc(w.balance)}</div>
           </div>`).join("");
   const keys = rec ? `
@@ -403,7 +403,7 @@ function walletsPanel(s) {
     ${rec && rec.mnemonicShown ? `<p class="mono" style="margin-top:12px">${rec.mnemonic}</p><p class="warn">Write this down. Anyone with it controls the KVNC.</p>` : ""}
     ${walletMsg ? `<p class="${walletMsg.startsWith("err")?"warn":"ok"}" style="margin-top:10px">${walletMsg}</p>` : ""}
     <p class="pill" style="margin-top:16px">History</p>
-    ${walletHist.length ? walletHist.slice().reverse().slice(0, 12).map((t) => `<div class="mono muted" style="padding:6px 0;border-bottom:1px solid var(--border)">${t.kind} ${fmtKvnc(Math.abs(t.delta))} · ${short(t.tx)}</div>`).join("") : `<p class="muted">No txs yet.</p>`}
+    ${walletHist.length ? walletHist.slice().reverse().slice(0, 12).map((t) => `<div class="mono muted" style="padding:6px 0;border-bottom:1px solid var(--border)">${t.kind} ${fmtKvnc(Math.abs(t.delta))} · <a href="/api/tx/${t.tx}" target="_blank">${short(t.tx)}</a></div>`).join("") : `<p class="muted">No txs yet.</p>`}
   ` : `
     <p class="pill">Your wallet</p>
     <p class="muted">BIP39 12-word seed in this browser. Accounts are index 0, 1, 2… from the same phrase. Node never sees the seed.</p>
@@ -451,7 +451,7 @@ function meshPanel(s) {
       <p class="muted">Configured peers <span class="mono">${peers}</span></p>
       <p class="muted" style="margin-top:8px">Join:</p>
       <pre class="mono muted" style="white-space:pre-wrap">${cmd}</pre>
-      <p class="muted">JSON: <a href="/api/bootstrap">/api/bootstrap</a> · <a href="/api/head">/api/head</a> · <a href="/docs">/docs</a></p>
+      <p class="muted">JSON: <a href="/api/bootstrap">/api/bootstrap</a> · <a href="/api/head">/api/head</a> · <a href="/api/block/">/api/block/:id</a> · <a href="/api/tx/">/api/tx/:id</a> · <a href="/api/address/">/api/address/:address</a> · <a href="/docs">/docs</a></p>
     </aside>
   </div>`;
 }
@@ -501,7 +501,7 @@ function orderPanel(s) {
 
 function blocksPanel(s) {
   return `<table><thead><tr><th>Id</th><th>Colour</th><th>Blue</th><th>Work</th><th>Txs</th></tr></thead><tbody>
-    ${s.node.dag.map((b)=>`<tr data-id="${b.id}" style="cursor:pointer"><td>${short(b.id)}</td><td>${b.colour}</td><td>${b.blue_score}</td><td>${b.work}</td><td>${b.txs.length}</td></tr>`).join("")}
+    ${s.node.dag.map((b)=>`<tr data-id="${b.id}" style="cursor:pointer"><td><a href="/api/block/${b.id}" target="_blank">${short(b.id)}</a></td><td>${b.colour}</td><td>${b.blue_score}</td><td>${b.work}</td><td>${b.txs.length}</td></tr>`).join("")}
   </tbody></table>`;
 }
 

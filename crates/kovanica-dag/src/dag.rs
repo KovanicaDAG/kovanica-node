@@ -67,6 +67,63 @@
 //! reconstructed with `payload = None` via [`Block::new_pruned`]. The block's
 //! id (computed at insertion time over the original payload) is preserved in the
 //! DAG's `nodes` map, so consensus integrity is maintained.
+//!
+//! ## Block pruning (full block eviction)
+//!
+//! Beyond payload pruning, the DAG supports **block pruning**: evicting entire
+//! blocks (their payloads *and* their consensus metadata) once they are deep
+//! enough below the selected tip. This bounds the DAG's memory footprint the
+//! way payload pruning bounds its payload bytes — but it is a consensus-level
+//! operation, because evicted blocks are no longer available to serve or to
+//! build on.
+//!
+//! ### Pruning strategy
+//!
+//! - `block_pruning_depth` is a parameter on [`Dag`] (default: `u64::MAX`,
+//!   meaning pruning disabled).
+//! - After each insert, [`Dag::prune_old_blocks`] is called. It computes the
+//!   pruning threshold as `selected_tip.blue_score.saturating_sub(block_pruning_depth)`
+//!   and the **pruning point** `P` as the lowest block on the selected-parent
+//!   chain with `blue_score >= threshold` ([`Dag::pruning_point`]).
+//! - Every block in `past(P)` except genesis is evicted: removed from the DAG's
+//!   `nodes`, from the tips, and from the [`Reachability`] oracle. Genesis is
+//!   never evicted.
+//!
+//! ### Why it is safe
+//!
+//! The evicted set `past(P)` is **downward-closed** in the reachability tree
+//! (the selected-parent tree): if a block is evicted, so are all its
+//! tree-ancestors. Therefore the present blocks that referenced an evicted
+//! block as their selected parent can be re-parented to genesis without any
+//! interval re-layout — their intervals already lie inside genesis's allocated
+//! region. Present blocks never have evicted children (a child's parent is in
+//! its past), so the tips are simply the old tips minus the evicted ones.
+//!
+//! ### Insert-time invariant
+//!
+//! When block pruning is enabled, a new block's **selected parent** must be in
+//! `future(P) ∪ {P}` (i.e. `sp == P` or `P` is an ancestor of `sp`); otherwise
+//! the insert is rejected with [`DagError::BuildsOnPrunedHistory`]. This keeps
+//! the evicted set inside the new block's past, so mergeset walks can treat
+//! evicted blocks as boundaries without consulting the oracle for them.
+//!
+//! ### Snapshots
+//!
+//! A snapshot of a block-pruned DAG contains only the present blocks. A present
+//! block may reference an evicted parent; on load ([`Dag::read_snapshot`]) such
+//! parents are reconstructed as pruned **stubs** (children of genesis) so the
+//! replay can proceed, and the stubs are evicted again once the replay
+//! completes. The snapshot format is unchanged.
+//!
+//! ## Epoch randomness beacon (VRF input)
+//!
+//! VRF leader eligibility ([`Dag::set_vrf`]) is keyed to an **epoch randomness
+//! beacon** rather than the block's parent tips. The beacon is a pure function
+//! of the DAG — the boundary block of the epoch containing the block's selected
+//! parent (Algorand/Praos-style epoch randomness; see [`Dag::epoch_beacon`] for
+//! the construction and the anti-grinding rationale). The legacy parent-tip
+//! input ([`Dag::vrf_input`]) is retained for backward compatibility with
+//! callers that have not yet migrated.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -109,6 +166,11 @@ pub enum DagError {
     /// VRF is enforced (see [`Dag::set_vrf`]) and the block's VRF proof is invalid
     /// or the VRF output does not meet the leader eligibility threshold.
     InvalidVrf { id: BlockId, reason: String },
+    /// Block pruning is enabled (see [`Dag::set_block_pruning_depth`]) and the
+    /// block's selected parent is not in `future(P) ∪ {P}` where `P` is the
+    /// pruning point ([`Dag::pruning_point`]) — the block would build on
+    /// already-evicted history.
+    BuildsOnPrunedHistory { id: BlockId },
 }
 
 impl core::fmt::Display for DagError {
@@ -144,6 +206,10 @@ impl core::fmt::Display for DagError {
             DagError::InvalidVrf { id, reason } => write!(
                 f,
                 "block {id} has invalid VRF: {reason}"
+            ),
+            DagError::BuildsOnPrunedHistory { id } => write!(
+                f,
+                "block {id} builds on pruned history (its selected parent is not in the pruning point's future)"
             ),
         }
     }
@@ -230,6 +296,11 @@ pub struct Dag {
     /// the selected tip have their payloads evicted (`payload = None`).
     /// `u64::MAX` means pruning is disabled (the default).
     payload_pruning_depth: u64,
+    /// Block pruning depth: blocks more than this many blue score units below
+    /// the selected tip are evicted entirely (removed from the DAG and the
+    /// reachability oracle). `u64::MAX` means pruning is disabled (the default).
+    /// See [`Dag::prune_old_blocks`] and [`Dag::pruning_point`].
+    block_pruning_depth: u64,
     /// Consensus-enforced VRF policy. When `Some(threshold)`, each [`Dag::insert`]
     /// of a non-genesis block requires:
     /// - A valid VRF proof (`vrf_public_key`, `vrf_proof`, `vrf_output`)
@@ -240,6 +311,13 @@ pub struct Dag {
     vrf_config: Option<VrfConfig>,
 }
 
+/// Default epoch length (in blue-score units) for the epoch randomness beacon
+/// ([`Dag::epoch_beacon`]): the beacon is recomputed every `epoch_length` blue
+/// score units along the selected-parent chain. Used by [`Dag::set_vrf`] when
+/// no explicit epoch length is given. A consensus parameter — all nodes must
+/// agree on it, like `k`.
+pub const DEFAULT_EPOCH_LENGTH: u64 = 100;
+
 /// VRF consensus enforcement configuration.
 #[derive(Clone, Copy, Debug)]
 pub struct VrfConfig {
@@ -247,6 +325,12 @@ pub struct VrfConfig {
     /// to produce a block. Interpreted as big-endian u64 from VRF output.
     /// `u64::MAX` = all valid outputs eligible.
     pub threshold: u64,
+    /// Epoch length in blue-score units: the epoch randomness beacon (the VRF
+    /// input, see [`Dag::epoch_beacon`]) is derived from the boundary block of
+    /// the epoch containing the block's selected parent, where
+    /// `epoch = blue_score(sp) / epoch_length`. A consensus parameter — all
+    /// nodes must agree on it, like `k`.
+    pub epoch_length: u64,
 }
 
 impl Dag {
@@ -282,6 +366,7 @@ impl Dag {
             difficulty: None,
             require_pow: false,
             payload_pruning_depth: u64::MAX,
+            block_pruning_depth: u64::MAX,
             vrf_config: None,
         };
         dag.reach = Reachability::build(&dag);
@@ -371,22 +456,39 @@ impl Dag {
     /// must satisfy:
     /// - **Valid VRF proof.** The block must carry `vrf_public_key`, `vrf_proof`,
     ///   and `vrf_output` fields, and the proof must verify correctly against
-    ///   the VRF input (derived from the block's parent tips).
+    ///   the VRF input — the epoch randomness beacon of the block's selected
+    ///   parent (see [`Dag::epoch_beacon`]).
     /// - **Leader eligibility.** The VRF output (interpreted as big-endian u64)
     ///   must be less than the configured `threshold`. A threshold of `u64::MAX`
     ///   means any valid VRF output is eligible (useful for randomness beacon
     ///   without leader selection).
     ///
-    /// The VRF input is derived from the block's parent tips: `H(tip1 || tip2 || ...)`.
-    /// This ties leader eligibility to the DAG state, making it unpredictable
-    /// until the parents are known, but verifiable by anyone.
+    /// The VRF input is the **epoch randomness beacon**: a pure function of the
+    /// DAG (the selected-parent chain), not of the block's parent list. This
+    /// makes leader eligibility ungrindable — a validator cannot search over
+    /// parent sets for a favourable input; it can only choose among the beacons
+    /// of the blocks it references as parents (see [`Dag::epoch_beacon`] for
+    /// the full rationale).
     ///
     /// Genesis is exempt. VRF enforcement is **off by default** (`None`), so a
     /// DAG built without this call accepts blocks without VRF fields, exactly as
     /// before. It composes with [`Dag::set_difficulty`] and
     /// [`Dag::set_proof_of_work`]: all three can be enabled independently.
+    ///
+    /// Uses the default epoch length ([`DEFAULT_EPOCH_LENGTH`]); use
+    /// [`Dag::set_vrf_with_epoch`] to set a custom epoch length.
     pub fn set_vrf(&mut self, threshold: u64) {
-        self.vrf_config = Some(VrfConfig { threshold });
+        self.set_vrf_with_epoch(threshold, DEFAULT_EPOCH_LENGTH);
+    }
+
+    /// Enable consensus-enforced VRF leader selection with an explicit epoch
+    /// length (see [`Dag::set_vrf`] and [`Dag::epoch_beacon`]). `epoch_length`
+    /// is clamped to at least 1.
+    pub fn set_vrf_with_epoch(&mut self, threshold: u64, epoch_length: u64) {
+        self.vrf_config = Some(VrfConfig {
+            threshold,
+            epoch_length: epoch_length.max(1),
+        });
     }
 
     /// Disable consensus-enforced VRF (blocks no longer need VRF fields).
@@ -448,6 +550,148 @@ impl Dag {
             if node.ghostdag.blue_score < threshold && !node.block.is_pruned() {
                 node.block.prune_payload();
             }
+        }
+    }
+
+    /// Set the block pruning depth: blocks more than `depth` blue score units
+    /// below the selected tip will be evicted entirely on the next insert (or
+    /// when [`Dag::prune_old_blocks`] is called explicitly). `u64::MAX` (the
+    /// default) disables block pruning.
+    ///
+    /// The pruning threshold is computed as `selected_tip.blue_score.saturating_sub(depth)`
+    /// and the **pruning point** `P` is the lowest selected-chain block with
+    /// `blue_score >= threshold` ([`Dag::pruning_point`]). Every block in
+    /// `past(P)` except genesis is evicted. Genesis is never evicted.
+    ///
+    /// Enabling block pruning also enforces an insert-time invariant: a new
+    /// block's selected parent must be in `future(P) ∪ {P}`, otherwise the
+    /// insert is rejected with [`DagError::BuildsOnPrunedHistory`].
+    pub fn set_block_pruning_depth(&mut self, depth: u64) {
+        self.block_pruning_depth = depth;
+    }
+
+    /// The current block pruning depth. `u64::MAX` means pruning is disabled.
+    pub fn block_pruning_depth(&self) -> u64 {
+        self.block_pruning_depth
+    }
+
+    /// The blue-score threshold below which blocks are evictable: the pruning
+    /// point is the lowest selected-chain block with `blue_score >=
+    /// block_pruning_score()`. Returns `0` when pruning is disabled or the DAG
+    /// is not yet deep enough.
+    pub fn block_pruning_score(&self) -> u64 {
+        if self.block_pruning_depth == u64::MAX {
+            return 0;
+        }
+        let tip = self.selected_tip();
+        let max = self.ghostdag(&tip).map_or(0, |g| g.blue_score);
+        max.saturating_sub(self.block_pruning_depth)
+    }
+
+    /// The **pruning point**: the lowest block on the selected-parent chain with
+    /// `blue_score >= block_pruning_score()`. Genesis when pruning is disabled
+    /// or the DAG is not yet deep enough.
+    ///
+    /// When block pruning is enabled, every block in `past(P)` except genesis is
+    /// (or will be) evicted, and a new block's selected parent must be in
+    /// `future(P) ∪ {P}`.
+    pub fn pruning_point(&self) -> BlockId {
+        let threshold = self.block_pruning_score();
+        if threshold == 0 {
+            return self.genesis;
+        }
+        // Walk the selected chain from the tip down, tracking the deepest block
+        // with blue_score >= threshold. Blue score strictly decreases going up,
+        // so the last qualifying block seen is the lowest one. Stop at an
+        // evicted block (everything below it is evicted too).
+        let mut point = self.genesis;
+        let mut cur = Some(self.selected_tip());
+        while let Some(id) = cur {
+            match self.nodes.get(&id) {
+                Some(node) => {
+                    if node.ghostdag.blue_score >= threshold {
+                        point = id;
+                    }
+                    cur = node.ghostdag.selected_parent;
+                }
+                None => break, // evicted: the pruning point is the last present block above
+            }
+        }
+        point
+    }
+
+    /// Evict all blocks in `past(P) \ {genesis}` where `P` is the pruning point
+    /// ([`Dag::pruning_point`]): remove them from the DAG's `nodes`, from the
+    /// tips, and from the [`Reachability`] oracle (re-parenting present
+    /// tree-children to genesis). Idempotent: already-evicted blocks stay
+    /// evicted.
+    ///
+    /// This is called automatically at the end of [`Dag::insert`] when
+    /// `block_pruning_depth` is finite, but can also be invoked manually (e.g.
+    /// after loading a snapshot or changing the pruning depth).
+    pub fn prune_old_blocks(&mut self) {
+        let threshold = self.block_pruning_score();
+        if threshold == 0 {
+            return;
+        }
+        let new_point = self.pruning_point();
+        if new_point == self.genesis {
+            return; // past(genesis) is empty: nothing to evict
+        }
+
+        // Walk the selected chain from the pruning point down, collecting each
+        // chain block's mergeset and then the chain block itself, until genesis
+        // or an already-evicted block. The newly evicted set is exactly
+        // `past(P_new) \ past(P_old)`: the chain blocks between the old and new
+        // pruning points plus the mergesets of the chain blocks in
+        // `(P_old, P_new]` (mergeset(P_new) included, P_new itself kept).
+        let mut evicted: HashSet<BlockId> = HashSet::new();
+        let mut cur = Some(new_point);
+        while let Some(c) = cur {
+            let node = &self.nodes[&c];
+            let sp = node.ghostdag.selected_parent;
+            // Evict the mergeset of the current chain block: every merged block
+            // is in past(c) ⊆ past(P_new) but not in past(sp) ⊇ past(P_old), so
+            // it is newly evicted and still present.
+            if let Some(sp) = sp {
+                let mergeset = self.mergeset_ordered(sp, node.block.parents());
+                for m in mergeset {
+                    evicted.insert(m);
+                }
+            }
+            // Move to the selected parent: evict it unless it is genesis or
+            // already evicted.
+            match sp {
+                None => break, // genesis: never evicted
+                Some(sp) => {
+                    if !self.nodes.contains_key(&sp) {
+                        break; // already evicted: everything below is too
+                    }
+                    if sp == self.genesis {
+                        break; // genesis is never evicted
+                    }
+                    evicted.insert(sp);
+                    cur = Some(sp);
+                }
+            }
+        }
+
+        if evicted.is_empty() {
+            return;
+        }
+        self.remove_blocks(&evicted);
+    }
+
+    /// Remove `evicted` blocks from the DAG: drop them from the reachability
+    /// oracle (re-parenting present tree-children to genesis), from `nodes`,
+    /// and from the tips. Preconditions: genesis is not in `evicted`, and the
+    /// evicted set is downward-closed in the reachability tree (guaranteed by
+    /// [`Dag::prune_old_blocks`] and the snapshot stub eviction).
+    pub(crate) fn remove_blocks(&mut self, evicted: &HashSet<BlockId>) {
+        self.reach.remove_blocks(self.genesis, evicted);
+        for id in evicted {
+            self.nodes.remove(id);
+            self.tips.remove(id);
         }
     }
 
@@ -564,6 +808,12 @@ impl Dag {
             if !seen.insert(x) {
                 continue;
             }
+            if !self.nodes.contains_key(&x) {
+                // Evicted block (block pruning): a boundary. The evicted set is
+                // downward-closed, so its ancestors are evicted too — skip
+                // without consulting the oracle (which no longer holds it).
+                continue;
+            }
             if x == sp || self.is_ancestor(&x, &sp) {
                 continue; // x ∈ past(sp) ∪ {sp}: boundary
             }
@@ -615,11 +865,16 @@ impl Dag {
         &self,
         block: &Block,
         id: BlockId,
-        _ghostdag: &GhostdagData,
+        ghostdag: &GhostdagData,
         threshold: u64,
     ) -> Result<(), DagError> {
-        // VRF input is derived from the block's parent tips (deterministic from parents)
-        let vrf_input = Self::vrf_input(block.parents());
+        // VRF input is the epoch randomness beacon of the block's selected
+        // parent — a pure function of the DAG, not of the parent list, so a
+        // validator cannot grind over parent sets (see [`Dag::epoch_beacon`]).
+        let sp = ghostdag
+            .selected_parent
+            .expect("non-genesis block has a selected parent");
+        let vrf_input = self.epoch_vrf_input(sp);
 
         // Block must have VRF fields
         let pk = block.vrf_public_key().ok_or_else(|| DagError::InvalidVrf {
@@ -664,6 +919,13 @@ impl Dag {
 
     /// Compute the VRF input from a block's parents.
     /// Hash of concatenated parent IDs, domain-separated.
+    ///
+    /// **Legacy.** This is the pre-B1 parent-tip input (`H(tip1 || tip2 || ...)`),
+    /// kept for backward compatibility with callers that have not yet migrated
+    /// to the epoch randomness beacon (e.g. `kovanica-node`'s staked-block
+    /// producer and `kovanica-state`'s hybrid admission). Consensus VRF
+    /// enforcement ([`Dag::check_vrf`]) uses [`Dag::epoch_vrf_input`] instead.
+    /// New code should use [`Dag::epoch_vrf_input_for_parents`].
     pub fn vrf_input(parents: &[BlockId]) -> Vec<u8> {
         use blake3::Hasher;
         let mut hasher = Hasher::new();
@@ -672,6 +934,99 @@ impl Dag {
             hasher.update(parent.as_bytes());
         }
         hasher.finalize().as_bytes().to_vec()
+    }
+
+    /// The epoch randomness beacon for a block whose selected parent is `sp`:
+    /// a 32-byte value that is a **pure function of the DAG** (the selected-
+    /// parent chain), used as the VRF input for leader eligibility.
+    ///
+    /// ## Construction (Algorand/Praos-style epoch randomness)
+    ///
+    /// The beacon is derived from the **boundary block** of the epoch containing
+    /// `sp`:
+    ///
+    /// ```text
+    /// epoch    = blue_score(sp) / epoch_length
+    /// boundary = the last block on the selected-parent chain ending at `sp`
+    ///            with blue_score < epoch * epoch_length
+    /// beacon   = H("KOVANICA_EPOCH_BEACON_v1" || boundary.id
+    ///             || boundary.vrf_output if present)
+    /// ```
+    ///
+    /// For epoch 0 the boundary is genesis (the anchor). The boundary block's
+    /// VRF output, when present, chains the previous epoch's leader randomness
+    /// into the next epoch's beacon (Algorand-style: the randomness of an epoch
+    /// is fixed by the blocks that precede it).
+    ///
+    /// ## Why this defeats parent-tip grinding
+    ///
+    /// The previous VRF input (`H(tip1 || tip2 || ...)`) let a validator grind:
+    /// by choosing *which* tips to reference it could evaluate the VRF over many
+    /// inputs until one made it eligible. The beacon removes that search space —
+    /// it depends only on the selected parent's epoch boundary, which is fixed
+    /// once the selected parent is chosen. A validator can only choose among the
+    /// beacons of the blocks it references as parents (a bounded set determined
+    /// by the DAG state), and within an epoch every block sharing a selected
+    /// parent shares the same beacon, so parent-set manipulation yields no
+    /// additional VRF evaluations.
+    ///
+    /// `epoch_length` is a consensus parameter (all nodes must agree, like `k`);
+    /// it comes from the configured [`VrfConfig`], defaulting to
+    /// [`DEFAULT_EPOCH_LENGTH`] when VRF is disabled.
+    pub fn epoch_beacon(&self, sp: BlockId) -> [u8; 32] {
+        let epoch_length = self
+            .vrf_config
+            .map_or(DEFAULT_EPOCH_LENGTH, |c| c.epoch_length)
+            .max(1);
+        let epoch = self.ghostdag(&sp).map_or(0, |g| g.blue_score) / epoch_length;
+        let threshold = epoch.saturating_mul(epoch_length);
+
+        // Walk the selected-parent chain from `sp` toward genesis; blue score
+        // strictly decreases going up, so the first block below the threshold is
+        // the deepest (last) chain block with blue_score < threshold. For epoch 0
+        // no block qualifies and the boundary stays genesis (the anchor).
+        let mut boundary = self.genesis;
+        let mut cur = Some(sp);
+        while let Some(id) = cur {
+            let node = &self.nodes[&id];
+            if node.ghostdag.blue_score < threshold {
+                boundary = id;
+                break;
+            }
+            cur = node.ghostdag.selected_parent;
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"KOVANICA_EPOCH_BEACON_v1");
+        hasher.update(boundary.as_bytes());
+        if let Some(output) = self.nodes[&boundary].block.vrf_output() {
+            hasher.update(output.as_bytes());
+        }
+        *hasher.finalize().as_bytes()
+    }
+
+    /// The VRF input for a block whose selected parent is `sp`: the epoch
+    /// randomness beacon ([`Dag::epoch_beacon`]) domain-separated for the VRF.
+    pub fn epoch_vrf_input(&self, sp: BlockId) -> Vec<u8> {
+        let beacon = self.epoch_beacon(sp);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"KOVANICA_VRF_INPUT_v2");
+        hasher.update(&beacon);
+        hasher.finalize().as_bytes().to_vec()
+    }
+
+    /// The VRF input for a block with the given `parents`: the epoch randomness
+    /// beacon of the block's selected parent (the heaviest parent, exactly as
+    /// [`Dag::insert`] would choose it). Convenience for callers that know the
+    /// parents but not yet the selected parent (e.g. the node's staked-block
+    /// producer). `parents` must be non-empty (a non-genesis block).
+    pub fn epoch_vrf_input_for_parents(&self, parents: &[BlockId]) -> Vec<u8> {
+        let sp = parents
+            .iter()
+            .copied()
+            .max_by_key(|p| self.chain_key(p))
+            .expect("non-genesis block has at least one parent");
+        self.epoch_vrf_input(sp)
     }
 
     /// The last `window + 1` blocks of the selected-parent chain ending at `tip`
@@ -800,6 +1155,18 @@ impl Dag {
             self.check_vrf(&block, id, &ghostdag, vrf_config.threshold)?;
         }
 
+        // Block-pruning invariant, if enabled: the new block's selected parent
+        // must be in future(P) ∪ {P} (P = pruning point). This keeps the evicted
+        // set (past(P)) inside the new block's past, so mergeset walks can treat
+        // evicted blocks as boundaries. Checked before the block is wired in, so
+        // a rejected block leaves the DAG unchanged.
+        if self.block_pruning_depth != u64::MAX {
+            let p = self.pruning_point();
+            if sp != p && !self.is_ancestor(&p, &sp) {
+                return Err(DagError::BuildsOnPrunedHistory { id });
+            }
+        }
+
         let past_size = self.nodes[&sp].past_size
             + 1
             + (ghostdag.mergeset_blues.len() + ghostdag.mergeset_reds.len()) as u64;
@@ -838,6 +1205,11 @@ impl Dag {
         // Evict payloads of blocks that are now beyond the pruning depth.
         if self.payload_pruning_depth != u64::MAX {
             self.prune_old_payloads();
+        }
+
+        // Evict blocks that are now beyond the block pruning depth.
+        if self.block_pruning_depth != u64::MAX {
+            self.prune_old_blocks();
         }
 
         Ok(id)

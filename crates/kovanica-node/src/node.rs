@@ -14,7 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kovanica_dag::{pow, Block, BlockId, Dag, VrfPublicKey, VrfSecretKey};
 use kovanica_dag::{vrf_keypair_from_seed, vrf_prove};
-use kovanica_state::stake::{Freeze, StakeState, UNBOND_MATURITY, UNBOND_PREFIX};
+use kovanica_state::multisig::{verify_threshold_signatures, MultisigScript};
+use kovanica_state::stake::{Freeze, UNBOND_MATURITY, UNBOND_PREFIX};
 use kovanica_state::{
     apply_block, decode_block_payload, encode_block_payload, verify, Address, HalvingSchedule,
     HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore, OutPoint, Sig,
@@ -91,6 +92,14 @@ pub enum NodeError {
         /// The offending frozen outpoint.
         outpoint: OutPoint,
     },
+    /// The multisig redeem script for `address` is not known to this node.
+    UnknownMultisigAddress { address: Address },
+    /// The supplied multisig redeem script or partial signatures are invalid.
+    Multisig(&'static str),
+    /// Not enough valid partial signatures were supplied to reach the threshold.
+    InsufficientMultisigSignatures { have: usize, need: u8 },
+    /// A multisig operation expected a single input but the transaction has more.
+    MultisigInputCount { expected: usize, actual: usize },
 }
 
 impl core::fmt::Display for NodeError {
@@ -119,6 +128,19 @@ impl core::fmt::Display for NodeError {
             ),
             NodeError::UnbondOwnerMismatch { outpoint } => {
                 write!(f, "frozen outpoint {outpoint:?} is not owned by the signing key")
+            }
+            NodeError::UnknownMultisigAddress { address } => {
+                write!(f, "unknown multisig address {address}")
+            }
+            NodeError::Multisig(msg) => write!(f, "multisig error: {msg}"),
+            NodeError::InsufficientMultisigSignatures { have, need } => {
+                write!(f, "insufficient multisig signatures: have {have}, need {need}")
+            }
+            NodeError::MultisigInputCount { expected, actual } => {
+                write!(
+                    f,
+                    "multisig transaction must have exactly {expected} input(s), got {actual}"
+                )
             }
         }
     }
@@ -328,6 +350,22 @@ pub struct Node {
     dht_node_id: Option<crate::dht::NodeId>,
     /// DHT routing table for peer discovery (optional).
     dht_routing_table: Option<crate::dht::RoutingTable>,
+    /// Open append-only replay log for incremental persistence (see
+    /// [`Node::persist_incremental`]). `None` until the node is bound to a log
+    /// (via [`Node::create_log`], [`Node::load_log`], or the first
+    /// [`Node::persist_incremental`] call).
+    log: Option<LedgerStore>,
+    /// Ids of blocks inserted since the last successful append to `log`.
+    /// Drained by [`Node::persist_incremental`]; the log order is therefore the
+    /// insertion order, which is always a valid topological order (a block is
+    /// only inserted after its parents).
+    pending: Vec<BlockId>,
+    /// Multisig redeem scripts this node has created, keyed by P2SH address.
+    /// Stored locally so [`Node::build_multisig_spend`] can attach the script
+    /// to a spend without requiring the caller to pass it back in.
+    multisig_scripts: std::collections::HashMap<Address, Vec<u8>>,
+    /// Manually banned peers (IP address or NodeId hex), with optional expiry tick.
+    banned_peers: crate::p2p_hardening::P2pHardening,
 }
 
 /// Blocks per subsidy-halving era. Issuance is `cap >> (height / HALVING_ERA)`.
@@ -345,6 +383,12 @@ impl Default for Node {
             validator_sk: None,
             dht_node_id: None,
             dht_routing_table: None,
+            log: None,
+            pending: Vec::new(),
+            multisig_scripts: std::collections::HashMap::new(),
+            banned_peers: crate::p2p_hardening::P2pHardening::new(
+                crate::p2p_hardening::P2pHardeningConfig::default(),
+            ),
         }
     }
 }
@@ -365,6 +409,12 @@ impl Node {
             validator_sk: None,
             dht_node_id: None,
             dht_routing_table: None,
+            log: None,
+            pending: Vec::new(),
+            multisig_scripts: std::collections::HashMap::new(),
+            banned_peers: crate::p2p_hardening::P2pHardening::new(
+                crate::p2p_hardening::P2pHardeningConfig::default(),
+            ),
         }
     }
 
@@ -387,6 +437,37 @@ impl Node {
     /// a real node runs on the default wall clock.
     pub fn set_now_ms(&mut self, now_ms: u64) {
         self.clock = Clock::Fixed(now_ms);
+    }
+
+    // ------------------------------------------------------------------
+    // Peer banning (IP address or NodeId)
+    // ------------------------------------------------------------------
+
+    /// Ban a peer identified by `peer` (an IP address like `1.2.3.4` or a
+    /// NodeId hex string) for `expiry_ticks` mesh ticks. `0` means permanent.
+    pub fn ban_peer(&mut self, peer: &str, expiry_ticks: u64) {
+        self.banned_peers.ban_for(peer, expiry_ticks);
+    }
+
+    /// Remove a manual ban for `peer`.
+    pub fn unban_peer(&mut self, peer: &str) {
+        self.banned_peers.unban(peer);
+    }
+
+    /// Whether `peer` is currently banned.
+    pub fn is_peer_banned(&self, peer: &str) -> bool {
+        self.banned_peers.is_banned(peer)
+    }
+
+    /// Persist the current ban list to `path` (JSON).
+    pub fn save_bans<P: AsRef<std::path::Path>>(&mut self, path: P) -> std::io::Result<()> {
+        self.banned_peers.set_bans_path(path.as_ref());
+        self.banned_peers.save_bans()
+    }
+
+    /// Load a persisted ban list from `path` (JSON). Expired bans are dropped.
+    pub fn load_bans<P: AsRef<std::path::Path>>(&mut self, path: P) -> std::io::Result<()> {
+        self.banned_peers.load_bans(path)
     }
 
     /// The timestamp to stamp on a new block built on `parents`: the node's
@@ -641,7 +722,7 @@ impl Node {
         let tip = ledger.dag().selected_tip();
         Ok(ledger
             .stake_state(&tip)
-            .map(StakeState::total_stake)
+            .map(|s| s.total_stake())
             .unwrap_or(0))
     }
 
@@ -785,6 +866,7 @@ impl Node {
             .ok_or(NodeError::NotInitialized)?
             .insert(parents, work, timestamp, nonce, &[tx])
             .map_err(NodeError::Insert)?;
+        self.note_inserted(block);
         self.evict_mempool();
         Ok(Sent { block, tx: tx_id })
     }
@@ -960,6 +1042,7 @@ impl Node {
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
             .map_err(NodeError::Insert)?;
+        self.note_inserted(block);
         self.evict_mempool();
         Ok(Sent { block, tx: tx_id })
     }
@@ -977,13 +1060,157 @@ impl Node {
         self.send_to(from_seed, amount, Self::address(to_seed))
     }
 
+    // ------------------------------------------------------------------
+    // Multisig (M-of-N P2SH) wallet helpers
+    // ------------------------------------------------------------------
+
+    /// Create a threshold-multisig P2SH address from `m` and the authorized
+    /// public keys. Returns the address and the canonical redeem script bytes.
+    ///
+    /// The redeem script is stored locally so this node can later build spends
+    /// from the address without requiring callers to pass the script back in.
+    pub fn create_multisig_address(
+        &mut self,
+        m: u8,
+        pubkeys: Vec<[u8; 32]>,
+    ) -> Result<(Address, Vec<u8>), NodeError> {
+        let script = MultisigScript::new(m, pubkeys).map_err(NodeError::Multisig)?;
+        let address = script.address();
+        let encoded = script.encode();
+        self.multisig_scripts.insert(address, encoded.clone());
+        Ok((address, encoded))
+    }
+
+    /// Look up the redeem script previously stored for `address`.
+    pub fn multisig_redeem_script(&self, address: &Address) -> Option<&Vec<u8>> {
+        self.multisig_scripts.get(address)
+    }
+
+    /// Build an unsigned multisig spend from a single P2SH UTXO owned by
+    /// `address` to `outputs`. The transaction carries the redeem script in
+    /// the input witness (`witness[0]`) so that signers can produce partial
+    /// signatures from the sighash alone.
+    ///
+    /// Coin selection is simple: one UTXO must cover `sum(outputs) + fee`.
+    /// Any change returns to the same `address`.
+    pub fn build_multisig_spend(
+        &self,
+        address: Address,
+        outputs: Vec<TxOutput>,
+    ) -> Result<Transaction, NodeError> {
+        if outputs.is_empty() {
+            return Err(NodeError::ZeroAmount);
+        }
+        let redeem_script = self
+            .multisig_scripts
+            .get(&address)
+            .cloned()
+            .ok_or(NodeError::UnknownMultisigAddress { address })?;
+
+        let fee = self.min_fee();
+        let out_sum: u64 = outputs.iter().map(|o| o.value).sum();
+        let need = out_sum
+            .checked_add(fee)
+            .ok_or(NodeError::InsufficientFunds)?;
+
+        let state = self.ledger()?.ledger_state();
+        let mut owned: Vec<(OutPoint, u64)> = state
+            .iter()
+            .filter(|(_, out)| out.owner == address)
+            .map(|(op, out)| (*op, out.value))
+            .collect();
+        owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        let (source_op, source_value) = owned
+            .into_iter()
+            .find(|(_, v)| *v >= need)
+            .ok_or(NodeError::InsufficientFunds)?;
+
+        let mut final_outputs = outputs;
+        let change = source_value - need;
+        if change > 0 {
+            final_outputs.push(TxOutput::new(change, address));
+        }
+
+        let mut tx =
+            Transaction::unsigned(std::slice::from_ref(&source_op), final_outputs, Vec::new());
+        // Attach the redeem script so the sighash is well-defined and signers
+        // do not need to track it separately for signing.
+        tx.inputs_mut()[0].witness = vec![redeem_script];
+        Ok(tx)
+    }
+
+    /// Produce a partial Ed25519 signature for `tx` using the secret supplied
+    /// as lowercase hex. The signature is over `tx.sighash()` and is valid for
+    /// every input that shares the same multisig script (the helpers enforce a
+    /// single input).
+    pub fn sign_multisig_partial(
+        &self,
+        tx: &Transaction,
+        secret_hex: &str,
+    ) -> Result<[u8; 64], NodeError> {
+        let kp = keypair_from_hex_secret(secret_hex)?;
+        Ok(kp.sign(&tx.sighash()))
+    }
+
+    /// Combine exactly `M` valid partial signatures into a fully-signed
+    /// multisig transaction. The input's first witness element must already
+    /// contain the redeem script (as produced by [`Node::build_multisig_spend`]).
+    ///
+    /// Returns an error if the transaction does not have exactly one input, if
+    /// the redeem script is missing, if too few signatures are given, if any
+    /// signature is invalid, or if duplicate signatures are provided.
+    pub fn combine_multisig_sigs(
+        &self,
+        tx: &Transaction,
+        partial_sigs: Vec<[u8; 64]>,
+    ) -> Result<Transaction, NodeError> {
+        if tx.inputs().len() != 1 {
+            return Err(NodeError::MultisigInputCount {
+                expected: 1,
+                actual: tx.inputs().len(),
+            });
+        }
+        let input = &tx.inputs()[0];
+        if input.witness.is_empty() {
+            return Err(NodeError::Multisig("missing redeem script in witness"));
+        }
+        let redeem_script = input.witness[0].clone();
+        let script = MultisigScript::parse(&redeem_script).map_err(NodeError::Multisig)?;
+
+        if partial_sigs.len() != script.m as usize {
+            return Err(NodeError::InsufficientMultisigSignatures {
+                have: partial_sigs.len(),
+                need: script.m,
+            });
+        }
+
+        let sighash = tx.sighash();
+        let sigs: Vec<Vec<u8>> = partial_sigs.iter().map(|s| s.to_vec()).collect();
+        verify_threshold_signatures(&script, &sigs, &sighash).map_err(NodeError::Multisig)?;
+
+        let mut final_tx = tx.clone();
+        let mut witness = vec![redeem_script];
+        witness.extend(sigs);
+        final_tx.inputs_mut()[0].witness = witness;
+        Ok(final_tx)
+    }
+
+    /// Submit a fully-signed multisig transaction to the mempool. It will be
+    /// included in a block by a subsequent [`Node::produce_block`] or
+    /// [`Node::produce_empty_block`] call.
+    pub fn submit_multisig_tx(&mut self, tx: Transaction) -> Result<TxId, NodeError> {
+        self.submit_tx(tx)
+    }
+
     /// Build a transfer and add it to the mempool (not yet in a block). Returns
     /// its transaction id.
     pub fn pool(&mut self, from_seed: u64, amount: u64, to_seed: u64) -> Result<TxId, NodeError> {
         let tx = self.build_transfer(from_seed, amount, to_seed)?;
         let id = tx.id();
+        let utxo = self.ledger()?.ledger_state();
         self.mempool
-            .add(tx)
+            .add(tx, &utxo)
             .map_err(|e| NodeError::Mempool(e.to_string()))?;
         Ok(id)
     }
@@ -995,10 +1222,11 @@ impl Node {
             return Err(NodeError::UnexpectedCoinbase);
         }
         let id = tx.id();
+        let utxo = self.ledger()?.ledger_state();
         let start = std::time::Instant::now();
         let result = self
             .mempool
-            .add(tx)
+            .add(tx, &utxo)
             .map_err(|e| NodeError::Mempool(e.to_string()));
         let duration = start.elapsed();
         match &result {
@@ -1006,6 +1234,31 @@ impl Node {
             Err(_) => crate::metrics::record_tx_validation(duration, true),
         }
         result.map(|_| id)
+    }
+
+    /// Replace a pending transaction via RBF. `tx` must spend at least one of
+    /// the same inputs as a transaction already in the mempool, and its fee
+    /// rate must exceed the replaced transaction's rate by at least
+    /// `min_fee_bump` atoms/byte.
+    pub fn replace_by_fee(
+        &mut self,
+        tx: Transaction,
+        min_fee_bump: u64,
+    ) -> Result<TxId, NodeError> {
+        if tx.is_coinbase() {
+            return Err(NodeError::UnexpectedCoinbase);
+        }
+        let id = tx.id();
+        let utxo = self.ledger()?.ledger_state();
+        self.mempool
+            .replace_by_fee(tx, &utxo, min_fee_bump)
+            .map_err(|e| NodeError::Mempool(e.to_string()))?;
+        Ok(id)
+    }
+
+    /// Estimated competitive fee rate from the mempool, in atoms/byte.
+    pub fn fee_estimate(&self) -> Result<u64, NodeError> {
+        Ok(self.mempool.fee_estimate())
     }
 
     /// Assemble the largest valid prefix of the mempool into a block on the
@@ -1075,6 +1328,7 @@ impl Node {
             .insert(parents, work, timestamp, nonce, &block_txs)
             .map_err(NodeError::Insert)?;
         let duration = start.elapsed();
+        self.note_inserted(block);
         self.note_block_produced(&block, duration);
         self.mempool.remove_all(&selected_ids);
         Ok(Some(block))
@@ -1120,7 +1374,10 @@ impl Node {
         };
         let ledger = self.ledger.as_mut().expect("checked above");
         match ledger.insert_with_vrf(parents, timestamp_ms, sv, block_txs) {
-            Ok(id) => Ok(Some(id)),
+            Ok(id) => {
+                self.note_inserted(id);
+                Ok(Some(id))
+            }
             Err(
                 LedgerInsertError::NotEligible { .. }
                 | LedgerInsertError::DuplicateStakedBlock { .. },
@@ -1155,6 +1412,7 @@ impl Node {
             .insert(parents, work, timestamp, nonce, &txs)
             .map_err(NodeError::Insert)?;
         let duration = start.elapsed();
+        self.note_inserted(id);
         self.note_block_produced(&id, duration);
         Ok(id)
     }
@@ -1487,6 +1745,42 @@ impl Node {
         Ok(events)
     }
 
+    /// Find every block that lists `id` as one of its parents.
+    pub fn block_children(&self, id: &BlockId) -> Result<Vec<BlockId>, NodeError> {
+        let ledger = self.ledger()?;
+        let dag = ledger.dag();
+        let mut children = Vec::new();
+        for block_id in dag.linearize() {
+            if let Some(block) = dag.block(&block_id) {
+                if block.parents().contains(id) {
+                    children.push(block_id);
+                }
+            }
+        }
+        Ok(children)
+    }
+
+    /// Locate the confirming block for a transaction and its blue score.
+    ///
+    /// Returns `None` if the transaction is not in any known block payload.
+    pub fn tx_confirmation(&self, id: &TxId) -> Result<Option<(BlockId, u64)>, NodeError> {
+        let ledger = self.ledger()?;
+        let dag = ledger.dag();
+        for block_id in dag.linearize() {
+            let Some(block) = dag.block(&block_id) else {
+                continue;
+            };
+            let Ok(txs) = decode_block_payload(block.payload()) else {
+                continue;
+            };
+            if txs.iter().any(|tx| tx.id() == *id) {
+                let blue_score = dag.ghostdag(&block_id).map(|g| g.blue_score).unwrap_or(0);
+                return Ok(Some((block_id, blue_score)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Export SPV block headers along the selected chain starting after the common
     /// ancestor found in `locator`, up to `stop` (or tip), bounded by `limit`.
     pub fn headers_from(
@@ -1650,6 +1944,28 @@ impl Node {
             .collect()
     }
 
+    /// Export every non-genesis block strictly after `from` in topological
+    /// order. If `from` is unknown or not on the selected chain, fall back to a
+    /// full export (the peer cannot safely resume from an off-chain block).
+    pub fn export_from(&self, from: &BlockId) -> Vec<BlockRecord> {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return Vec::new();
+        };
+        let order = ledger.dag().linearize();
+        let start = order
+            .iter()
+            .position(|id| id == from)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let genesis = ledger.genesis();
+        order
+            .into_iter()
+            .skip(start)
+            .filter(|id| *id != genesis)
+            .filter_map(|id| self.block_record(&id))
+            .collect()
+    }
+
     /// Insert a block received from a peer. Idempotent: a block already present
     /// returns its id rather than an error. The block's parents must already be
     /// present (feed records in topological order).
@@ -1717,6 +2033,7 @@ impl Node {
         match result {
             Ok(id) => {
                 crate::metrics::record_block_validation(duration, false);
+                self.note_inserted(id);
                 self.evict_mempool();
                 Ok(id)
             }
@@ -1749,6 +2066,10 @@ impl Node {
         let ledger =
             Ledger::read_snapshot(&bytes).map_err(|e| NodeError::Snapshot(e.to_string()))?;
         self.ledger = Some(ledger);
+        // The ledger was replaced: any open log or pending ids belong to the
+        // previous ledger and must not be appended to.
+        self.log = None;
+        self.pending.clear();
         Ok(())
     }
 
@@ -1769,6 +2090,10 @@ impl Node {
         let ledger = Ledger::read_snapshot_with_hybrid(&bytes, config)
             .map_err(|e| NodeError::Snapshot(e.to_string()))?;
         self.ledger = Some(ledger);
+        // The ledger was replaced: any open log or pending ids belong to the
+        // previous ledger and must not be appended to.
+        self.log = None;
+        self.pending.clear();
         Ok(())
     }
 
@@ -1780,12 +2105,25 @@ impl Node {
         let ledger =
             Ledger::read_checkpoint(&bytes).map_err(|e| NodeError::Snapshot(e.to_string()))?;
         self.ledger = Some(ledger);
+        // The ledger was replaced: any open log or pending ids belong to the
+        // previous ledger and must not be appended to.
+        self.log = None;
+        self.pending.clear();
         Ok(())
     }
 
-    /// Write an incremental append-only log of this node's ledger at `path`.
-    pub fn create_log(&self, path: &str) -> Result<LedgerStore, NodeError> {
-        LedgerStore::create(path, self.ledger()?).map_err(|e| NodeError::Io(e.to_string()))
+    /// Write an incremental append-only log of this node's ledger at `path`
+    /// and keep it open for [`persist_incremental`](Self::persist_incremental)
+    /// appends. The log is created from the current ledger (genesis first), so
+    /// a node loaded from a whole-file snapshot migrates to the incremental
+    /// store in one write; subsequent persistence appends only new blocks.
+    pub fn create_log(&mut self, path: &str) -> Result<(), NodeError> {
+        let store =
+            LedgerStore::create(path, self.ledger()?).map_err(|e| NodeError::Io(e.to_string()))?;
+        self.log = Some(store);
+        // The fresh log already covers the whole ledger.
+        self.pending.clear();
+        Ok(())
     }
 
     /// Write a finality checkpoint to `path` using the LedgerStore.
@@ -1794,24 +2132,48 @@ impl Node {
             .map_err(|e| NodeError::Io(e.to_string()))
     }
 
-    /// Rebuild the node from an incremental log at `path`. The store is
-    /// returned so the caller can [`persist_block`](Self::persist_block) new
-    /// inserts without rewriting the file.
-    pub fn load_log(path: &str) -> Result<(Self, LedgerStore), NodeError> {
-        let (store, ledger) =
-            LedgerStore::open(path).map_err(|e| NodeError::Snapshot(e.to_string()))?;
-        Ok((
-            Self {
-                ledger: Some(ledger),
-                mempool: MempoolV2::default(),
-                clock: Clock::default(),
-                miner: None,
-                validator_sk: None,
-                dht_node_id: None,
-                dht_routing_table: None,
-            },
-            store,
-        ))
+    /// Rebuild the node from an incremental log at `path`. The log stays open
+    /// on the node, so [`persist_incremental`](Self::persist_incremental) can
+    /// append new inserts without rewriting the file.
+    pub fn load_log(path: &str) -> Result<Self, NodeError> {
+        Self::load_log_impl(path, None)
+    }
+
+    /// Like [`Node::load_log`], but hybrid admission (with `config`) is active
+    /// during replay, so staked-VRF blocks re-admit with their original ids.
+    /// Required for logs produced in hybrid mode — mirroring
+    /// [`Node::load_with_hybrid`] for snapshots.
+    pub fn load_log_with_hybrid(
+        path: &str,
+        config: kovanica_state::HybridConfig,
+    ) -> Result<Self, NodeError> {
+        Self::load_log_impl(path, Some(config))
+    }
+
+    fn load_log_impl(
+        path: &str,
+        hybrid: Option<kovanica_state::HybridConfig>,
+    ) -> Result<Self, NodeError> {
+        let (store, ledger) = match hybrid {
+            Some(config) => LedgerStore::open_with_hybrid(path, config),
+            None => LedgerStore::open(path),
+        }
+        .map_err(|e| NodeError::Snapshot(e.to_string()))?;
+        Ok(Self {
+            ledger: Some(ledger),
+            mempool: MempoolV2::default(),
+            clock: Clock::default(),
+            miner: None,
+            validator_sk: None,
+            dht_node_id: None,
+            dht_routing_table: None,
+            log: Some(store),
+            pending: Vec::new(),
+            multisig_scripts: std::collections::HashMap::new(),
+            banned_peers: crate::p2p_hardening::P2pHardening::new(
+                crate::p2p_hardening::P2pHardeningConfig::default(),
+            ),
+        })
     }
 
     /// Rebuild the node from a finality checkpoint at `path`.
@@ -1826,7 +2188,57 @@ impl Node {
             validator_sk: None,
             dht_node_id: None,
             dht_routing_table: None,
+            log: None,
+            pending: Vec::new(),
+            multisig_scripts: std::collections::HashMap::new(),
+            banned_peers: crate::p2p_hardening::P2pHardening::new(
+                crate::p2p_hardening::P2pHardeningConfig::default(),
+            ),
         })
+    }
+
+    /// Append every block inserted since the last call to the open incremental
+    /// log at `path`, in insertion order (a valid topological order — a block
+    /// is only inserted after its parents). If no log is open yet, one is
+    /// created from the current ledger first, so a node that was never bound
+    /// to a log (a fresh genesis, or a snapshot load) migrates here in a single
+    /// whole-ledger write; afterwards only new blocks are appended.
+    ///
+    /// On an I/O error the unappended ids are kept for the next call, so no
+    /// block is silently dropped from the log.
+    pub fn persist_incremental(&mut self, path: &str) -> Result<(), NodeError> {
+        if self.log.is_none() {
+            let store = LedgerStore::create(path, self.ledger()?)
+                .map_err(|e| NodeError::Io(e.to_string()))?;
+            self.log = Some(store);
+            // The fresh log covers the whole ledger, including anything pending.
+            self.pending.clear();
+        }
+        let mut store = self.log.take().expect("opened above");
+        let pending = std::mem::take(&mut self.pending);
+        let mut i = 0;
+        while i < pending.len() {
+            let id = pending[i];
+            let block = self
+                .ledger()?
+                .dag()
+                .block(&id)
+                .ok_or_else(|| NodeError::Io("unknown block".into()))?;
+            if let Err(e) = store.append(block) {
+                self.pending.extend_from_slice(&pending[i..]);
+                self.log = Some(store);
+                return Err(NodeError::Io(e.to_string()));
+            }
+            i += 1;
+        }
+        self.log = Some(store);
+        Ok(())
+    }
+
+    /// Record a successfully inserted block for the next
+    /// [`persist_incremental`](Self::persist_incremental) append.
+    fn note_inserted(&mut self, id: BlockId) {
+        self.pending.push(id);
     }
 
     /// Append `id`'s block to an open log. No-op-level error if the block is
@@ -1922,6 +2334,15 @@ impl Node {
             _ => None,
         }
     }
+}
+
+/// Decode a 32-byte ed25519 seed from lowercase hex. Used by multisig partial
+/// signing so the secret is consumed for a single operation and never stored.
+fn keypair_from_hex_secret(secret_hex: &str) -> Result<KeyPair, NodeError> {
+    let raw = hex::decode(secret_hex.trim()).map_err(|e| NodeError::Io(e.to_string()))?;
+    let bytes = <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_| NodeError::Multisig("secret must be exactly 32 bytes hex"))?;
+    Ok(KeyPair::from_seed(bytes))
 }
 
 fn fee_of(state: &UtxoSet, tx: &Transaction) -> u64 {

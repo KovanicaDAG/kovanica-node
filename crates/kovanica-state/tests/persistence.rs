@@ -87,8 +87,8 @@ fn ledger_roundtrips_through_a_snapshot() {
     // Same per-block view state for every block.
     for id in ledger.dag().linearize() {
         assert_eq!(
-            snapshot(restored.state(&id).unwrap()),
-            snapshot(ledger.state(&id).unwrap()),
+            snapshot(&restored.state(&id).unwrap()),
+            snapshot(&ledger.state(&id).unwrap()),
             "per-block state differs for {id}"
         );
     }
@@ -205,8 +205,8 @@ fn checkpoint_roundtrips() {
     // Same per-block view state for every NON-FINAL block
     for id in &non_final {
         assert_eq!(
-            snapshot(restored.state(id).unwrap()),
-            snapshot(ledger.state(id).unwrap()),
+            snapshot(&restored.state(id).unwrap()),
+            snapshot(&ledger.state(id).unwrap()),
             "per-block state differs for {id}"
         );
     }

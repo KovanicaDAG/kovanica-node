@@ -265,6 +265,67 @@ impl Reachability {
         }
     }
 
+    /// Remove `evicted` blocks from the oracle (block pruning), re-parenting any
+    /// present tree-children of evicted blocks to `genesis`.
+    ///
+    /// Preconditions:
+    /// - `genesis` is not in `evicted`;
+    /// - the evicted set is **downward-closed** in the reachability tree (every
+    ///   tree-descendant of an evicted block is also evicted). This is exactly
+    ///   `past(P) \ {genesis}` for a pruning point `P`, and it guarantees that
+    ///   a present block's nearest remaining tree-ancestor is always `genesis`
+    ///   (a present block cannot have an evicted tree-ancestor other than via
+    ///   the evicted chain, whose root is genesis).
+    ///
+    /// Because the evicted set is downward-closed, no present block's interval
+    /// changes: re-parented children keep their intervals (they already lie
+    /// inside genesis's allocated region `[1, next_free[genesis])`), so no
+    /// re-layout and no `next_free` adjustment is needed. Present blocks never
+    /// have evicted tree-children, so only `genesis`'s subtree size changes.
+    /// Future-covering sets of present blocks never reference evicted blocks
+    /// (an evicted `X ∈ fcs[A]` would put `A ∈ past(X) ⊆ past(P)`, i.e. `A`
+    /// evicted), so evicted fcs entries are simply dropped.
+    pub(crate) fn remove_blocks(&mut self, genesis: BlockId, evicted: &HashSet<BlockId>) {
+        // Present tree-children of evicted blocks: re-parent to genesis.
+        let mut reparent: Vec<BlockId> = Vec::new();
+        for id in evicted {
+            if let Some(children) = self.tree_children.get(id) {
+                for child in children {
+                    if !evicted.contains(child) {
+                        reparent.push(*child);
+                    }
+                }
+            }
+        }
+        reparent.sort_unstable();
+
+        // Drop the evicted entries.
+        for id in evicted {
+            self.intervals.remove(id);
+            self.fcs.remove(id);
+            self.tree_children.remove(id);
+            self.tree_parent.remove(id);
+            self.subtree_size.remove(id);
+            self.next_free.remove(id);
+        }
+
+        // Re-parent present children to genesis (sorted, deterministic).
+        if !reparent.is_empty() {
+            let g_children = self.tree_children.entry(genesis).or_default();
+            for child in &reparent {
+                g_children.push(*child);
+                self.tree_parent.insert(*child, genesis);
+            }
+            g_children.sort_unstable();
+        }
+
+        // Genesis's subtree loses exactly the evicted blocks (present blocks
+        // have no evicted tree-descendants, so no other subtree size changes).
+        if let Some(size) = self.subtree_size.get_mut(&genesis) {
+            *size = size.saturating_sub(evicted.len() as u64);
+        }
+    }
+
     /// Reindex (re-lay-out) the smallest subtree that can regain interval
     /// capacity for `node`: the lowest ancestor whose interval is at least twice
     /// its subtree size (the root always qualifies, as its capacity dwarfs any

@@ -2,9 +2,12 @@
 //!
 //! [`Ledger::write_snapshot`] rewrites the *whole* DAG every time. [`LedgerStore`]
 //! writes a short header once, then **appends** each subsequent block as a
-//! length-prefixed record. Loading replays the log through [`Ledger::insert`] —
-//! derived consensus and UTXO state is never trusted from disk, same as the
-//! snapshot. The file is a streaming log, not mmap.
+//! length-prefixed record. Loading replays the log through
+//! [`Ledger::insert_raw_block`] — the identity-preserving path, so staked-VRF
+//! blocks re-admit with their original ids (use [`LedgerStore::open_with_hybrid`]
+//! when the log was produced under a hybrid policy) and pruned blocks restore
+//! with their stored ids. Derived consensus and UTXO state is never trusted from
+//! disk, same as the snapshot. The file is a streaming log, not mmap.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -91,7 +94,32 @@ impl LedgerStore {
     }
 
     /// Open an existing log and replay it into a [`Ledger`].
+    ///
+    /// Replay runs through [`Ledger::insert_raw_block`], so every block is
+    /// re-admitted exactly as stored (its id — including any VRF fields — is
+    /// taken as given) and all derived state is recomputed from the log, never
+    /// trusted from disk. For logs produced under a hybrid PoW / staked-VRF
+    /// policy, use [`Self::open_with_hybrid`] so staked blocks re-admit with
+    /// their original ids.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Ledger), StoreError> {
+        Self::open_impl(path, None)
+    }
+
+    /// Like [`Self::open`], but hybrid admission (with `config`) is active
+    /// during replay, so staked-VRF blocks re-admit with their original ids
+    /// intact. Required for any log produced in hybrid mode — mirroring
+    /// [`Ledger::read_snapshot_with_hybrid`].
+    pub fn open_with_hybrid(
+        path: impl AsRef<Path>,
+        config: crate::HybridConfig,
+    ) -> Result<(Self, Ledger), StoreError> {
+        Self::open_impl(path, Some(config))
+    }
+
+    fn open_impl(
+        path: impl AsRef<Path>,
+        hybrid: Option<crate::HybridConfig>,
+    ) -> Result<(Self, Ledger), StoreError> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic).map_err(map_header_eof)?;
@@ -123,16 +151,15 @@ impl LedgerStore {
         let schedule = HalvingSchedule::new(subsidy, halving_era);
         let mut ledger = Ledger::new(k, schedule, &genesis_txs)
             .map_err(|e| StoreError::Replay(map_genesis(e)))?;
+        if let Some(config) = hybrid {
+            ledger.set_hybrid(config);
+        }
         while let Some(block) = read_record(&mut file)? {
-            let txs = kovanica_dag_payload(&block).map_err(StoreError::Replay)?;
+            // Identity-preserving replay: the block's stored id (including any
+            // VRF fields) is authoritative, so children's parent references
+            // resolve exactly as they did in the producing node.
             ledger
-                .insert(
-                    block.parents().to_vec(),
-                    block.work(),
-                    block.timestamp_ms(),
-                    block.nonce(),
-                    &txs,
-                )
+                .insert_raw_block(block)
                 .map_err(|e| StoreError::Replay(LedgerSnapshotError::Rebuild(e)))?;
         }
         Ok((Self { file }, ledger))

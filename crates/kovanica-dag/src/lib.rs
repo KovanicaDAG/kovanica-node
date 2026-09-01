@@ -56,7 +56,7 @@ pub mod validation;
 pub mod vrf;
 
 pub use block::{Block, BlockId};
-pub use dag::{BlockPreview, Dag, DagError, GhostdagData, KParam, VrfConfig};
+pub use dag::{BlockPreview, Dag, DagError, GhostdagData, KParam, VrfConfig, DEFAULT_EPOCH_LENGTH};
 pub use difficulty::{Retarget, TimedWork};
 pub use pow::{meets_target, mine};
 pub use reachability::Reachability;

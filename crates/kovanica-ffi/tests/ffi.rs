@@ -410,3 +410,43 @@ fn filter_matches_any_batches_watch_addresses() {
         .filter_matches_any(vec![0u8; 9], vec![founder])
         .is_err());
 }
+
+#[test]
+fn bond_and_unbond_from_secret_spend_wallet_funds() {
+    let node = validator_node();
+
+    // The deterministic founder actor (seed 1) is funded by genesis. Its
+    // Ed25519 secret is the little-endian encoding of 1 padded to 32 bytes.
+    let founder_secret = "0100000000000000000000000000000000000000000000000000000000000000";
+
+    // Bonding from the wallet secret freezes the founder's own coins and
+    // returns change to the same wallet address.
+    let bond_tx_hex = node
+        .bond_stake_from_secret(founder_secret.into(), 500)
+        .unwrap();
+    assert_eq!(hex::decode(&bond_tx_hex).unwrap().len(), 32);
+    assert_eq!(node.total_stake().unwrap(), 500);
+    assert_eq!(node.my_stake().unwrap(), 500);
+
+    // Immature unbond fails.
+    let err = node
+        .unbond_from_secret(founder_secret.into(), 300)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("insufficient matured stake"),
+        "{err}"
+    );
+    assert_eq!(node.my_stake().unwrap(), 500);
+
+    // Mine enough blocks to mature the bond (`UNBOND_MATURITY` = 100).
+    for _ in 0..105 {
+        let _ = node.produce_empty_block().unwrap();
+    }
+
+    let receipt = node.unbond_from_secret(founder_secret.into(), 300).unwrap();
+    assert!(!receipt.block_id_hex.is_empty());
+    assert!(!receipt.tx_id_hex.is_empty());
+    assert_eq!(node.my_stake().unwrap(), 0);
+    // The remaining 200 atoms were returned as an unfrozen change output.
+    assert_eq!(node.total_stake().unwrap(), 0);
+}

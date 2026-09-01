@@ -12,8 +12,8 @@
 //!   out) — the node's "RPC". The binary wires it to stdin/stdout (`serve`) or
 //!   replays a scripted `demo`.
 //!
-//! Nodes are multi-node aware: a [`Mempool`](mempool::Mempool) holds pending
-//! transactions, [`Node::produce_block`] packs the valid ones into a block, and
+//! Nodes are multi-node aware: a [`MempoolV2`](mempool_v2::MempoolV2) holds
+//! pending transactions, [`Node::produce_block`] packs the valid ones into a block, and
 //! blocks gossip between nodes ([`net::gossip`] in-process, or
 //! [`net::serve_blocks`] / [`net::pull_blocks`] over TCP :9000) so peers
 //! converge on the same DAG. [`p2p::Mesh`] is the in-process overlay used by
@@ -38,7 +38,6 @@ pub mod dns_seed;
 pub mod explorer;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzz;
-pub mod mempool;
 pub mod mempool_v2;
 pub mod metrics;
 pub mod net;
@@ -58,7 +57,6 @@ pub use dns_seed::{
     MockDnsResolver, StdDnsResolver,
 };
 pub use explorer::serve as serve_explorer;
-pub use mempool::Mempool;
 pub use mempool_v2::{Added, MempoolConfig, MempoolError, MempoolV2};
 pub use metrics::{
     block_span, dht_span, init_metrics, names, peer_span, record_block_produced,
@@ -73,8 +71,9 @@ pub use metrics::{
 };
 pub use net::{
     decode_bodies, decode_getbodies, decode_getheaders, decode_headers, decode_inventory,
-    encode_bodies, encode_getbodies, encode_getheaders, encode_headers, encode_inventory,
-    exchange_full_dump, serve_headers_first, sync_headers_first, NetError, SyncStats,
+    decode_records, encode_bodies, encode_getbodies, encode_getheaders, encode_headers,
+    encode_inventory, exchange_full_dump, serve_headers_first, sync_headers_first, NetError,
+    SyncStats,
 };
 pub use node::{
     BlockHeader, BlockRecord, MerkleBlock, MiningTemplate, Node, NodeError, Prepared, Sent,

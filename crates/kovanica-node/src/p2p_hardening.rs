@@ -10,7 +10,18 @@
 
 use kovanica_dag::BlockId;
 use kovanica_state::TxId;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+/// On-disk representation of the persisted ban list.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct BansFile {
+    /// Banned peer identifier -> optional expiry tick (`None` = permanent).
+    bans: BTreeMap<String, Option<u64>>,
+}
 
 /// Configuration for P2P hardening parameters.
 #[derive(Clone, Debug)]
@@ -43,6 +54,8 @@ pub struct P2pHardeningConfig {
     pub max_score: i32,
     /// Min score (capped).
     pub min_score: i32,
+    /// How many ticks a manual ban lasts. 0 = permanent (until explicitly unbanned).
+    pub ban_expiry_ticks: u64,
 }
 
 impl Default for P2pHardeningConfig {
@@ -61,6 +74,7 @@ impl Default for P2pHardeningConfig {
             ban_threshold: -50,
             max_score: 1000,
             min_score: -1000,
+            ban_expiry_ticks: 0,
         }
     }
 }
@@ -137,12 +151,14 @@ struct ScoreState {
     total_invalid_blocks: u64,
     total_invalid_txs: u64,
     banned: bool,
+    banned_until: Option<u64>,
 }
 
 impl ScoreState {
     fn new(initial: i32) -> Self {
         Self {
             score: initial,
+            banned_until: None,
             ..Self::default()
         }
     }
@@ -151,8 +167,11 @@ impl ScoreState {
         self.score = (self.score + delta).clamp(config.min_score, config.max_score);
     }
 
-    fn is_banned(&self, config: &P2pHardeningConfig) -> bool {
-        self.banned || self.score <= config.ban_threshold
+    fn is_banned(&self, config: &P2pHardeningConfig, now: u64) -> bool {
+        if self.score <= config.ban_threshold {
+            return true;
+        }
+        self.banned && self.banned_until.map_or(true, |until| now < until)
     }
 }
 
@@ -164,6 +183,7 @@ pub struct P2pHardening {
     duplicates: HashMap<String, DuplicateState>,
     scores: HashMap<String, ScoreState>,
     tick: u64,
+    bans_path: Option<PathBuf>,
 }
 
 impl P2pHardening {
@@ -175,6 +195,7 @@ impl P2pHardening {
             duplicates: HashMap::new(),
             scores: HashMap::new(),
             tick: 0,
+            bans_path: None,
         }
     }
 
@@ -188,6 +209,51 @@ impl P2pHardening {
         &mut self.config
     }
 
+    /// Configure a path to persist the ban list to.
+    pub fn set_bans_path(&mut self, path: impl Into<PathBuf>) {
+        self.bans_path = Some(path.into());
+    }
+
+    /// Load the persisted ban list from `path`. Already-expired bans are
+    /// dropped; permanent bans (`None`) are kept.
+    pub fn load_bans<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
+        let bytes = fs::read(path.as_ref())?;
+        let file: BansFile = serde_json::from_slice(&bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.bans_path = Some(path.as_ref().to_path_buf());
+        for (peer, expiry) in file.bans {
+            let still_banned = match expiry {
+                None => true,
+                Some(until) => self.tick < until,
+            };
+            if still_banned {
+                self.ensure_peer(&peer);
+                let state = self.scores.get_mut(&peer).unwrap();
+                state.banned = true;
+                state.banned_until = expiry;
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist the current ban set to the configured path.
+    pub fn save_bans(&self) -> io::Result<()> {
+        let Some(path) = &self.bans_path else {
+            return Ok(());
+        };
+        let bans: BTreeMap<String, Option<u64>> = self
+            .scores
+            .iter()
+            .filter(|(_, s)| s.is_banned(&self.config, self.tick))
+            .map(|(peer, s)| (peer.clone(), s.banned_until))
+            .collect();
+        let file = BansFile { bans };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_vec_pretty(&file)?)
+    }
+
     /// Advance time tick.
     pub fn tick(&mut self) {
         self.tick = self.tick.saturating_add(1);
@@ -195,6 +261,24 @@ impl P2pHardening {
         if self.tick % 1000 == 0 {
             for dup in self.duplicates.values_mut() {
                 dup.prune(self.tick, 10_000); // keep last 10k ticks
+            }
+        }
+        // Prune expired bans and persist if the set changed.
+        if self.bans_path.is_some() {
+            let mut changed = false;
+            for state in self.scores.values_mut() {
+                if state.banned {
+                    if let Some(until) = state.banned_until {
+                        if self.tick >= until {
+                            state.banned = false;
+                            state.banned_until = None;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed {
+                let _ = self.save_bans();
             }
         }
     }
@@ -226,11 +310,16 @@ impl P2pHardening {
         self.ensure_peer(peer);
         let dup = self.duplicates.get_mut(peer).unwrap();
         let score = self.scores.get_mut(peer).unwrap();
+        let was_banned = score.is_banned(&self.config, self.tick);
 
         if !valid {
             score.total_invalid_blocks += 1;
             score.apply(self.config.score_invalid_block, &self.config);
-            return (false, score.is_banned(&self.config));
+            let banned = score.is_banned(&self.config, self.tick);
+            if banned && !was_banned {
+                let _ = self.save_bans();
+            }
+            return (false, banned);
         }
 
         let is_new = dup.is_new_block(block_id, self.tick);
@@ -241,7 +330,11 @@ impl P2pHardening {
             score.total_duplicate_blocks += 1;
             score.apply(self.config.score_duplicate_block, &self.config);
         }
-        (is_new, score.is_banned(&self.config))
+        let banned = score.is_banned(&self.config, self.tick);
+        if banned && !was_banned {
+            let _ = self.save_bans();
+        }
+        (is_new, banned)
     }
 
     /// Record a tx received from `peer`. Returns `(is_new, is_banned)`.
@@ -250,11 +343,16 @@ impl P2pHardening {
         self.ensure_peer(peer);
         let dup = self.duplicates.get_mut(peer).unwrap();
         let score = self.scores.get_mut(peer).unwrap();
+        let was_banned = score.is_banned(&self.config, self.tick);
 
         if !valid {
             score.total_invalid_txs += 1;
             score.apply(self.config.score_invalid_tx, &self.config);
-            return (false, score.is_banned(&self.config));
+            let banned = score.is_banned(&self.config, self.tick);
+            if banned && !was_banned {
+                let _ = self.save_bans();
+            }
+            return (false, banned);
         }
 
         let is_new = dup.is_new_tx(tx_id, self.tick);
@@ -265,7 +363,11 @@ impl P2pHardening {
             score.total_duplicate_txs += 1;
             score.apply(self.config.score_duplicate_tx, &self.config);
         }
-        (is_new, score.is_banned(&self.config))
+        let banned = score.is_banned(&self.config, self.tick);
+        if banned && !was_banned {
+            let _ = self.save_bans();
+        }
+        (is_new, banned)
     }
 
     /// Get the current score for a peer.
@@ -277,14 +379,26 @@ impl P2pHardening {
     pub fn is_banned(&self, peer: &str) -> bool {
         self.scores
             .get(peer)
-            .map(|s| s.is_banned(&self.config))
+            .map(|s| s.is_banned(&self.config, self.tick))
             .unwrap_or(false)
     }
 
-    /// Manually ban a peer.
+    /// Manually ban a peer. Honors [`P2pHardeningConfig::ban_expiry_ticks`].
     pub fn ban(&mut self, peer: &str) {
+        self.ban_for(peer, self.config.ban_expiry_ticks);
+    }
+
+    /// Manually ban a peer for `expiry_ticks`. 0 ticks means permanent.
+    pub fn ban_for(&mut self, peer: &str, expiry_ticks: u64) {
         self.ensure_peer(peer);
-        self.scores.get_mut(peer).unwrap().banned = true;
+        let state = self.scores.get_mut(peer).unwrap();
+        state.banned = true;
+        state.banned_until = if expiry_ticks == 0 {
+            None
+        } else {
+            Some(self.tick.saturating_add(expiry_ticks))
+        };
+        let _ = self.save_bans();
     }
 
     /// Manually unban a peer (resets score to initial).
@@ -294,8 +408,10 @@ impl P2pHardening {
             .or_insert_with(|| ScoreState::new(self.config.initial_score));
         if let Some(s) = self.scores.get_mut(peer) {
             s.banned = false;
+            s.banned_until = None;
             s.score = self.config.initial_score;
         }
+        let _ = self.save_bans();
     }
 
     /// Get detailed stats for a peer.
@@ -305,7 +421,7 @@ impl P2pHardening {
         let dup = self.duplicates.get(peer)?;
         Some(PeerStats {
             score: score.score,
-            banned: score.is_banned(&self.config),
+            banned: score.is_banned(&self.config, self.tick),
             total_valid_blocks: score.total_valid_blocks,
             total_duplicate_blocks: score.total_duplicate_blocks,
             total_valid_txs: score.total_valid_txs,
@@ -488,5 +604,79 @@ mod tests {
         h.unban("peer1");
         assert!(!h.is_banned("peer1"));
         assert_eq!(h.score("peer1"), Some(0)); // reset to initial
+    }
+
+    #[test]
+    fn ban_expires_after_ticks() {
+        let config = P2pHardeningConfig {
+            ban_expiry_ticks: 5,
+            ..Default::default()
+        };
+        let mut h = P2pHardening::new(config);
+        h.ban("peer1");
+        assert!(h.is_banned("peer1"));
+        for _ in 0..4 {
+            h.tick();
+            assert!(h.is_banned("peer1"));
+        }
+        h.tick();
+        assert!(!h.is_banned("peer1"));
+    }
+
+    #[test]
+    fn permanent_ban_never_expires() {
+        let mut h = P2pHardening::new(Default::default());
+        h.ban("peer1");
+        for _ in 0..10_000 {
+            h.tick();
+        }
+        assert!(h.is_banned("peer1"));
+    }
+
+    #[test]
+    fn save_and_load_bans_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("kovanica-bans-test-{}", std::process::id()));
+        let path = dir.join("bans.json");
+        let mut h = P2pHardening::new(Default::default());
+        h.set_bans_path(&path);
+        h.ban_for("alice", 100);
+        h.ban_for("bob", 0);
+        drop(h);
+
+        let mut h2 = P2pHardening::new(Default::default());
+        h2.load_bans(&path).unwrap();
+        assert!(h2.is_banned("alice"));
+        assert!(h2.is_banned("bob"));
+        for _ in 0..100 {
+            h2.tick();
+        }
+        assert!(!h2.is_banned("alice"));
+        assert!(h2.is_banned("bob"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_ban_is_persisted() {
+        let dir =
+            std::env::temp_dir().join(format!("kovanica-bans-auto-test-{}", std::process::id()));
+        let path = dir.join("bans.json");
+        let config = P2pHardeningConfig {
+            score_invalid_block: -50,
+            ban_threshold: -40,
+            ..Default::default()
+        };
+        let mut h = P2pHardening::new(config);
+        h.set_bans_path(&path);
+        let block_id = BlockId::from_bytes([9u8; 32]);
+        h.on_block("peer1", &block_id, false);
+        assert!(h.is_banned("peer1"));
+        drop(h);
+
+        let mut h2 = P2pHardening::new(Default::default());
+        h2.load_bans(&path).unwrap();
+        assert!(h2.is_banned("peer1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

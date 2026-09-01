@@ -56,7 +56,7 @@ fn genesis_state_reflects_the_coinbase() {
     let (ledger, _coin) = funded_ledger(&alice, 500);
     let genesis_state = ledger.state(&ledger.genesis()).unwrap();
     assert_eq!(genesis_state.balance(&alice.address()), 500);
-    assert_eq!(snapshot(&ledger.ledger_state()), snapshot(genesis_state));
+    assert_eq!(snapshot(&ledger.ledger_state()), snapshot(&genesis_state));
 }
 
 #[test]

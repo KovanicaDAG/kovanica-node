@@ -141,7 +141,7 @@ fn full_stake_validator_always_wins() {
         ledger.dag().block(&id).unwrap().work(),
         hybrid_no_pin().stake_nominal_work
     );
-    assert_eq!(ledger.stake_state(&id).unwrap(), &stake);
+    assert_eq!(&ledger.stake_state(&id).unwrap(), &stake);
 }
 
 #[test]
@@ -383,7 +383,7 @@ fn snapshot_roundtrip_preserves_staked_ids() {
         .clone();
     assert_eq!(
         restored.stake_state(&restored.dag().selected_tip()),
-        Some(&tip_before)
+        Some(tip_before)
     );
 }
 

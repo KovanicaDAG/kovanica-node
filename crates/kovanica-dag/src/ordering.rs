@@ -51,12 +51,19 @@ impl Dag {
     }
 
     /// The selected-parent chain from genesis up to the selected tip, in order.
+    ///
+    /// With block pruning enabled, chain blocks below the pruning point have
+    /// been evicted; the walk stops at the first evicted block, so the returned
+    /// chain runs from the pruning point (or genesis) up to the selected tip.
     pub fn selected_chain(&self) -> Vec<BlockId> {
         let mut chain = vec![self.selected_tip()];
         while let Some(parent) = self
             .ghostdag(chain.last().unwrap())
             .and_then(|g| g.selected_parent)
         {
+            if !self.nodes.contains_key(&parent) {
+                break; // evicted: the present chain starts at the pruning point
+            }
             chain.push(parent);
         }
         chain.reverse();
@@ -91,6 +98,15 @@ impl Dag {
             .filter(|b| !emitted.contains(b))
             .collect();
         tail.sort_by_key(|b| self.topo_key(b));
+        // Genesis is an ancestor of every block, so it must come first in any
+        // topological order. With block pruning the present selected chain
+        // starts at the pruning point, so genesis lands in the tail; hoist it
+        // to the front. For an unpruned DAG genesis is already the first spine
+        // block and never appears in the tail, so this is a no-op.
+        if let Some(pos) = tail.iter().position(|b| *b == self.genesis()) {
+            let g = tail.remove(pos);
+            order.insert(0, g);
+        }
         order.extend(tail);
 
         debug_assert_eq!(
@@ -111,7 +127,14 @@ impl Dag {
     fn mergeset_order(&self, block: &BlockId) -> Vec<BlockId> {
         let node = &self.nodes[block];
         match node.ghostdag.selected_parent {
-            Some(selected_parent) => self.mergeset_ordered(selected_parent, node.block.parents()),
+            Some(selected_parent) => {
+                if !self.nodes.contains_key(&selected_parent) {
+                    // Selected parent evicted (block pruning): the whole mergeset
+                    // is in past(selected_parent) ⊆ past(P), so it is evicted too.
+                    return Vec::new();
+                }
+                self.mergeset_ordered(selected_parent, node.block.parents())
+            }
             None => Vec::new(), // genesis merges nothing
         }
     }

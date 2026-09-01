@@ -13,5 +13,17 @@ blake3.workspace = true
 hex.workspace = true
 ed25519-dalek.workspace = true
 
+[dev-dependencies]
+criterion = "0.5"
+
+
+[[bench]]
+name = "ledger_apply"
+harness = false
+
+[[bench]]
+name = "filter"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"

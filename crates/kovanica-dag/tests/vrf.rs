@@ -70,7 +70,7 @@ fn vrf_leader_eligibility() {
     dag.set_vrf(100);
 
     // Compute VRF for a block building on genesis
-    let vrf_input = Dag::vrf_input(&[genesis]);
+    let vrf_input = dag.epoch_vrf_input(genesis);
     let eval = vrf_prove(&sk, &vrf_input);
 
     // Check if output is eligible
@@ -110,7 +110,7 @@ fn vrf_invalid_proof_rejected() {
     dag.set_vrf(u64::MAX);
 
     let (sk, pk) = vrf_keypair_from_seed(&[2u8; 32]);
-    let vrf_input = Dag::vrf_input(&[genesis]);
+    let vrf_input = dag.epoch_vrf_input(genesis);
     let eval = vrf_prove(&sk, &vrf_input);
 
     // Tamper with proof
@@ -155,7 +155,7 @@ fn vrf_wrong_public_key_rejected() {
     let (sk1, _pk1) = vrf_keypair_from_seed(&[3u8; 32]);
     let (_, pk2) = vrf_keypair_from_seed(&[4u8; 32]);
 
-    let vrf_input = Dag::vrf_input(&[genesis]);
+    let vrf_input = dag.epoch_vrf_input(genesis);
     let eval = vrf_prove(&sk1, &vrf_input);
 
     // Use proof from sk1 but pk2
@@ -188,6 +188,9 @@ fn vrf_genesis_exempt() {
 
 #[test]
 fn vrf_input_is_deterministic() {
+    // Legacy parent-tip input: deterministic for the same parent set.
+    // (B1's epoch beacon is the consensus input now; this documents the
+    // legacy scheme that kovanica-node/kovanica-state still use.)
     let (_, genesis) = new_dag(3);
     let parents = vec![genesis, genesis]; // duplicate for test
     let input1 = Dag::vrf_input(&parents);
@@ -197,6 +200,9 @@ fn vrf_input_is_deterministic() {
 
 #[test]
 fn vrf_different_parents_different_input() {
+    // Legacy parent-tip input: different parent sets give different inputs —
+    // exactly the grindable property B1's epoch beacon removes (see
+    // `beacon_ungrindable_same_selected_parent_same_input`).
     let (mut dag, genesis) = new_dag(3);
     let a = add(&mut dag, &[genesis], "a");
     let b = add(&mut dag, &[genesis], "b");
@@ -215,7 +221,7 @@ fn vrf_composes_with_pow() {
 
     // Block without PoW should fail
     let (sk, pk) = vrf_keypair_from_seed(&[5u8; 32]);
-    let vrf_input = Dag::vrf_input(&[genesis]);
+    let vrf_input = dag.epoch_vrf_input(genesis);
     let eval = vrf_prove(&sk, &vrf_input);
 
     let err = dag
@@ -245,7 +251,7 @@ fn vrf_randomness_beacon() {
     let (mut dag, genesis) = new_dag(3);
     dag.set_vrf(u64::MAX);
 
-    let vrf_input = Dag::vrf_input(&[genesis]);
+    let vrf_input = dag.epoch_vrf_input(genesis);
     let eval = vrf_prove(&sk, &vrf_input);
 
     // Verify the output can be verified by anyone
@@ -255,4 +261,137 @@ fn vrf_randomness_beacon() {
     // The output is unpredictable (without sk) but verifiable
     // This is the randomness beacon property
     assert_ne!(eval.output.as_bytes(), &[0u8; 32]);
+}
+
+#[test]
+fn beacon_is_pure_function_of_dag() {
+    // Two identical DAGs must derive identical beacons and VRF inputs — the
+    // beacon is a pure function of the DAG, so every node agrees.
+    let (mut dag1, genesis1) = new_dag(3);
+    let a1 = add(&mut dag1, &[genesis1], "a");
+    let b1 = add(&mut dag1, &[genesis1], "b");
+    let m1 = add(&mut dag1, &[a1, b1], "m");
+
+    let (mut dag2, genesis2) = new_dag(3);
+    let a2 = add(&mut dag2, &[genesis2], "a");
+    let b2 = add(&mut dag2, &[genesis2], "b");
+    let m2 = add(&mut dag2, &[a2, b2], "m");
+
+    // Same parent set -> same VRF input.
+    assert_eq!(
+        dag1.epoch_vrf_input_for_parents(&[a1, b1]),
+        dag2.epoch_vrf_input_for_parents(&[a2, b2])
+    );
+
+    // Same selected parent -> same beacon and VRF input.
+    let sp1 = dag1.ghostdag(&m1).unwrap().selected_parent.unwrap();
+    let sp2 = dag2.ghostdag(&m2).unwrap().selected_parent.unwrap();
+    assert_eq!(dag1.epoch_beacon(sp1), dag2.epoch_beacon(sp2));
+    assert_eq!(dag1.epoch_vrf_input(sp1), dag2.epoch_vrf_input(sp2));
+}
+
+#[test]
+fn beacon_ungrindable_same_selected_parent_same_input() {
+    // The core anti-grinding property: the VRF input depends only on the
+    // selected parent's epoch boundary, NOT on the block's parent list. A
+    // validator that changes which tips it references (while keeping the same
+    // selected parent) gets the same input — no extra VRF evaluations to search.
+    let (mut dag, genesis) = new_dag(3);
+    let a = add(&mut dag, &[genesis], "a");
+    let b = add(&mut dag, &[genesis], "b");
+    let m = add(&mut dag, &[a, b], "m"); // sp(m) = the heavier of a, b
+
+    let sp = dag.ghostdag(&m).unwrap().selected_parent.unwrap();
+    let other = if sp == a { b } else { a };
+
+    // Two different parent sets with the same selected parent:
+    let input1 = dag.epoch_vrf_input_for_parents(&[sp]);
+    let input2 = dag.epoch_vrf_input_for_parents(&[sp, other]);
+    assert_eq!(input1, input2);
+
+    // The beacon itself is likewise independent of the parent list.
+    assert_eq!(dag.epoch_beacon(sp), dag.epoch_beacon(sp));
+}
+
+#[test]
+fn beacon_changes_across_epochs() {
+    // With a small epoch length, the beacon is constant within an epoch and
+    // changes when the selected parent crosses an epoch boundary.
+    let (mut dag, genesis) = new_dag(3);
+
+    // Build a chain first (VRF enforcement would reject non-VRF blocks).
+    let mut prev = genesis;
+    let mut blocks = vec![genesis];
+    for i in 0..4 {
+        let id = add(&mut dag, &[prev], &format!("c{i}"));
+        blocks.push(id);
+        prev = id;
+    }
+    dag.set_vrf_with_epoch(u64::MAX, 2); // epoch length 2, no eligibility gate
+
+    // blue_score: genesis=0, c1=1, c2=2, c3=3, c4=4.
+    // beacon(sp) uses epoch = blue_score(sp) / 2:
+    //   sp=genesis -> epoch 0, sp=c1 -> epoch 0, sp=c2 -> epoch 1, sp=c3 -> epoch 1
+    let b0 = dag.epoch_beacon(blocks[0]);
+    let b1 = dag.epoch_beacon(blocks[1]);
+    let b2 = dag.epoch_beacon(blocks[2]);
+    let b3 = dag.epoch_beacon(blocks[3]);
+
+    // Same epoch -> same beacon (same boundary block).
+    assert_eq!(b0, b1);
+    assert_eq!(b2, b3);
+    // Different epochs -> different beacons.
+    assert_ne!(b0, b2);
+    assert_ne!(b1, b3);
+}
+
+#[test]
+fn beacon_input_differs_from_legacy_parent_tip_input() {
+    let (mut dag, genesis) = new_dag(3);
+    let a = add(&mut dag, &[genesis], "a");
+
+    let legacy = Dag::vrf_input(&[a]);
+    let beacon = dag.epoch_vrf_input_for_parents(&[a]);
+    assert_ne!(legacy, beacon);
+}
+
+#[test]
+fn vrf_leader_eligibility_uses_beacon_input() {
+    // End-to-end: a block whose VRF proof is over the epoch beacon input is
+    // admitted; the same proof over the legacy parent-tip input is rejected.
+    let (sk, pk) = vrf_keypair_from_seed(&[10u8; 32]);
+    let (mut dag, genesis) = new_dag(3);
+    dag.set_vrf(u64::MAX); // any valid output eligible
+
+    // Prove over the beacon input (what check_vrf verifies).
+    let beacon_input = dag.epoch_vrf_input(genesis);
+    let eval = vrf_prove(&sk, &beacon_input);
+    let id = add_with_vrf(
+        &mut dag,
+        &[genesis],
+        "beacon",
+        &pk,
+        &eval.proof,
+        &eval.output,
+    );
+    assert!(dag.ghostdag(&id).is_some());
+
+    // A proof over the legacy parent-tip input must be rejected (input mismatch).
+    let (mut dag2, genesis2) = new_dag(3);
+    dag2.set_vrf(u64::MAX);
+    let legacy_input = Dag::vrf_input(&[genesis2]);
+    let eval2 = vrf_prove(&sk, &legacy_input);
+    let err = dag2
+        .insert(Block::new_with_vrf(
+            vec![genesis2],
+            1,
+            0,
+            0,
+            pk,
+            eval2.proof,
+            eval2.output,
+            b"legacy input".to_vec(),
+        ))
+        .unwrap_err();
+    assert!(matches!(err, kovanica_dag::DagError::InvalidVrf { .. }));
 }

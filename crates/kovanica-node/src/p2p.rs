@@ -22,6 +22,7 @@
 //! and peer pruning/replenishment (`prune_unreachable_peers`).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 
 use kovanica_dag::{Block, BlockId};
 use kovanica_state::{encode_block_payload, Address, Transaction, TxId};
@@ -130,10 +131,11 @@ pub struct Mesh {
     events: Vec<GossipEvent>,
     /// P2P hardening: rate limiting, duplicate suppression, peer scoring.
     hardening: P2pHardening,
+    bans_path: Option<PathBuf>,
 }
 
 impl Mesh {
-    /// An empty mesh.
+    /// An empty mesh with no ban persistence.
     pub fn new() -> Self {
         Self {
             hardening: P2pHardening::new(Default::default()),
@@ -141,10 +143,39 @@ impl Mesh {
         }
     }
 
-    /// Create a mesh with custom P2P hardening config.
+    /// An empty mesh that loads and persists bans to `path`.
+    pub fn with_bans_path(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let mut hardening = P2pHardening::new(Default::default());
+        hardening.set_bans_path(&path);
+        let _ = hardening.load_bans(&path);
+        Self {
+            hardening,
+            bans_path: Some(path),
+            ..Default::default()
+        }
+    }
+
+    /// Create a mesh with custom P2P hardening config (no ban persistence).
     pub fn with_hardening_config(config: P2pHardeningConfig) -> Self {
         Self {
             hardening: P2pHardening::new(config),
+            ..Default::default()
+        }
+    }
+
+    /// Create a mesh with custom P2P hardening config and a ban-persistence path.
+    pub fn with_hardening_config_and_path(
+        config: P2pHardeningConfig,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        let path = path.into();
+        let mut hardening = P2pHardening::new(config);
+        hardening.set_bans_path(&path);
+        let _ = hardening.load_bans(&path);
+        Self {
+            hardening,
+            bans_path: Some(path),
             ..Default::default()
         }
     }
@@ -219,14 +250,26 @@ impl Mesh {
         self.hardening.all_peer_stats()
     }
 
-    /// Manually ban a peer.
+    /// Manually ban a peer. Persists if a ban path is configured.
     pub fn ban_peer(&mut self, peer: &str) {
         self.hardening.ban(peer);
     }
 
-    /// Manually unban a peer.
+    /// Manually unban a peer. Persists if a ban path is configured.
     pub fn unban_peer(&mut self, peer: &str) {
         self.hardening.unban(peer);
+    }
+
+    /// Load the persisted ban list from `path`.
+    pub fn load_bans<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<()> {
+        self.bans_path = Some(path.as_ref().to_path_buf());
+        self.hardening.set_bans_path(path.as_ref());
+        self.hardening.load_bans(path)
+    }
+
+    /// Persist the current ban list to the configured path.
+    pub fn save_bans(&self) -> std::io::Result<()> {
+        self.hardening.save_bans()
     }
 
     /// Directed overlay edge: `from` will announce blocks/txs/hellos to `to`.
@@ -857,5 +900,59 @@ impl Mesh {
             }
             self.enqueue(to, &nxt, Envelope::Tx { tx: tx.clone() });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_bans_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kovanica-mesh-bans-{}-{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("bans.json")
+    }
+
+    #[test]
+    fn mesh_ban_persistence_roundtrip() {
+        let path = temp_bans_path("roundtrip");
+        {
+            let mut mesh = Mesh::with_bans_path(&path);
+            mesh.ban_peer("alice");
+            assert!(mesh.is_peer_banned("alice"));
+        }
+        {
+            let mesh = Mesh::with_bans_path(&path);
+            assert!(mesh.is_peer_banned("alice"));
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn mesh_expired_ban_not_reloaded() {
+        let path = temp_bans_path("expiry");
+        {
+            let config = P2pHardeningConfig {
+                ban_expiry_ticks: 3,
+                ..Default::default()
+            };
+            let mut mesh = Mesh::with_hardening_config_and_path(config, &path);
+            mesh.ban_peer("alice");
+            for _ in 0..2 {
+                mesh.tick();
+            }
+            assert!(mesh.is_peer_banned("alice"));
+            mesh.tick();
+            assert!(!mesh.is_peer_banned("alice"));
+        }
+        {
+            let mesh = Mesh::with_bans_path(&path);
+            assert!(!mesh.is_peer_banned("alice"));
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

@@ -25,6 +25,7 @@
 //! ```
 
 use core::fmt;
+use std::collections::HashSet;
 
 use crate::block::{Block, BlockId};
 use crate::dag::{Dag, DagError, KParam};
@@ -123,10 +124,41 @@ impl Dag {
             }
             let mut iter = blocks_with_ids.into_iter();
             let (genesis, _) = iter.next().ok_or(SnapshotError::UnexpectedEof)?;
+            let genesis_id = genesis.id();
             let mut dag = Dag::new(k, genesis);
+            // Stub blocks reconstructed for evicted parents (block pruning).
+            let mut stubs: Vec<BlockId> = Vec::new();
             for (block, stored_id) in iter {
+                // A present block may reference an evicted parent (a block
+                // pruned by block pruning). The evicted block is not in the
+                // snapshot, so reconstruct it as a pruned stub (a child of
+                // genesis) and insert it first; the stub is evicted again once
+                // the replay completes, restoring the pruned DAG's present set.
+                for parent in block.parents() {
+                    if !dag.nodes.contains_key(parent) {
+                        let stub = Block::new_pruned_with_vrf(
+                            vec![genesis_id],
+                            0,
+                            0,
+                            0,
+                            None,
+                            None,
+                            None,
+                            *parent,
+                        );
+                        dag.insert_with_id(stub, Some(*parent))
+                            .map_err(SnapshotError::Rebuild)?;
+                        stubs.push(*parent);
+                    }
+                }
                 dag.insert_with_id(block, Some(stored_id))
                     .map_err(SnapshotError::Rebuild)?;
+            }
+            // Evict the reconstructed stubs, restoring the pruned DAG's present
+            // set (the stubs' ghostdag data was only a placeholder).
+            if !stubs.is_empty() {
+                let evicted: HashSet<BlockId> = stubs.iter().copied().collect();
+                dag.remove_blocks(&evicted);
             }
             Ok(dag)
         } else {

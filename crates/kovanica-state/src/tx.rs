@@ -307,6 +307,34 @@ impl Transaction {
         self.inputs.is_empty()
     }
 
+    /// Compute the transaction fee from the current UTXO set.
+    ///
+    /// Returns `Some(input_sum - output_sum)` for a non-coinbase transaction
+    /// when every input outpoint exists in `utxo`. Returns `Some(0)` for a
+    /// coinbase. Returns `None` if any spent outpoint is missing from `utxo`.
+    pub fn fee_with_utxo(&self, utxo: &crate::UtxoSet) -> Option<u64> {
+        if self.is_coinbase() {
+            return Some(0);
+        }
+        let mut input_sum = 0u64;
+        for input in &self.inputs {
+            let out = utxo.get(&input.outpoint)?;
+            input_sum = input_sum.checked_add(out.value)?;
+        }
+        let output_sum: u64 = self.outputs.iter().map(|o| o.value).sum();
+        Some(input_sum.saturating_sub(output_sum))
+    }
+
+    /// Fee rate in atoms per byte, or `None` if the fee cannot be computed.
+    pub fn fee_rate_with_utxo(&self, utxo: &crate::UtxoSet) -> Option<u64> {
+        let fee = self.fee_with_utxo(utxo)?;
+        let size = self.encode().len();
+        if size == 0 {
+            return Some(0);
+        }
+        Some(fee / size as u64)
+    }
+
     /// Serialise into `buf`.
     /// - With `with_signatures = true`: includes dynamic witness items (used for `id()` and block payload).
     /// - With `with_signatures = false`: completely omits witness vectors (used for `sighash()`).
@@ -350,6 +378,20 @@ impl Transaction {
     /// The transaction id: BLAKE3 over the full (signed) encoding.
     pub fn id(&self) -> TxId {
         TxId(*blake3::hash(&self.encode()).as_bytes())
+    }
+
+    /// Decode a single transaction from its canonical byte encoding.
+    ///
+    /// This is the inverse of [`Transaction::encode`] and is used by the
+    /// mobile FFI to round-trip a transaction "blob" (e.g. a partially-signed
+    /// multisig spend) without wrapping it in a block payload.
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let tx = reader.read_transaction()?;
+        if reader.remaining() != 0 {
+            return Err(DecodeError::TrailingBytes);
+        }
+        Ok(tx)
     }
 }
 

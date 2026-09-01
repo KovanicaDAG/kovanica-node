@@ -281,7 +281,10 @@ pub(crate) fn encode_record(record: &BlockRecord, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&payload);
 }
 
-fn decode_records(bytes: &[u8]) -> Result<Vec<BlockRecord>, NetError> {
+/// Decode a framed records dump — the exact inverse of [`encode_records`].
+/// Public so HTTP endpoints (the explorer's staked-block uplink) can accept
+/// the gossip wire format directly.
+pub fn decode_records(bytes: &[u8]) -> Result<Vec<BlockRecord>, NetError> {
     let mut r = Cursor { buf: bytes, pos: 0 };
     // Each record is at least 8 (parents len) + 16 (work) + 8 (timestamp) +
     // 8 (nonce) + 1 (vrf flag) + 8 (payload len) = 49 bytes.
