@@ -11,7 +11,7 @@ plugins {
 
 android {
     namespace = "uniffi.kovanica"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24          // matches --platform 24 in build-android.sh
