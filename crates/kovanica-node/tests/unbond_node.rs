@@ -12,6 +12,7 @@ fn hybrid_cfg() -> HybridConfig {
         rate_num: 1,
         rate_den: 1,
         stake_nominal_work: 1,
+        use_epoch_beacon: true,
         retarget: None,
     }
 }

@@ -1352,8 +1352,11 @@ impl Node {
     }
 
     /// Attempt a staked-VRF block on `parents` at `timestamp_ms` carrying
-    /// `block_txs`. Signs the tip input with this node's validator key and
-    /// submits via [`Ledger::insert_with_vrf`]. Returns `Ok(None)` when the
+    /// `block_txs`. Signs the VRF input with this node's validator key and
+    /// submits via [`Ledger::insert_with_vrf`]. The input is the epoch
+    /// randomness beacon of the selected parent when
+    /// [`HybridConfig::use_epoch_beacon`] is `true` (the default), or the
+    /// legacy parent-tip hash when `false`. Returns `Ok(None)` when the
     /// sortition draw missed (not eligible / already produced for this tip) —
     /// the caller falls back to PoW. Any other insert error propagates.
     fn try_insert_staked(
@@ -1366,7 +1369,16 @@ impl Node {
             .validator_sk
             .as_ref()
             .expect("caller checks validator_sk");
-        let eval = vrf_prove(sk, &Dag::vrf_input(&parents));
+        let ledger_ref = self.ledger.as_ref().expect("checked above");
+        let use_beacon = ledger_ref
+            .hybrid_config()
+            .map_or(true, |cfg| cfg.use_epoch_beacon);
+        let input = if use_beacon {
+            ledger_ref.dag().epoch_vrf_input_for_parents(&parents)
+        } else {
+            Dag::vrf_input(&parents)
+        };
+        let eval = vrf_prove(sk, &input);
         let sv = StakedVrf {
             vrf_pk: *sk.verifying_key().as_bytes(),
             proof: eval.proof,

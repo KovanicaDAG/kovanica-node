@@ -73,6 +73,7 @@ fn hybrid_log_preserves_staked_block_id() {
         rate_num: 1,
         rate_den: 1,
         stake_nominal_work: 1,
+        use_epoch_beacon: true,
         retarget: None,
     };
     let founder = KeyPair::from_u64(1);

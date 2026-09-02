@@ -94,8 +94,16 @@ impl HalvingSchedule {
 pub const DEFAULT_HALVING_ERA: u64 = 500_000;
 
 /// The VRF bundle a bonded validator attaches to a staked block: the public key
-/// the bonded stake is registered under, the ECVRF proof over the block's
-/// parent-tip input, and the resulting output (the sortition draw).
+/// the bonded stake is registered under, the ECVRF proof over the VRF input,
+/// and the resulting output (the sortition draw).
+///
+/// The VRF input is the **epoch randomness beacon** of the block's selected
+/// parent by default ([`Dag::epoch_vrf_input_for_parents`][ep]). Set
+/// [`HybridConfig::use_epoch_beacon`] to `false` only when replaying legacy
+/// snapshots produced before the B1 epoch-beacon activation, which reverts
+/// the input to the pre-B1 parent-tip hash ([`Dag::vrf_input`]).
+///
+/// [ep]: kovanica_dag::Dag::epoch_vrf_input_for_parents
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StakedVrf {
     /// The validator's VRF public key (32 bytes, Ed25519/Ristretto255).
@@ -110,7 +118,7 @@ pub struct StakedVrf {
 /// (hash target met, work pinned to the retargeting policy's implication) or by
 /// **stake-weighted VRF sortition** ([`StakedVrf`], eligibility proportional to
 /// bonded stake). See [`Ledger::set_hybrid`] and [`Ledger::insert_with_vrf`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HybridConfig {
     /// Sortition rate numerator: a validator holding the *whole* bonded supply
     /// wins with probability ≈ `rate_num/rate_den` per block. `1/1` = every
@@ -126,17 +134,23 @@ pub struct HybridConfig {
     /// (PoW blocks then only need their hash to meet their claimed target —
     /// useful for tests; production should set this).
     pub retarget: Option<Retarget>,
+    /// Whether to use the epoch randomness beacon as the staked-VRF input.
+    /// Default `true` for all new blocks. Set `false` only to replay legacy
+    /// snapshots produced before the B1 epoch-beacon activation.
+    pub use_epoch_beacon: bool,
 }
 
 impl Default for HybridConfig {
     /// One expected win per block per whole-stake at nominal work 1, with the
-    /// default retargeting policy (1 s target interval, 20-block window).
+    /// default retargeting policy (1 s target interval, 20-block window) and
+    /// epoch-beacon VRF input enabled.
     fn default() -> Self {
         Self {
             rate_num: 1,
             rate_den: 1,
             stake_nominal_work: 1,
             retarget: Some(Retarget::default()),
+            use_epoch_beacon: true,
         }
     }
 }
@@ -1457,7 +1471,10 @@ impl Ledger {
     /// blocks never out-compete mined blocks in blue-work accumulation, no
     /// matter how a validator grinds parent combinations. Admission requires:
     ///
-    /// 1. a valid ECVRF proof over [`Dag::vrf_input(parents)`](kovanica_dag::Dag::vrf_input);
+    /// 1. a valid ECVRF proof over the epoch randomness beacon of the block's
+    ///    selected parent ([`Dag::epoch_vrf_input_for_parents`](kovanica_dag::Dag::epoch_vrf_input_for_parents)),
+    ///    or the legacy parent-tip input ([`Dag::vrf_input`](kovanica_dag::Dag::vrf_input))
+    ///    when [`HybridConfig::use_epoch_beacon`] is `false`;
     /// 2. eligibility — `output < threshold(stake_of(pk), total_stake, rate)`
     ///    evaluated against the **selected parent's** stake view (pre-state, so
     ///    bonds inside the block itself do not count for it);
@@ -1680,7 +1697,11 @@ impl Ledger {
                 // stake-proportional threshold under the pre-state registry.
                 let key = kovanica_dag::VrfPublicKey::from_bytes(&s.vrf_pk)
                     .map_err(|_| LedgerInsertError::BadStakeProof { vrf_pk: s.vrf_pk })?;
-                let input = Dag::vrf_input(block.parents());
+                let input = if cfg.use_epoch_beacon {
+                    self.dag.epoch_vrf_input_for_parents(block.parents())
+                } else {
+                    Dag::vrf_input(block.parents())
+                };
                 let verified = kovanica_dag::vrf::vrf_verify(&key, &input, &s.proof)
                     .ok()
                     .filter(|out| *out == s.output);

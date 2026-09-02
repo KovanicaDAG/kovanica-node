@@ -303,6 +303,7 @@ impl LightNode {
             rate_num,
             rate_den,
             stake_nominal_work: nominal_work.as_u128(),
+            use_epoch_beacon: true,
             retarget: retarget.then(kovanica_dag::Retarget::default),
         };
         self.lock().enable_hybrid(cfg)?;
