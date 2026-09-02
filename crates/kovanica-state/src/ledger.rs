@@ -31,16 +31,38 @@
 //! applied last. Because the coinbase is applied last, its outputs are not
 //! spendable within the same block (a light-touch maturity rule).
 //!
-//! ## Deliberate first-slice simplifications
+//! ## Undo-log / delta semantics
 //!
-//! * `subsidy` is a single per-block constant passed in, not a halving schedule.
-//! * No coinbase maturity beyond "not in the same block"; no fee floor; no tx
-//!   size/weight limits.
-//! * [`apply_dag`] applies against a fresh state each call (the batch view). The
-//!   incremental [`Ledger`] follows the selected tip, so re-orgs above the
-//!   finality point are implicit (no revert), and [`Ledger::with_finality`] prunes
-//!   the stored state of final blocks and rejects blocks built on final history.
-//!   Pruning is of the per-block *state* only; the DAG itself is still append-only.
+//! The incremental [`Ledger`] does not store a full UTXO set per block. It keeps
+//! a **single materialised state at the selected tip** plus compact per-block
+//! **undo deltas** along the selected-parent tree:
+//!
+//! * `deltas[&B]` records the net UTXO change from `selected_parent(B)`'s view
+//!   to `B`'s own view: outputs created by `B` (or its mergeset in `B`'s view)
+//!   and outputs spent in that transition.
+//! * `stake_deltas[&B]` records the analogous net change in the stake registry.
+//!
+//! Reconstructing a non-final block's view walks its selected-parent chain down
+//! to the deepest block whose selected parent is final (or genesis), applying
+//! each delta in order. Because final blocks' deltas are **folded into their
+//! children** before they are dropped, a child's delta is always relative to the
+//! deepest non-final ancestor in its chain. Folding is compositional: applying
+//! the folded delta reproduces the same state as applying the original sequence.
+//!
+//! Pruning is triggered automatically after every block insertion. It is
+//! **idempotent**: once the current finality threshold has been processed, a
+//! second call at the same threshold removes no additional deltas and changes no
+//! reconstructable state. The threshold only advances when the selected tip's
+//! blue score grows, so a folded delta is never lost while it is still needed.
+//!
+//! ## Finality
+//!
+//! A `Ledger` built with [`Ledger::with_finality`] treats blocks more than
+//! `finality_depth` blue score below the selected tip as **final**: their
+//! per-block state is pruned and new blocks may not build on them. Re-orgs above
+//! the finality point are implicit — [`Ledger::ledger_state`] follows the current
+//! selected tip — and pruning affects only the per-block *state*, not the DAG
+//! itself, which remains append-only.
 
 use std::collections::{HashMap, HashSet};
 
@@ -1022,13 +1044,15 @@ fn compose_stake_delta(first: &StakeDelta, second: &StakeDelta) -> StakeDelta {
     StakeDelta { frozen, unfrozen }
 }
 
-/// A DAG together with the **per-block UTXO state** each block induces.
+/// A DAG together with the **per-block UTXO and stake view** each block induces.
 ///
 /// [`apply_dag`] is the batch view: it (re)linearizes a finished DAG and folds
 /// every transaction from scratch. A `Ledger` is the *incremental* view. It owns
-/// a [`Dag`] and, for every block `B`, stores the UTXO set of `B`'s own view —
-/// the state after applying, in the recursive GHOSTDAG order, every transaction
-/// in `past(B) ∪ {B}`. That state is built cheaply from `B`'s selected parent:
+/// a [`Dag`] and, for every non-final block `B`, stores a compact **delta**
+/// describing the net change from `selected_parent(B)`'s view to `B`'s own view
+/// — the state after applying, in the recursive GHOSTDAG order, every
+/// transaction in `past(B) ∪ {B}`. That state is built cheaply from `B`'s
+/// selected parent:
 ///
 /// ```text
 /// state(B) = apply( state(selected_parent(B)),
@@ -1047,13 +1071,19 @@ fn compose_stake_delta(first: &StakeDelta, second: &StakeDelta) -> StakeDelta {
 /// The structural [`TxStructureValidator`] is also installed on the underlying
 /// DAG, so malformed blocks are rejected even if the DAG is used directly.
 ///
-/// State is kept as a **single UTXO set at the selected tip** plus compact
-/// per-block undo deltas (Bitcoin/Kaspa UTXO + undo-log style): `deltas[&b]`
-/// records the net change from `b`'s selected parent's view to `b`'s own view,
-/// so any non-final block's state can be reconstructed on demand by walking its
+/// State is kept as a **single materialised UTXO set and stake registry at the
+/// selected tip** plus compact per-block undo deltas
+/// (Bitcoin/Kaspa UTXO + undo-log style): `deltas[&b]` records the net UTXO
+/// change from `b`'s selected parent's view to `b`'s own view, and
+/// `stake_deltas[&b]` records the analogous stake-registry change. Any
+/// non-final block's view can be reconstructed on demand by walking its
 /// selected-parent chain and applying deltas. Final blocks' deltas are folded
-/// into their children and dropped at prune time, bounding memory to
-/// `O(U + n·d)` (one tip state plus per-block deltas) instead of `O(n·U)`.
+/// into their children before being dropped, so a child's delta is always
+/// relative to the deepest non-final ancestor in its chain. Folding is
+/// compositional and pruning is idempotent: applying the folded delta reproduces
+/// the same view as the original sequence, and calling [`Self::prune`] twice at
+/// the same finality threshold removes no additional state. Memory is bounded to
+/// `O(U + S + n·d)` (one tip state plus per-block deltas) instead of `O(n·U)`.
 ///
 /// ## Finality and pruning
 ///
@@ -2817,5 +2847,98 @@ mod tests {
         ledger
             .insert(vec![b_unbond], 1, 301, 0, &[spend])
             .expect("unbonded value is ordinary");
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+    use crate::keys::KeyPair;
+    use crate::tx::{OutPoint, Transaction, TxOutput};
+
+    #[test]
+    fn prune_is_idempotent_and_preserves_reconstruction() {
+        // Build a chain past the finality boundary with non-trivial deltas,
+        // then call prune repeatedly. Non-final block states must not change,
+        // and a second prune must be a no-op.
+        let alice = KeyPair::from_u64(1);
+        let bob = KeyPair::from_u64(2);
+        let genesis_cb =
+            Transaction::coinbase(vec![TxOutput::new(1_000, alice.address())], b"g".to_vec());
+        let genesis_cb_id = genesis_cb.id();
+        let mut ledger =
+            Ledger::with_finality(3, HalvingSchedule::new(1_000, 1_000), &[genesis_cb], 5).unwrap();
+
+        // Spend the genesis coin so deltas carry real UTXO changes.
+        let coin = OutPoint::new(genesis_cb_id, 0);
+        let spend = Transaction::signed(
+            &[(coin, &alice)],
+            vec![TxOutput::new(500, bob.address())],
+            Vec::new(),
+        );
+        let mut tip = ledger
+            .insert(vec![ledger.genesis()], 1, 1, 0, &[spend])
+            .unwrap();
+
+        // Extend well past finality so some deltas are already folded.
+        for h in 2..20 {
+            tip = ledger.insert(vec![tip], 1, h, 0, &[]).unwrap();
+        }
+
+        assert!(ledger.finality_score() > 0, "finality must be active");
+
+        // Snapshot every non-final block's reconstructed state.
+        let before: Vec<(BlockId, UtxoSet, StakeState)> = ledger
+            .dag()
+            .linearize()
+            .into_iter()
+            .filter(|id| ledger.state(id).is_some())
+            .map(|id| {
+                (
+                    id,
+                    ledger.state(&id).unwrap(),
+                    ledger.stake_state(&id).unwrap(),
+                )
+            })
+            .collect();
+        assert!(!before.is_empty(), "non-final blocks must exist");
+
+        // First explicit prune.
+        ledger.prune();
+        for (id, ref_utxo, ref_stake) in &before {
+            assert_eq!(
+                ledger.state(id).as_ref(),
+                Some(ref_utxo),
+                "first prune changed UTXO view of {id}"
+            );
+            assert_eq!(
+                ledger.stake_state(id).as_ref(),
+                Some(ref_stake),
+                "first prune changed stake view of {id}"
+            );
+        }
+
+        // Second prune must be idempotent: the threshold has not advanced,
+        // so no new deltas are eligible for folding.
+        ledger.prune();
+        for (id, ref_utxo, ref_stake) in &before {
+            assert_eq!(
+                ledger.state(id).as_ref(),
+                Some(ref_utxo),
+                "second prune changed UTXO view of {id}"
+            );
+            assert_eq!(
+                ledger.stake_state(id).as_ref(),
+                Some(ref_stake),
+                "second prune changed stake view of {id}"
+            );
+        }
+
+        // The ledger must keep accepting blocks after redundant pruning.
+        let next = ledger.insert(vec![tip], 1, 20, 0, &[]).unwrap();
+        assert!(
+            ledger.state(&next).is_some(),
+            "new block above finality reconstructs"
+        );
     }
 }
