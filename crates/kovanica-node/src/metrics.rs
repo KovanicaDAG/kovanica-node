@@ -167,6 +167,24 @@ pub fn record_block_produced(height: u64, blue_score: u64, duration: Duration) {
     histogram!(names::BLOCK_PRODUCTION_DURATION_SECONDS).record(duration.as_secs_f64());
 }
 
+/// Surface the passive chain head on any block insert (produce *or* receive).
+///
+/// Non-mining validation seeds never hit the production path, so
+/// [`record_block_produced`] never runs for them and the height/blue-score
+/// gauges stay unregistered (metrics-exporter-prometheus only renders
+/// observed series). This sets the two gauges on every insert — including
+/// blocks received from peers on a `KOVANICA_MINE=0` seed — so soak
+/// monitoring sees chain progress without counting these as produced.
+/// [`names::BLOCKS_PRODUCED_TOTAL`] is intentionally not touched here.
+///
+/// Both values are passed as the block's *blue score*, matching
+/// [`record_block_produced`]'s use of blue score for `BLOCK_HEIGHT`, so the
+/// produced and observed series stay comparable (see `Node::note_inserted`).
+pub fn record_block_observed(height: u64, blue_score: u64) {
+    gauge!(names::BLOCK_HEIGHT).set(height as f64);
+    gauge!(names::DAG_BLUE_SCORE).set(blue_score as f64);
+}
+
 /// Record a re-org of `depth` blocks.
 pub fn record_reorg(depth: u64) {
     counter!(names::DAG_REORG_DEPTH).increment(depth);
@@ -444,5 +462,25 @@ mod tests {
             body.contains(names::BLOCK_PRODUCTION_DURATION_SECONDS),
             "TimerGuard did not record its histogram:\n{body}"
         );
+    }
+
+    #[test]
+    fn passive_observe_surfaces_head_without_producing() {
+        // A non-mining seed calls record_block_observed (via note_inserted) for
+        // blocks received from peers. It must surface the head/blue-score
+        // gauges. We assert presence (like the sibling metrics tests) rather
+        // than an exact value: the recorder is a shared process-global, so
+        // other unit tests may overwrite the gauge value concurrently.
+        init_metrics("127.0.0.1:39092").expect("metrics init");
+
+        record_block_observed(500, 499);
+
+        let body = render_prometheus();
+        for series in [names::BLOCK_HEIGHT, names::DAG_BLUE_SCORE] {
+            assert!(
+                body.contains(series),
+                "passive observe did not surface {series} in:\n{body}"
+            );
+        }
     }
 }

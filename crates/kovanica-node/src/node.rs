@@ -24,7 +24,8 @@ use kovanica_state::{
 
 use crate::mempool_v2::{MempoolConfig, MempoolV2};
 use crate::metrics::{
-    record_block_produced, record_mempool_evicted, record_mempool_promoted, set_mempool_counts,
+    record_block_observed, record_block_produced, record_mempool_evicted, record_mempool_promoted,
+    set_mempool_counts,
 };
 
 /// How far ahead of the local wall clock a received block's timestamp may sit
@@ -2248,8 +2249,28 @@ impl Node {
     }
 
     /// Record a successfully inserted block for the next
-    /// [`persist_incremental`](Self::persist_incremental) append.
+    /// [`persist_incremental`](Self::persist_incremental) append, and surface
+    /// the passive chain head on every insert (produce *and* receive). A
+    /// non-mining seed (`KOVANICA_MINE=0`) only ever inserts blocks received
+    /// from peers, so without this the height/blue-score gauges would never be
+    /// observed by the metrics recorder — the soak-monitoring gap this fixes.
     fn note_inserted(&mut self, id: BlockId) {
+        // Both gauges intentionally report the block's *blue score* (the size
+        // of its blue set), not a linear chain height: this is the same
+        // convention `note_block_produced` uses for `BLOCK_HEIGHT`, so the
+        // produced and observed series stay directly comparable under a soak.
+        let score = self
+            .ledger
+            .as_ref()
+            .and_then(|l| l.dag().ghostdag(&id))
+            .map(|g| g.blue_score)
+            .unwrap_or(0);
+        record_block_observed(score, score);
+        set_mempool_counts(
+            self.mempool.len_pending(),
+            self.mempool.len_orphans(),
+            self.mempool.total_bytes(),
+        );
         self.pending.push(id);
     }
 
