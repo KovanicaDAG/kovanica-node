@@ -213,3 +213,42 @@ fn mesh_sync_headers_first_bidirectional_merges_divergent_chains() {
     );
     assert!((s2 == 400 && s3 == 0) || (s2 == 0 && s3 == 300));
 }
+
+#[test]
+fn headers_first_sync_large_divergence_over_tcp() {
+    // A large divergence (200+ blocks) makes the peer's ID-sorted inventory
+    // essentially guaranteed to be non-topological: a block whose parent has a
+    // larger id would arrive before its parent and fail with MissingParent.
+    // The server must serve headers (and the client must apply bodies) in
+    // topological order for the sync to converge.
+    use std::time::Duration;
+
+    let mut server = genesis_node();
+    server.set_now_ms(1_000);
+    for i in 0..220 {
+        server.set_now_ms(1_000 + i * 1_000);
+        server.send(1, 1, 2).unwrap();
+    }
+    let server_tip = server.selected_tip().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
+    // Serve headers-first on a listener thread (Node is Send).
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        net::serve_headers_first(&mut stream, &mut server, Duration::from_secs(10)).unwrap();
+    });
+
+    let mut client = genesis_node();
+    client.set_now_ms(1_000);
+    let stats = net::sync_headers_first(&addr, &mut client, Duration::from_secs(10)).unwrap();
+    handle.join().unwrap();
+
+    assert!(
+        stats.bodies_applied > 0,
+        "expected bodies to apply, got {stats:?}"
+    );
+    assert_eq!(stats.errors, 0, "unexpected errors: {stats:?}");
+    assert_eq!(client.selected_tip().unwrap(), server_tip);
+}

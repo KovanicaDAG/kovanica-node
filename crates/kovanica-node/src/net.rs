@@ -638,6 +638,56 @@ pub struct SyncStats {
     pub errors: usize,
 }
 
+/// Topologically sort headers (parents before children) using each header's
+/// `parents` field, so bodies can be requested and applied in an order where a
+/// block's parents are always already present. The set is bounded by
+/// [`MAX_HEADERS`], so a simple Kahn's algorithm suffices. Headers whose
+/// parents are not in the set are treated as roots (their parents are either
+/// already present on the client or genesis). Deterministic: ties break on
+/// `BlockId` byte order.
+fn topo_sort_headers(headers: Vec<BlockHeader>) -> Vec<BlockHeader> {
+    let ids: std::collections::HashSet<BlockId> = headers.iter().map(|h| h.id).collect();
+    let mut by_id: std::collections::HashMap<BlockId, BlockHeader> =
+        headers.into_iter().map(|h| (h.id, h)).collect();
+    let mut children: std::collections::HashMap<BlockId, Vec<BlockId>> = Default::default();
+    let mut indegree: std::collections::HashMap<BlockId, usize> = Default::default();
+    for (id, h) in &by_id {
+        indegree.entry(*id).or_insert(0);
+        for p in &h.parents {
+            if ids.contains(p) {
+                children.entry(*p).or_default().push(*id);
+                *indegree.entry(*id).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut ready: Vec<BlockId> = indegree
+        .iter()
+        .filter(|(_, d)| **d == 0)
+        .map(|(id, _)| *id)
+        .collect();
+    ready.sort_unstable();
+    let mut out = Vec::with_capacity(by_id.len());
+    while let Some(id) = ready.pop() {
+        let header = by_id.remove(&id).expect("present");
+        out.push(header);
+        if let Some(kids) = children.get(&id) {
+            for kid in kids {
+                let d = indegree.get_mut(kid).expect("present");
+                *d -= 1;
+                if *d == 0 {
+                    ready.push(*kid);
+                }
+            }
+        }
+    }
+    // A cycle cannot occur in a real DAG; if one somehow slips through, append
+    // the leftovers in id order so the caller still sees every header.
+    let mut rest: Vec<BlockHeader> = by_id.into_values().collect();
+    rest.sort_by_key(|h| h.id);
+    out.extend(rest);
+    out
+}
+
 /// Client-side headers-first sync against a peer at `addr`.
 /// Steps:
 /// 1. Exchange inventories (our inventory, peer's inventory).
@@ -689,6 +739,14 @@ pub fn sync_headers_first(
                 let headers_bytes = read_frame(&mut stream, MAX_FRAME_BYTES)?;
                 let headers = decode_headers(&headers_bytes)?;
 
+                // Topologically sort the headers (parents before children) before
+                // requesting bodies: a block can only be applied once its parents
+                // are present. Old servers may return headers in ID-sorted order,
+                // which is NOT topological for a DAG — a block whose parent has a
+                // larger id would arrive before its parent and fail with
+                // MissingParent. The header set is bounded by MAX_HEADERS.
+                let headers = topo_sort_headers(headers);
+
                 // Step 5: request and apply bodies in chunks
                 let mut stats = SyncStats {
                     headers_received: headers.len(),
@@ -702,8 +760,16 @@ pub fn sync_headers_first(
                     let bodies_bytes = read_frame(&mut stream, MAX_FRAME_BYTES)?;
                     let bodies = decode_bodies(&bodies_bytes)?;
                     stats.bodies_received += bodies.len();
-                    for (i, body) in bodies.into_iter().enumerate() {
-                        let header = &chunk[i];
+                    // Match each body to its header by id, not by index: the
+                    // server may omit pruned blocks, so the body count can be
+                    // less than the request count.
+                    let by_id: std::collections::HashMap<BlockId, &BlockHeader> =
+                        chunk.iter().map(|h| (h.id, h)).collect();
+                    for body in bodies {
+                        let Some(header) = by_id.get(&body.id()) else {
+                            stats.errors += 1;
+                            continue;
+                        };
                         // Verify body matches header before applying
                         if Node::verify_header_body(header, &body).is_none() {
                             stats.errors += 1;
@@ -748,8 +814,19 @@ pub fn serve_headers_first(
     let get_headers_bytes = read_frame(stream, MAX_FRAME_BYTES)?;
     let want_ids = decode_getheaders(&get_headers_bytes)?;
 
-    // Step 3: respond with headers for those ids (in the order client sent — client knows topo order)
-    let headers = node.headers_for(&want_ids);
+    // Step 3: respond with headers for those ids, in topological order
+    // (parents before children). The client's request is ID-sorted, which is
+    // NOT topological for a DAG: a block whose parent has a larger id would
+    // arrive before its parent and fail with MissingParent. Filtering
+    // `export_headers()` (already topological) by the wanted set preserves the
+    // order the client needs to apply bodies in. Backward compatible — old
+    // clients apply in received order and benefit too.
+    let want_set: std::collections::HashSet<BlockId> = want_ids.iter().copied().collect();
+    let headers: Vec<BlockHeader> = node
+        .export_headers()
+        .into_iter()
+        .filter(|h| want_set.contains(&h.id))
+        .collect();
     let headers_frame = encode_headers(&headers);
     write_frame(stream, &headers_frame)?;
 

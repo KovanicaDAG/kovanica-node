@@ -192,6 +192,50 @@ pub struct BlockRecord {
     pub txs: Vec<Transaction>,
 }
 
+impl BlockRecord {
+    /// The block id this record represents — the BLAKE3 hash of the canonical
+    /// encoding, exactly as [`Node::receive_block`] computes it when it
+    /// reconstructs the block (parents, work, timestamp, nonce, VRF fields,
+    /// and the encoded-tx payload). Used to match a body to its header by id
+    /// rather than by position, since a server may omit pruned blocks.
+    pub fn id(&self) -> BlockId {
+        let payload = encode_block_payload(&self.txs);
+        let block = match &self.vrf {
+            Some(sv) => {
+                // A malformed VRF public key cannot be reconstructed; fall back
+                // to the non-VRF id (header verification rejects it anyway).
+                match VrfPublicKey::from_bytes(&sv.vrf_pk) {
+                    Ok(pk) => Block::new_with_vrf(
+                        self.parents.clone(),
+                        self.work,
+                        self.timestamp_ms,
+                        self.nonce,
+                        pk,
+                        sv.proof.clone(),
+                        sv.output,
+                        payload,
+                    ),
+                    Err(_) => Block::new(
+                        self.parents.clone(),
+                        self.work,
+                        self.timestamp_ms,
+                        self.nonce,
+                        payload,
+                    ),
+                }
+            }
+            None => Block::new(
+                self.parents.clone(),
+                self.work,
+                self.timestamp_ms,
+                self.nonce,
+                payload,
+            ),
+        };
+        block.id()
+    }
+}
+
 /// Direction of a [`WalletEvent`] relative to the queried address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalletDirection {

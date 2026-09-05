@@ -435,6 +435,25 @@ impl Explorer {
                         );
                         answered.insert(addr.clone());
                     }
+                    Ok(stats) if stats.errors > 0 => {
+                        // Reachable but bodies failed to apply (e.g. ordering /
+                        // missing parents). Log it so the failure is visible, and
+                        // fall back to the full-dump pull.
+                        eprintln!(
+                            "kovanica p2p headers-first sync from {addr}: {} headers, {} applied, {} errors — falling back to full dump",
+                            stats.headers_received, stats.bodies_applied, stats.errors
+                        );
+                        match pull_blocks_timeout(&addr, n, timeout) {
+                            Ok(k) if k > 0 => {
+                                eprintln!(
+                                    "kovanica p2p pulled {k} records from {addr} (full dump)"
+                                );
+                                answered.insert(addr.clone());
+                            }
+                            Ok(_) => {}
+                            Err(_) => {}
+                        }
+                    }
                     Ok(_) => {
                         // Reachable, just nothing new to apply.
                         answered.insert(addr.clone());
