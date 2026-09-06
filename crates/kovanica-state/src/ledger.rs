@@ -80,6 +80,9 @@ use crate::TxOutput;
 /// Default blue-score threshold for RFC-001 multisig activation.
 pub const MULTISIG_ACTIVATION_SCORE: u64 = 0;
 
+/// Default blue-score threshold for RFC-002 native token activation.
+pub const NATIVE_TOKEN_ACTIVATION_SCORE: u64 = 0;
+
 /// Halving schedule for block subsidy.
 ///
 /// The subsidy starts at `genesis_subsidy` and halves every `halving_era` blocks
@@ -240,6 +243,27 @@ pub enum LedgerError {
         blue_score: u64,
         activation_score: u64,
     },
+
+    // Native Token (RFC-002) Variants
+    /// Transaction mixes multiple asset IDs in inputs/outputs without proper conservation
+    AssetMismatch {
+        tx: TxId,
+        expected: Option<crate::tx::AssetId>,
+        found: Option<crate::tx::AssetId>,
+    },
+    /// Asset value not conserved per asset ID (inputs != outputs for a given asset)
+    AssetNotConserved {
+        tx: TxId,
+        asset_id: Option<crate::tx::AssetId>,
+        inputs: u64,
+        outputs: u64,
+    },
+    /// Native token transaction submitted prior to consensus activation blue score
+    PreActivationNativeToken {
+        tx: TxId,
+        blue_score: u64,
+        activation_score: u64,
+    },
 }
 
 impl core::fmt::Display for LedgerError {
@@ -303,6 +327,33 @@ impl core::fmt::Display for LedgerError {
                 f,
                 "multisig tx {tx} rejected before activation: blue score {blue_score} <= activation {activation_score}"
             ),
+            LedgerError::AssetMismatch {
+                tx,
+                expected,
+                found,
+            } => write!(
+                f,
+                "asset mismatch in {tx}: expected {:?}, found {:?}",
+                expected, found
+            ),
+            LedgerError::AssetNotConserved {
+                tx,
+                asset_id,
+                inputs,
+                outputs,
+            } => write!(
+                f,
+                "asset {:?} not conserved in {tx}: in {inputs} != out {outputs}",
+                asset_id
+            ),
+            LedgerError::PreActivationNativeToken {
+                tx,
+                blue_score,
+                activation_score,
+            } => write!(
+                f,
+                "native token tx {tx} rejected before activation: blue score {blue_score} <= activation {activation_score}"
+            ),
         }
     }
 }
@@ -350,6 +401,7 @@ pub fn apply_block(
         0,
         u64::MAX,
         MULTISIG_ACTIVATION_SCORE,
+        NATIVE_TOKEN_ACTIVATION_SCORE,
     )
 }
 
@@ -379,10 +431,14 @@ pub fn apply_block_with_stake(
         height,
         u64::MAX,
         MULTISIG_ACTIVATION_SCORE,
+        NATIVE_TOKEN_ACTIVATION_SCORE,
     )
 }
 
 /// Shared implementation behind [`apply_block`] / [`apply_block_with_stake`].
+/// The two activation scores are explicit parameters so both entry points pass
+/// their own policy; grouping them would churn every call site for no gain.
+#[allow(clippy::too_many_arguments)]
 fn apply_block_inner(
     utxo: &mut UtxoSet,
     mut stake: Option<&mut StakeState>,
@@ -390,7 +446,8 @@ fn apply_block_inner(
     subsidy: u64,
     height: u64,
     blue_score: u64,
-    activation_score: u64,
+    multisig_activation_score: u64,
+    native_token_activation_score: u64,
 ) -> Result<BlockSummary, LedgerError> {
     // Stage all changes on a copy; only commit if the whole block validates, so
     // a rejected block has no effect (atomicity).
@@ -413,7 +470,8 @@ fn apply_block_inner(
             stake.as_deref_mut(),
             height,
             blue_score,
-            activation_score,
+            multisig_activation_score,
+            native_token_activation_score,
         )?;
         total_fees = total_fees
             .checked_add(fee)
@@ -424,7 +482,14 @@ fn apply_block_inner(
         .checked_add(total_fees)
         .ok_or(LedgerError::ValueOverflow)?;
     let minted = match coinbase {
-        Some(cb) => apply_coinbase(&mut staging, cb, allowed, blue_score, activation_score)?,
+        Some(cb) => apply_coinbase(
+            &mut staging,
+            cb,
+            allowed,
+            blue_score,
+            multisig_activation_score,
+            native_token_activation_score,
+        )?,
         None => 0,
     };
 
@@ -445,20 +510,34 @@ fn apply_regular(
     stake: Option<&mut StakeState>,
     height: u64,
     blue_score: u64,
-    activation_score: u64,
+    multisig_activation_score: u64,
+    native_token_activation_score: u64,
 ) -> Result<u64, LedgerError> {
     if tx.inputs().is_empty() || tx.outputs().is_empty() {
         return Err(LedgerError::EmptyTransaction(tx.id()));
     }
 
     // Pre-activation gating on outputs:
-    if blue_score <= activation_score {
+    if blue_score <= multisig_activation_score {
         for output in tx.outputs() {
             if output.owner.is_p2sh() {
                 return Err(LedgerError::PreActivationMultisig {
                     tx: tx.id(),
                     blue_score,
-                    activation_score,
+                    activation_score: multisig_activation_score,
+                });
+            }
+        }
+    }
+
+    // Native token pre-activation gating on outputs:
+    if blue_score <= native_token_activation_score {
+        for output in tx.outputs() {
+            if output.asset_id.is_some() {
+                return Err(LedgerError::PreActivationNativeToken {
+                    tx: tx.id(),
+                    blue_score,
+                    activation_score: native_token_activation_score,
                 });
             }
         }
@@ -486,11 +565,22 @@ fn apply_regular(
             .ok_or(LedgerError::MissingInput(input.outpoint))?;
 
         // Pre-activation gating on spends:
-        if blue_score <= activation_score && (prev.owner.is_p2sh() || input.witness.len() > 1) {
+        if blue_score <= multisig_activation_score
+            && (prev.owner.is_p2sh() || input.witness.len() > 1)
+        {
             return Err(LedgerError::PreActivationMultisig {
                 tx: tx.id(),
                 blue_score,
-                activation_score,
+                activation_score: multisig_activation_score,
+            });
+        }
+
+        // Native token pre-activation gating on spends:
+        if blue_score <= native_token_activation_score && prev.asset_id.is_some() {
+            return Err(LedgerError::PreActivationNativeToken {
+                tx: tx.id(),
+                blue_score,
+                activation_score: native_token_activation_score,
             });
         }
 
@@ -616,23 +706,70 @@ fn apply_regular(
             .ok_or(LedgerError::ValueOverflow)?;
     }
 
-    let mut sum_out: u64 = 0;
+    // Per-asset conservation: group inputs and outputs by asset_id
+    let mut asset_inputs: HashMap<Option<crate::tx::AssetId>, u64> = HashMap::new();
+    let mut asset_outputs: HashMap<Option<crate::tx::AssetId>, u64> = HashMap::new();
+
+    // Sum inputs by asset_id
+    for input in tx.inputs() {
+        let prev = staging
+            .get(&input.outpoint)
+            .ok_or(LedgerError::MissingInput(input.outpoint))?;
+        let asset_id = prev.asset_id;
+        let val = asset_inputs.entry(asset_id).or_insert(0);
+        *val = val
+            .checked_add(prev.value)
+            .ok_or(LedgerError::ValueOverflow)?;
+    }
+
+    // Sum outputs by asset_id
     for output in tx.outputs() {
         if output.value == 0 {
             return Err(LedgerError::ZeroValueOutput(tx.id()));
         }
-        sum_out = sum_out
+        let asset_id = output.asset_id;
+        let val = asset_outputs.entry(asset_id).or_insert(0);
+        *val = val
             .checked_add(output.value)
             .ok_or(LedgerError::ValueOverflow)?;
     }
 
-    if sum_out > sum_in {
-        return Err(LedgerError::ValueNotConserved {
+    // Check conservation per asset
+    for (asset_id, in_val) in &asset_inputs {
+        let out_val = asset_outputs.get(asset_id).copied().unwrap_or(0);
+        if out_val > *in_val {
+            return Err(LedgerError::AssetNotConserved {
+                tx: tx.id(),
+                asset_id: *asset_id,
+                inputs: *in_val,
+                outputs: out_val,
+            });
+        }
+    }
+    // Also check for assets that appear only in outputs (minting)
+    for (asset_id, out_val) in &asset_outputs {
+        if !asset_inputs.contains_key(asset_id) && *out_val > 0 {
+            return Err(LedgerError::AssetNotConserved {
+                tx: tx.id(),
+                asset_id: *asset_id,
+                inputs: 0,
+                outputs: *out_val,
+            });
+        }
+    }
+
+    // Fee must be paid in native KVNC (asset_id = None)
+    let native_in = asset_inputs.get(&None).copied().unwrap_or(0);
+    let native_out = asset_outputs.get(&None).copied().unwrap_or(0);
+    if native_out > native_in {
+        return Err(LedgerError::AssetNotConserved {
             tx: tx.id(),
-            inputs: sum_in,
-            outputs: sum_out,
+            asset_id: None,
+            inputs: native_in,
+            outputs: native_out,
         });
     }
+    let fee = native_in - native_out;
 
     // Remaining stake-shape rules (still before any mutation, so errors stay
     // atomic).
@@ -678,7 +815,7 @@ fn apply_regular(
         }
     }
 
-    Ok(sum_in - sum_out)
+    Ok(fee)
 }
 
 /// Validate and apply a coinbase transaction, returning the value minted.
@@ -688,6 +825,7 @@ fn apply_coinbase(
     allowed: u64,
     blue_score: u64,
     activation_score: u64,
+    _native_token_activation_score: u64,
 ) -> Result<u64, LedgerError> {
     if blue_score <= activation_score {
         for output in cb.outputs() {
@@ -700,20 +838,29 @@ fn apply_coinbase(
             }
         }
     }
-    let mut claimed: u64 = 0;
+    // Coinbase can mint any asset (for initial distribution). Regular transactions
+    // must conserve assets (no minting) - enforced in apply_regular.
+    // Native token activation gating does NOT apply to coinbase - it's for initial distribution.
+    // Subsidy limit applies only to native KVNC outputs.
+    let mut claimed_native: u64 = 0;
     for output in cb.outputs() {
         if output.value == 0 {
             return Err(LedgerError::ZeroValueOutput(cb.id()));
         }
-        claimed = claimed
-            .checked_add(output.value)
-            .ok_or(LedgerError::ValueOverflow)?;
+        if output.asset_id.is_none() {
+            claimed_native = claimed_native
+                .checked_add(output.value)
+                .ok_or(LedgerError::ValueOverflow)?;
+        }
     }
-    if claimed > allowed {
-        return Err(LedgerError::CoinbaseOverspend { claimed, allowed });
+    if claimed_native > allowed {
+        return Err(LedgerError::CoinbaseOverspend {
+            claimed: claimed_native,
+            allowed,
+        });
     }
     add_outputs(staging, cb.id(), cb)?;
-    Ok(claimed)
+    Ok(claimed_native)
 }
 
 /// Insert every output of `tx` into `staging`, keyed by `(txid, index)`,
@@ -766,6 +913,7 @@ pub fn apply_dag(dag: &Dag, subsidy: u64) -> LedgerRun {
                 0,
                 blue_score,
                 MULTISIG_ACTIVATION_SCORE,
+                NATIVE_TOKEN_ACTIVATION_SCORE,
             ) {
                 Ok(_) => run.accepted.push(id),
                 Err(e) => run.rejected.push((id, e)),
@@ -1138,6 +1286,8 @@ pub struct Ledger {
     heights: HashMap<BlockId, u64>,
     /// Blue score activation threshold for Version 0x01 multisig transactions.
     multisig_activation_score: u64,
+    /// Blue score activation threshold for native token transactions.
+    native_token_activation_score: u64,
 }
 
 impl Ledger {
@@ -1183,6 +1333,7 @@ impl Ledger {
             staked_seen: HashMap::new(),
             heights,
             multisig_activation_score: MULTISIG_ACTIVATION_SCORE,
+            native_token_activation_score: NATIVE_TOKEN_ACTIVATION_SCORE,
         })
     }
 
@@ -1194,6 +1345,16 @@ impl Ledger {
     /// The blue-score activation threshold for Version 0x01 multisig transactions.
     pub fn multisig_activation_score(&self) -> u64 {
         self.multisig_activation_score
+    }
+
+    /// Set the blue-score activation threshold for native token transactions.
+    pub fn set_native_token_activation_score(&mut self, score: u64) {
+        self.native_token_activation_score = score;
+    }
+
+    /// The blue-score activation threshold for native token transactions.
+    pub fn native_token_activation_score(&self) -> u64 {
+        self.native_token_activation_score
     }
 
     /// Like [`Ledger::new`], but with a finite finality depth: blocks more than
@@ -1658,6 +1819,7 @@ impl Ledger {
                     merged_height,
                     merged_blue_score,
                     self.multisig_activation_score,
+                    self.native_token_activation_score,
                 );
             }
         }
@@ -1672,6 +1834,7 @@ impl Ledger {
             new_height,
             block_blue_score,
             self.multisig_activation_score,
+            self.native_token_activation_score,
         )?;
 
         // Commit: add to the DAG (structural checks run here), then store the
@@ -2116,7 +2279,8 @@ impl Ledger {
             return Err(LedgerCheckpointError::UnexpectedEof);
         }
         let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-        if version != CHECKPOINT_VERSION {
+        // Accept v3 (stake registry) and v4 (asset_id in UTXO)
+        if !(3..=CHECKPOINT_VERSION).contains(&version) {
             return Err(LedgerCheckpointError::UnsupportedVersion(version));
         }
         let mut pos = 6;
@@ -2222,6 +2386,7 @@ impl Ledger {
             staked_seen: HashMap::new(),
             heights: HashMap::new(),
             multisig_activation_score: MULTISIG_ACTIVATION_SCORE,
+            native_token_activation_score: NATIVE_TOKEN_ACTIVATION_SCORE,
         };
         ledger.deltas.insert(checkpoint_id, checkpoint_delta);
         ledger
@@ -2410,8 +2575,9 @@ impl<'a> CheckpointReader<'a> {
 /// Magic prefix identifying a Kovanica ledger checkpoint (`"KVCP"`).
 const CHECKPOINT_MAGIC: [u8; 4] = *b"KVCP";
 /// Checkpoint format version. v2 adds checkpoint block height; v3 adds the
-/// length-prefixed stake registry of the checkpoint block's view.
-const CHECKPOINT_VERSION: u16 = 3;
+/// length-prefixed stake registry of the checkpoint block's view; v4 adds
+/// optional asset_id to UTXO encoding.
+const CHECKPOINT_VERSION: u16 = 4;
 
 /// Why a ledger checkpoint could not be encoded or decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2549,7 +2715,7 @@ mod tests {
     // tests need no coinbase plumbing.
     fn funded(set: &mut UtxoSet, kp: &KeyPair, value: u64, seed: u8) -> OutPoint {
         let op = OutPoint::new(TxId::from_bytes([seed; 32]), 0);
-        set.insert(op, TxOutput::new(value, kp.address()));
+        set.insert(op, TxOutput::native(value, kp.address()));
         op
     }
 
@@ -2562,7 +2728,7 @@ mod tests {
 
         let tx = Transaction::signed(
             &[(op, &alice)],
-            vec![TxOutput::new(90, bob.address())],
+            vec![TxOutput::native(90, bob.address())],
             vec![],
         );
         let summary = apply_block(&mut utxo, &[tx], 0).unwrap();
@@ -2585,7 +2751,7 @@ mod tests {
         // Mallory signs a spend of Alice's output.
         let tx = Transaction::signed(
             &[(op, &mallory)],
-            vec![TxOutput::new(50, bob.address())],
+            vec![TxOutput::native(50, bob.address())],
             vec![],
         );
         let err = apply_block(&mut utxo, &[tx], 0).unwrap_err();
@@ -2608,13 +2774,14 @@ mod tests {
 
         let tx = Transaction::signed(
             &[(op, &alice)],
-            vec![TxOutput::new(101, bob.address())],
+            vec![TxOutput::native(101, bob.address())],
             vec![],
         );
         let err = apply_block(&mut utxo, &[tx], 0).unwrap_err();
         assert!(matches!(
             err,
-            LedgerError::ValueNotConserved {
+            LedgerError::AssetNotConserved {
+                asset_id: None,
                 inputs: 100,
                 outputs: 101,
                 ..
@@ -2631,13 +2798,13 @@ mod tests {
 
         let first = Transaction::signed(
             &[(op, &alice)],
-            vec![TxOutput::new(90, bob.address())],
+            vec![TxOutput::native(90, bob.address())],
             b"1".to_vec(),
         );
         // Second tx spends the same outpoint; by application time it's gone.
         let second = Transaction::signed(
             &[(op, &alice)],
-            vec![TxOutput::new(80, bob.address())],
+            vec![TxOutput::native(80, bob.address())],
             b"2".to_vec(),
         );
         let err = apply_block(&mut utxo, &[first, second], 0).unwrap_err();
@@ -2657,11 +2824,11 @@ mod tests {
         // Transfer leaves a fee of 10; subsidy 50 ⇒ coinbase may claim 60.
         let transfer = Transaction::signed(
             &[(op, &alice)],
-            vec![TxOutput::new(90, bob.address())],
+            vec![TxOutput::native(90, bob.address())],
             vec![],
         );
         let good_cb =
-            Transaction::coinbase(vec![TxOutput::new(60, miner.address())], b"h1".to_vec());
+            Transaction::coinbase(vec![TxOutput::native(60, miner.address())], b"h1".to_vec());
         let summary = apply_block(&mut utxo, &[good_cb, transfer.clone()], 50).unwrap();
         assert_eq!(
             summary,
@@ -2676,11 +2843,11 @@ mod tests {
         let op2 = funded(&mut utxo2, &alice, 100, 1);
         let transfer2 = Transaction::signed(
             &[(op2, &alice)],
-            vec![TxOutput::new(90, bob.address())],
+            vec![TxOutput::native(90, bob.address())],
             vec![],
         );
         let greedy_cb =
-            Transaction::coinbase(vec![TxOutput::new(61, miner.address())], b"h1".to_vec());
+            Transaction::coinbase(vec![TxOutput::native(61, miner.address())], b"h1".to_vec());
         let err = apply_block(&mut utxo2, &[greedy_cb, transfer2], 50).unwrap_err();
         assert_eq!(
             err,
@@ -2705,7 +2872,7 @@ mod tests {
     fn bond_tx(kp: &KeyPair, op: OutPoint, amount: u64, pk: [u8; 32]) -> Transaction {
         Transaction::signed(
             &[(op, kp)],
-            vec![TxOutput::new(amount, kp.address())],
+            vec![TxOutput::native(amount, kp.address())],
             bond_tag(&pk),
         )
     }
@@ -2717,7 +2884,7 @@ mod tests {
         let inputs: Vec<(OutPoint, &KeyPair)> = ops.iter().map(|op| (*op, kp)).collect();
         Transaction::signed(
             &inputs,
-            vec![TxOutput::new(total, kp.address())],
+            vec![TxOutput::native(total, kp.address())],
             b"KVU1".to_vec(),
         )
     }
@@ -2742,7 +2909,7 @@ mod tests {
         let frozen_op = OutPoint::new(bond_tx(&alice, op, 60, pk).id(), 0);
         let steal = Transaction::signed(
             &[(frozen_op, &alice)],
-            vec![TxOutput::new(60, KeyPair::from_u64(9).address())],
+            vec![TxOutput::native(60, KeyPair::from_u64(9).address())],
             vec![],
         );
         let err =
@@ -2781,7 +2948,7 @@ mod tests {
         let freed = OutPoint::new(unbond_tx(&alice, &[frozen_op], 60).id(), 0);
         let spend = Transaction::signed(
             &[(freed, &alice)],
-            vec![TxOutput::new(59, KeyPair::from_u64(9).address())],
+            vec![TxOutput::native(59, KeyPair::from_u64(9).address())],
             vec![],
         );
         apply_block_with_stake(&mut utxo, &mut stake, &[spend], 0, 200).unwrap();
@@ -2792,7 +2959,7 @@ mod tests {
         let validator = KeyPair::from_u64(7);
         let pk = vrf_pk(7);
         let genesis_cb = Transaction::coinbase(
-            vec![TxOutput::new(1_000, validator.address())],
+            vec![TxOutput::native(1_000, validator.address())],
             b"g".to_vec(),
         );
         let genesis_cb_id = genesis_cb.id();
@@ -2817,7 +2984,7 @@ mod tests {
         for h in 2..UNBOND_MATURITY {
             let steal = Transaction::signed(
                 &[(bond_out, &validator)],
-                vec![TxOutput::new(399, validator.address())],
+                vec![TxOutput::native(399, validator.address())],
                 b"steal attempt".to_vec(),
             );
             assert!(
@@ -2841,7 +3008,7 @@ mod tests {
         let freed = OutPoint::new(unbond_id, 0);
         let spend = Transaction::signed(
             &[(freed, &validator)],
-            vec![TxOutput::new(399, validator.address())],
+            vec![TxOutput::native(399, validator.address())],
             b"after unbond".to_vec(),
         );
         ledger
@@ -2863,8 +3030,10 @@ mod prune_tests {
         // and a second prune must be a no-op.
         let alice = KeyPair::from_u64(1);
         let bob = KeyPair::from_u64(2);
-        let genesis_cb =
-            Transaction::coinbase(vec![TxOutput::new(1_000, alice.address())], b"g".to_vec());
+        let genesis_cb = Transaction::coinbase(
+            vec![TxOutput::native(1_000, alice.address())],
+            b"g".to_vec(),
+        );
         let genesis_cb_id = genesis_cb.id();
         let mut ledger =
             Ledger::with_finality(3, HalvingSchedule::new(1_000, 1_000), &[genesis_cb], 5).unwrap();
@@ -2873,7 +3042,7 @@ mod prune_tests {
         let coin = OutPoint::new(genesis_cb_id, 0);
         let spend = Transaction::signed(
             &[(coin, &alice)],
-            vec![TxOutput::new(500, bob.address())],
+            vec![TxOutput::native(500, bob.address())],
             Vec::new(),
         );
         let mut tip = ledger

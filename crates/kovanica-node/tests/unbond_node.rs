@@ -49,9 +49,9 @@ fn bond(n: &mut Node, funder: &KeyPair, vrf_pk: &[u8; 32], value: u64) {
     } else {
         // Split [value | rest], no fee.
         let rest = utxo_value(n, funder, &coin) - value;
-        let mut outs = vec![TxOutput::new(value, funder.address())];
+        let mut outs = vec![TxOutput::native(value, funder.address())];
         if rest > 0 {
-            outs.push(TxOutput::new(rest, funder.address()));
+            outs.push(TxOutput::native(rest, funder.address()));
         }
         let split = Transaction::signed(&[(coin, funder)], outs, Vec::new());
         let split_id = split.id();
@@ -62,7 +62,7 @@ fn bond(n: &mut Node, funder: &KeyPair, vrf_pk: &[u8; 32], value: u64) {
 
     let b = Transaction::signed(
         &[(source, funder)],
-        vec![TxOutput::new(value, funder.address())],
+        vec![TxOutput::native(value, funder.address())],
         bond_tag(vrf_pk),
     );
     n.submit_tx(b).unwrap();

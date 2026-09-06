@@ -36,7 +36,7 @@ fn two_of_three_create_fund_spend() {
     // Build a spend to actor 9.
     let recipient = Node::address(9);
     let unsigned = node
-        .build_multisig_spend(ms_addr, vec![TxOutput::new(400, recipient)])
+        .build_multisig_spend(ms_addr, vec![TxOutput::native(400, recipient)])
         .unwrap();
     assert_eq!(unsigned.inputs().len(), 1);
     assert!(!unsigned.inputs()[0].witness.is_empty()); // redeem script attached
@@ -76,7 +76,7 @@ fn multisig_spend_fails_with_one_signature() {
     node.send_to(1, 500, ms_addr).unwrap();
 
     let unsigned = node
-        .build_multisig_spend(ms_addr, vec![TxOutput::new(400, Node::address(9))])
+        .build_multisig_spend(ms_addr, vec![TxOutput::native(400, Node::address(9))])
         .unwrap();
     let sig1 = node
         .sign_multisig_partial(&unsigned, &secret_for(1))
@@ -99,7 +99,7 @@ fn multisig_spend_rejects_unauthorized_signer() {
     node.send_to(1, 500, ms_addr).unwrap();
 
     let unsigned = node
-        .build_multisig_spend(ms_addr, vec![TxOutput::new(400, Node::address(9))])
+        .build_multisig_spend(ms_addr, vec![TxOutput::native(400, Node::address(9))])
         .unwrap();
     let sig1 = node
         .sign_multisig_partial(&unsigned, &secret_for(1))
@@ -122,7 +122,7 @@ fn multisig_spend_rejects_duplicate_signature() {
     node.send_to(1, 500, ms_addr).unwrap();
 
     let unsigned = node
-        .build_multisig_spend(ms_addr, vec![TxOutput::new(400, Node::address(9))])
+        .build_multisig_spend(ms_addr, vec![TxOutput::native(400, Node::address(9))])
         .unwrap();
     let sig1 = node
         .sign_multisig_partial(&unsigned, &secret_for(1))
@@ -146,7 +146,7 @@ fn multisig_spend_rejects_wrong_redeem_script() {
     node.send_to(1, 500, ms_addr).unwrap();
 
     let mut unsigned = node
-        .build_multisig_spend(ms_addr, vec![TxOutput::new(400, Node::address(9))])
+        .build_multisig_spend(ms_addr, vec![TxOutput::native(400, Node::address(9))])
         .unwrap();
     // Corrupt the redeem script embedded in the witness.
     unsigned.inputs_mut()[0].witness[0][4] ^= 0xFF;
@@ -200,7 +200,7 @@ fn snapshot_roundtrip_preserves_multisig_utxo() {
         .unwrap();
 
     let unsigned = restored
-        .build_multisig_spend(ms_addr, vec![TxOutput::new(400, Node::address(9))])
+        .build_multisig_spend(ms_addr, vec![TxOutput::native(400, Node::address(9))])
         .unwrap();
     let sig1 = restored
         .sign_multisig_partial(&unsigned, &secret_for(1))

@@ -675,6 +675,8 @@ internal object IntegrityCheckingUniffiLib {
     }
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_address(
     ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset(
+    ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_block_by_id(
@@ -737,7 +739,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_send(
     ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_send_asset(
+    ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_send_from(
+    ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_send_from_asset(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_set_miner_seed(
     ): Int
@@ -792,6 +798,8 @@ internal object UniffiLib {
     external fun uniffi_kovanica_ffi_fn_constructor_lightnode_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_address(`ptr`: Long,`address`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_asset(`ptr`: Long,`address`: RustBuffer.ByValue,`assetIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_seed(`ptr`: Long,`seed`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -855,7 +863,11 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_send(`ptr`: Long,`fromSeed`: Long,`amount`: Long,`toSeed`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_send_asset(`ptr`: Long,`fromSeed`: Long,`amount`: Long,`toSeed`: Long,`assetIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_send_from(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`amount`: Long,`toAddress`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_send_from_asset(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`amount`: Long,`toAddress`: RustBuffer.ByValue,`assetIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_set_miner_seed(`ptr`: Long,`seed`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1005,6 +1017,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_address() != 13509) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset() != 41422) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed() != 2697) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1098,7 +1113,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_send() != 59372) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_send_asset() != 10369) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_send_from() != 26817) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_send_from_asset() != 15040) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_set_miner_seed() != 15947) {
@@ -1618,6 +1639,12 @@ public interface LightNodeInterface {
     fun `balanceOfAddress`(`address`: kotlin.String): kotlin.String
     
     /**
+     * Spendable balance of an address for a specific asset.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    fun `balanceOfAsset`(`address`: kotlin.String, `assetIdHex`: kotlin.String?): kotlin.String
+    
+    /**
      * Spendable balance of actor `seed` in atoms, as a decimal string
      * (balances are u128; strings avoid FFI integer truncation).
      */
@@ -1820,11 +1847,24 @@ public interface LightNodeInterface {
     fun `send`(`fromSeed`: kotlin.ULong, `amount`: kotlin.ULong, `toSeed`: kotlin.ULong): SendReceipt
     
     /**
+     * Transfer `amount` of a specific asset from actor `from_seed` to actor
+     * `to_seed`, sealed immediately in a mined block.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    fun `sendAsset`(`fromSeed`: kotlin.ULong, `amount`: kotlin.ULong, `toSeed`: kotlin.ULong, `assetIdHex`: kotlin.String?): SendReceipt
+    
+    /**
      * Transfer using an imported secret: the wallet passes its 32-byte
      * ed25519 seed as hex; the secret is used for this call only and never
      * stored. `to_address` accepts 64-hex or `kvnc…dag` form.
      */
     fun `sendFrom`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `toAddress`: kotlin.String): SendReceipt
+    
+    /**
+     * Transfer `amount` of a specific asset using an imported secret.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    fun `sendFromAsset`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `toAddress`: kotlin.String, `assetIdHex`: kotlin.String?): SendReceipt
     
     /**
      * Receive the per-block subsidy coinbase on produced blocks under this
@@ -2047,6 +2087,26 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
         it,
         
         FfiConverterString.lower(`address`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Spendable balance of an address for a specific asset.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    @Throws(LightNodeException::class)override fun `balanceOfAsset`(`address`: kotlin.String, `assetIdHex`: kotlin.String?): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_balance_of_asset(
+        it,
+        
+        FfiConverterString.lower(`address`),
+        FfiConverterOptionalString.lower(`assetIdHex`),_status)
 }
     }
     )
@@ -2657,6 +2717,29 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
 
     
     /**
+     * Transfer `amount` of a specific asset from actor `from_seed` to actor
+     * `to_seed`, sealed immediately in a mined block.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    @Throws(LightNodeException::class)override fun `sendAsset`(`fromSeed`: kotlin.ULong, `amount`: kotlin.ULong, `toSeed`: kotlin.ULong, `assetIdHex`: kotlin.String?): SendReceipt {
+            return FfiConverterTypeSendReceipt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_send_asset(
+        it,
+        
+        FfiConverterULong.lower(`fromSeed`),
+        FfiConverterULong.lower(`amount`),
+        FfiConverterULong.lower(`toSeed`),
+        FfiConverterOptionalString.lower(`assetIdHex`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Transfer using an imported secret: the wallet passes its 32-byte
      * ed25519 seed as hex; the secret is used for this call only and never
      * stored. `to_address` accepts 64-hex or `kvnc…dag` form.
@@ -2671,6 +2754,28 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
         FfiConverterString.lower(`signingSecretHex`),
         FfiConverterULong.lower(`amount`),
         FfiConverterString.lower(`toAddress`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Transfer `amount` of a specific asset using an imported secret.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    @Throws(LightNodeException::class)override fun `sendFromAsset`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `toAddress`: kotlin.String, `assetIdHex`: kotlin.String?): SendReceipt {
+            return FfiConverterTypeSendReceipt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_send_from_asset(
+        it,
+        
+        FfiConverterString.lower(`signingSecretHex`),
+        FfiConverterULong.lower(`amount`),
+        FfiConverterString.lower(`toAddress`),
+        FfiConverterOptionalString.lower(`assetIdHex`),_status)
 }
     }
     )
@@ -3057,6 +3162,11 @@ data class HistoryEntry (
      * Value moved, in base units (decimal string).
      */
     var `amount`: kotlin.String
+    , 
+    /**
+     * Asset id (lowercase hex), if non-native. `None` = native KVNC.
+     */
+    var `assetIdHex`: kotlin.String?
     
 ){
     
@@ -3077,6 +3187,7 @@ public object FfiConverterTypeHistoryEntry: FfiConverterRustBuffer<HistoryEntry>
             FfiConverterString.read(buf),
             FfiConverterTypeTxDirection.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -3084,7 +3195,8 @@ public object FfiConverterTypeHistoryEntry: FfiConverterRustBuffer<HistoryEntry>
             FfiConverterString.allocationSize(value.`blockIdHex`) +
             FfiConverterString.allocationSize(value.`txIdHex`) +
             FfiConverterTypeTxDirection.allocationSize(value.`direction`) +
-            FfiConverterString.allocationSize(value.`amount`)
+            FfiConverterString.allocationSize(value.`amount`) +
+            FfiConverterOptionalString.allocationSize(value.`assetIdHex`)
     )
 
     override fun write(value: HistoryEntry, buf: ByteBuffer) {
@@ -3092,6 +3204,7 @@ public object FfiConverterTypeHistoryEntry: FfiConverterRustBuffer<HistoryEntry>
             FfiConverterString.write(value.`txIdHex`, buf)
             FfiConverterTypeTxDirection.write(value.`direction`, buf)
             FfiConverterString.write(value.`amount`, buf)
+            FfiConverterOptionalString.write(value.`assetIdHex`, buf)
     }
 }
 
@@ -3237,6 +3350,11 @@ data class MultisigSpendOutput (
      * Recipient address: 64-hex, 66-hex, or `kvnc…dag`.
      */
     var `address`: kotlin.String
+    , 
+    /**
+     * Asset id (lowercase hex), if non-native. `None` = native KVNC.
+     */
+    var `assetIdHex`: kotlin.String?
     
 ){
     
@@ -3255,17 +3373,20 @@ public object FfiConverterTypeMultisigSpendOutput: FfiConverterRustBuffer<Multis
         return MultisigSpendOutput(
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: MultisigSpendOutput) = (
             FfiConverterULong.allocationSize(value.`value`) +
-            FfiConverterString.allocationSize(value.`address`)
+            FfiConverterString.allocationSize(value.`address`) +
+            FfiConverterOptionalString.allocationSize(value.`assetIdHex`)
     )
 
     override fun write(value: MultisigSpendOutput, buf: ByteBuffer) {
             FfiConverterULong.write(value.`value`, buf)
             FfiConverterString.write(value.`address`, buf)
+            FfiConverterOptionalString.write(value.`assetIdHex`, buf)
     }
 }
 

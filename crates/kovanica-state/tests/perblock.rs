@@ -24,7 +24,7 @@ const SCHEDULE: HalvingSchedule = HalvingSchedule::new(SUBSIDY, DEFAULT_HALVING_
 /// ledger and the outpoint of the minted coinbase output.
 fn funded_ledger(owner: &KeyPair, funding: u64) -> (Ledger, OutPoint) {
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(funding, owner.address())],
+        vec![TxOutput::native(funding, owner.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -35,9 +35,9 @@ fn funded_ledger(owner: &KeyPair, funding: u64) -> (Ledger, OutPoint) {
 /// A signed transfer of `value` from `from` (spending `coin`) to `to`, with the
 /// remainder returned to `from` as change so no value is burned as fees.
 fn transfer(coin: OutPoint, from: &KeyPair, to: &Address, value: u64, funding: u64) -> Transaction {
-    let mut outputs = vec![TxOutput::new(value, *to)];
+    let mut outputs = vec![TxOutput::native(value, *to)];
     if funding > value {
-        outputs.push(TxOutput::new(funding - value, from.address()));
+        outputs.push(TxOutput::native(funding - value, from.address()));
     }
     Transaction::signed(&[(coin, from)], outputs, Vec::new())
 }
@@ -129,7 +129,7 @@ fn forged_signature_is_rejected_at_insert() {
     // Mallory signs a spend of Alice's coin.
     let forged = Transaction::signed(
         &[(coin, &mallory)],
-        vec![TxOutput::new(500, mallory.address())],
+        vec![TxOutput::native(500, mallory.address())],
         b"forge".to_vec(),
     );
     let err = ledger
@@ -205,7 +205,7 @@ fn ledger_state_matches_batch_apply_dag() {
     let b1 = ledger.insert(vec![genesis], 1, 0, 0, &[a_to_b]).unwrap();
     let b_to_c = Transaction::signed(
         &[(bob_coin, &bob)],
-        vec![TxOutput::new(300, carol.address())],
+        vec![TxOutput::native(300, carol.address())],
         Vec::new(),
     );
     let b2 = ledger.insert(vec![b1], 1, 0, 0, &[b_to_c]).unwrap();
@@ -215,7 +215,7 @@ fn ledger_state_matches_batch_apply_dag() {
     let alice_change = OutPoint::new(bob_coin.tx, 1);
     let side = Transaction::signed(
         &[(alice_change, &alice)],
-        vec![TxOutput::new(200, carol.address())],
+        vec![TxOutput::native(200, carol.address())],
         b"side".to_vec(),
     );
     let side_block = ledger.insert(vec![b1], 1, 0, 0, &[side]).unwrap();

@@ -9,6 +9,13 @@
 //!
 //! If this test starts failing off the fixture, re-capture the endpoint and
 //! revisit the genesis config — the network may have booted a new chain.
+//!
+//! ⚠️ RFC-002 format bump (2026-09-06): the TxOutput encoding gained an asset
+//! flag byte, which changes the genesis block id and makes pre-bump wire
+//! blobs undecodable. The live testnet chain resets at RFC-002 activation;
+//! until then these two tests are `#[ignore]`d. Re-capture the fixture from
+//! the NEW chain (`GET /api/blocks` on seed1), update LIVE_GENESIS/LIVE_TIP/
+//! LIVE_BLOCKS from `/api/bootstrap` + `/api/state`, and un-ignore.
 
 use kovanica_ffi::{LightConfig, LightNode};
 
@@ -50,6 +57,7 @@ fn default_config_genesis_diverges_from_live_network() {
 }
 
 #[test]
+#[ignore = "stale until testnet reset at RFC-002 activation — re-capture fixture"]
 fn live_params_reproduce_testnet_genesis() {
     let node = LightNode::new(live_config()).expect("genesis ok");
     assert_eq!(node.balance_of_seed(1).unwrap(), "20000000000");
@@ -63,6 +71,7 @@ fn live_params_reproduce_testnet_genesis() {
 }
 
 #[test]
+#[ignore = "stale until testnet reset at RFC-002 activation — re-capture fixture"]
 fn light_node_imports_live_testnet_chain() {
     let node = LightNode::new(live_config()).expect("genesis ok");
     let blob = std::fs::read(fixture_path()).expect("fetch tests/fixtures and commit it");

@@ -43,7 +43,7 @@ fn tx_spending(op: OutPoint, _input_value: u64, output_value: u64) -> Transactio
     let kp = KeyPair::from_u64(1);
     Transaction::signed(
         &[(op, &kp)],
-        vec![TxOutput::new(output_value, kp.address())],
+        vec![TxOutput::native(output_value, kp.address())],
         vec![],
     )
 }

@@ -44,7 +44,7 @@
 //! let bob = KeyPair::from_u64(3);
 //!
 //! // Genesis carries a coinbase that mints 100 to the miner (subsidy = 100).
-//! let genesis_cb = Transaction::coinbase(vec![TxOutput::new(100, miner.address())], b"genesis".to_vec());
+//! let genesis_cb = Transaction::coinbase(vec![TxOutput::native(100, miner.address())], b"genesis".to_vec());
 //! let genesis_cb_id = genesis_cb.id();
 //! let genesis = Block::genesis(1, 0, 0, encode_block_payload(&[genesis_cb]));
 //! let genesis_id = genesis.id();
@@ -52,14 +52,14 @@
 //!
 //! // Block 1: the miner sends 70 to Alice (10 fee), spending the coinbase output.
 //! let coin = OutPoint::new(genesis_cb_id, 0);
-//! let to_alice = Transaction::signed(&[(coin, &miner)], vec![TxOutput::new(70, alice.address())], vec![]);
+//! let to_alice = Transaction::signed(&[(coin, &miner)], vec![TxOutput::native(70, alice.address())], vec![]);
 //! let to_alice_id = to_alice.id();
 //! let b1 = Block::new(vec![genesis_id], 1, 1, 0, encode_block_payload(&[to_alice]));
 //! let b1_id = dag.insert(b1).unwrap();
 //!
 //! // Block 2: Alice forwards 70 to Bob.
 //! let alice_coin = OutPoint::new(to_alice_id, 0);
-//! let to_bob = Transaction::signed(&[(alice_coin, &alice)], vec![TxOutput::new(70, bob.address())], vec![]);
+//! let to_bob = Transaction::signed(&[(alice_coin, &alice)], vec![TxOutput::native(70, bob.address())], vec![]);
 //! dag.insert(Block::new(vec![b1_id], 1, 2, 0, encode_block_payload(&[to_bob]))).unwrap();
 //!
 //! // Apply the whole DAG in GHOSTDAG order (subsidy = 100 per block).
@@ -83,7 +83,7 @@ pub use keys::{verify, Address, KeyPair};
 pub use ledger::{
     apply_block, apply_dag, BlockSummary, HalvingSchedule, HybridConfig, Ledger,
     LedgerCheckpointError, LedgerError, LedgerInsertError, LedgerRun, LedgerSnapshotError,
-    StakedVrf, DEFAULT_HALVING_ERA, MULTISIG_ACTIVATION_SCORE,
+    StakedVrf, DEFAULT_HALVING_ERA, MULTISIG_ACTIVATION_SCORE, NATIVE_TOKEN_ACTIVATION_SCORE,
 };
 pub use multisig::{verify_threshold_signatures, MultisigScript, MAX_MULTISIG_KEYS};
 pub use spv::{
@@ -91,8 +91,8 @@ pub use spv::{
 };
 pub use store::{LedgerStore, StoreError};
 pub use tx::{
-    decode_block_payload, encode_block_payload, DecodeError, OutPoint, Sig, Transaction, TxId,
-    TxInput, TxOutput,
+    decode_block_payload, encode_block_payload, AssetId, DecodeError, OutPoint, Sig, Transaction,
+    TxId, TxInput, TxOutput,
 };
 pub use utxo::UtxoSet;
 pub use validation::{

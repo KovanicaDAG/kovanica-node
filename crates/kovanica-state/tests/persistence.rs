@@ -25,7 +25,7 @@ fn build_ledger() -> Ledger {
     let carol = KeyPair::from_u64(3);
 
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(500, alice.address())],
+        vec![TxOutput::native(500, alice.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -36,8 +36,8 @@ fn build_ledger() -> Ledger {
     let a_to_b = Transaction::signed(
         &[(coin, &alice)],
         vec![
-            TxOutput::new(300, bob.address()),
-            TxOutput::new(200, alice.address()),
+            TxOutput::native(300, bob.address()),
+            TxOutput::native(200, alice.address()),
         ],
         Vec::new(),
     );
@@ -48,7 +48,7 @@ fn build_ledger() -> Ledger {
     // bob → carol (300) on b1.
     let b_to_c = Transaction::signed(
         &[(bob_coin, &bob)],
-        vec![TxOutput::new(300, carol.address())],
+        vec![TxOutput::native(300, carol.address())],
         Vec::new(),
     );
     let b2 = ledger.insert(vec![b1], 1, 0, 0, &[b_to_c]).unwrap();
@@ -56,7 +56,7 @@ fn build_ledger() -> Ledger {
     // Parallel side block off b1: alice spends her change to carol.
     let side = Transaction::signed(
         &[(alice_change, &alice)],
-        vec![TxOutput::new(200, carol.address())],
+        vec![TxOutput::native(200, carol.address())],
         b"side".to_vec(),
     );
     let side_block = ledger.insert(vec![b1], 1, 0, 0, &[side]).unwrap();
@@ -126,7 +126,7 @@ fn build_ledger_with_finality(finality_depth: u64) -> Ledger {
     let carol = KeyPair::from_u64(3);
 
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(500, alice.address())],
+        vec![TxOutput::native(500, alice.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -141,8 +141,8 @@ fn build_ledger_with_finality(finality_depth: u64) -> Ledger {
             let a_to_b = Transaction::signed(
                 &[(coin, &alice)],
                 vec![
-                    TxOutput::new(300, bob.address()),
-                    TxOutput::new(200, alice.address()),
+                    TxOutput::native(300, bob.address()),
+                    TxOutput::native(200, alice.address()),
                 ],
                 Vec::new(),
             );
@@ -151,7 +151,7 @@ fn build_ledger_with_finality(finality_depth: u64) -> Ledger {
             a_to_b
         } else {
             Transaction::coinbase(
-                vec![TxOutput::new(SUBSIDY, carol.address())],
+                vec![TxOutput::native(SUBSIDY, carol.address())],
                 format!("block{i}").into_bytes(),
             )
         };
@@ -234,7 +234,7 @@ fn checkpoint_restored_ledger_accepts_new_blocks() {
     let bob = KeyPair::from_u64(2);
     let tip = restored.dag().selected_tip();
     let tx = Transaction::coinbase(
-        vec![TxOutput::new(500, bob.address())],
+        vec![TxOutput::native(500, bob.address())],
         b"new-block".to_vec(),
     );
     let new_block = restored.insert(vec![tip], 1, 100, 0, &[tx]).unwrap();
@@ -254,7 +254,7 @@ fn checkpoint_rejects_insufficient_depth() {
     // Finality depth 100 but only a few blocks
     let alice = KeyPair::from_u64(1);
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(500, alice.address())],
+        vec![TxOutput::native(500, alice.address())],
         b"genesis".to_vec(),
     );
     let mut ledger = Ledger::with_finality(K, SCHEDULE, &[coinbase], 100).unwrap();

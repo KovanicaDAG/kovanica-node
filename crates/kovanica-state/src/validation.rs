@@ -34,7 +34,7 @@
 //! let genesis_id = dag.genesis();
 //!
 //! // A well-formed coinbase-carrying block is accepted.
-//! let cb = Transaction::coinbase(vec![TxOutput::new(50, alice.address())], b"h1".to_vec());
+//! let cb = Transaction::coinbase(vec![TxOutput::native(50, alice.address())], b"h1".to_vec());
 //! assert!(dag.insert(Block::new(vec![genesis_id], 1, 1, 0, encode_block_payload(&[cb]))).is_ok());
 //!
 //! // A block whose payload is not valid transaction encoding is rejected at insert.
@@ -221,9 +221,12 @@ mod tests {
     #[test]
     fn well_formed_block_passes() {
         let kp = KeyPair::from_u64(1);
-        let cb = Transaction::coinbase(vec![TxOutput::new(50, addr(1))], b"h1".to_vec());
-        let transfer =
-            Transaction::signed(&[(coin(7), &kp)], vec![TxOutput::new(20, addr(2))], vec![]);
+        let cb = Transaction::coinbase(vec![TxOutput::native(50, addr(1))], b"h1".to_vec());
+        let transfer = Transaction::signed(
+            &[(coin(7), &kp)],
+            vec![TxOutput::native(20, addr(2))],
+            vec![],
+        );
         let payload = encode_block_payload(&[cb, transfer]);
         assert_eq!(validate_block_payload(&payload), Ok(()));
     }
@@ -236,10 +239,13 @@ mod tests {
 
     #[test]
     fn coinbase_must_be_first() {
-        let cb = Transaction::coinbase(vec![TxOutput::new(50, addr(1))], b"h1".to_vec());
+        let cb = Transaction::coinbase(vec![TxOutput::native(50, addr(1))], b"h1".to_vec());
         let kp = KeyPair::from_u64(1);
-        let transfer =
-            Transaction::signed(&[(coin(7), &kp)], vec![TxOutput::new(20, addr(2))], vec![]);
+        let transfer = Transaction::signed(
+            &[(coin(7), &kp)],
+            vec![TxOutput::native(20, addr(2))],
+            vec![],
+        );
         // Coinbase in second position.
         let payload = encode_block_payload(&[transfer, cb]);
         assert_eq!(
@@ -265,7 +271,7 @@ mod tests {
         let op = coin(7);
         let dup = Transaction::signed(
             &[(op, &kp), (op, &kp)],
-            vec![TxOutput::new(5, addr(2))],
+            vec![TxOutput::native(5, addr(2))],
             vec![],
         );
         let payload = encode_block_payload(&[dup]);
@@ -281,7 +287,11 @@ mod tests {
     #[test]
     fn zero_value_output_is_rejected() {
         let kp = KeyPair::from_u64(1);
-        let zero = Transaction::signed(&[(coin(7), &kp)], vec![TxOutput::new(0, addr(2))], vec![]);
+        let zero = Transaction::signed(
+            &[(coin(7), &kp)],
+            vec![TxOutput::native(0, addr(2))],
+            vec![],
+        );
         let payload = encode_block_payload(&[zero]);
         assert_eq!(
             validate_block_payload(&payload),
@@ -297,7 +307,10 @@ mod tests {
         let kp = KeyPair::from_u64(1);
         let overflow = Transaction::signed(
             &[(coin(7), &kp)],
-            vec![TxOutput::new(u64::MAX, addr(2)), TxOutput::new(1, addr(3))],
+            vec![
+                TxOutput::native(u64::MAX, addr(2)),
+                TxOutput::native(1, addr(3)),
+            ],
             vec![],
         );
         let payload = encode_block_payload(&[overflow]);
@@ -312,8 +325,11 @@ mod tests {
         let kp = KeyPair::from_u64(1);
         // Create a transaction with a huge tag to exceed MAX_TX_SIZE
         let huge_tag = vec![0u8; MAX_TX_SIZE + 100];
-        let large_tx =
-            Transaction::signed(&[(coin(7), &kp)], vec![TxOutput::new(5, addr(2))], huge_tag);
+        let large_tx = Transaction::signed(
+            &[(coin(7), &kp)],
+            vec![TxOutput::native(5, addr(2))],
+            huge_tag,
+        );
         let tx_size = large_tx.encode().len();
         let payload = encode_block_payload(&[large_tx]);
         assert_eq!(
@@ -329,8 +345,11 @@ mod tests {
     fn block_payload_too_large_is_rejected() {
         let kp = KeyPair::from_u64(1);
         let huge_tag = vec![0u8; MAX_BLOCK_PAYLOAD_SIZE + 100];
-        let large_tx =
-            Transaction::signed(&[(coin(7), &kp)], vec![TxOutput::new(5, addr(2))], huge_tag);
+        let large_tx = Transaction::signed(
+            &[(coin(7), &kp)],
+            vec![TxOutput::native(5, addr(2))],
+            huge_tag,
+        );
         let payload = encode_block_payload(&[large_tx]);
         assert_eq!(
             validate_block_payload(&payload),
@@ -347,7 +366,7 @@ mod tests {
             .map(|i| {
                 Transaction::signed(
                     &[(coin(i as u8), &kp)],
-                    vec![TxOutput::new(5, addr(2))],
+                    vec![TxOutput::native(5, addr(2))],
                     vec![i as u8],
                 )
             })

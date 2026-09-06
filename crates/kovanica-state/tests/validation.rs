@@ -16,7 +16,7 @@ const SUBSIDY: u64 = 1_000;
 /// `funding` to `owner`. Returns the DAG, genesis id, and the coinbase outpoint.
 fn validated_dag(owner: &KeyPair, funding: u64) -> (Dag, BlockId, OutPoint) {
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(funding, owner.address())],
+        vec![TxOutput::native(funding, owner.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -34,7 +34,7 @@ fn well_formed_blocks_are_accepted_and_apply() {
 
     let pay = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(500, bob.address())],
+        vec![TxOutput::native(500, bob.address())],
         vec![],
     );
     dag.insert(Block::new(
@@ -83,7 +83,7 @@ fn structurally_invalid_transaction_is_rejected_at_insert() {
     // of the UTXO state, so it is caught at insert without applying the DAG.
     let zero_out = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(0, bob.address())],
+        vec![TxOutput::native(0, bob.address())],
         vec![],
     );
     let err = dag
@@ -115,7 +115,7 @@ fn stateful_invalidity_still_passes_insert_but_is_caught_on_apply() {
 
     let forged = Transaction::signed(
         &[(coin, &mallory)],
-        vec![TxOutput::new(500, mallory.address())],
+        vec![TxOutput::native(500, mallory.address())],
         b"forge".to_vec(),
     );
     let bad = dag

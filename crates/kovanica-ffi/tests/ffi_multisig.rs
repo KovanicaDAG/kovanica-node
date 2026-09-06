@@ -42,6 +42,7 @@ fn ffi_two_of_three_create_fund_spend() {
             vec![MultisigSpendOutput {
                 value: 400,
                 address: kovanica_node::Node::address(9).to_hex(),
+                asset_id_hex: None,
             }],
         )
         .unwrap();
@@ -106,6 +107,7 @@ fn ffi_combine_rejects_duplicate_signatures() {
             vec![MultisigSpendOutput {
                 value: 400,
                 address: kovanica_node::Node::address(9).to_hex(),
+                asset_id_hex: None,
             }],
         )
         .unwrap();

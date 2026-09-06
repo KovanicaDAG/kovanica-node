@@ -22,7 +22,7 @@ fn build() -> Ledger {
     let alice = KeyPair::from_u64(1);
     let bob = KeyPair::from_u64(2);
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(500, alice.address())],
+        vec![TxOutput::native(500, alice.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -31,8 +31,8 @@ fn build() -> Ledger {
     let pay = Transaction::signed(
         &[(coin, &alice)],
         vec![
-            TxOutput::new(300, bob.address()),
-            TxOutput::new(200, alice.address()),
+            TxOutput::native(300, bob.address()),
+            TxOutput::native(200, alice.address()),
         ],
         Vec::new(),
     );
@@ -64,7 +64,7 @@ fn append_extends_the_log_without_rewriting() {
     let bob = KeyPair::from_u64(2);
     let carol = KeyPair::from_u64(3);
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(500, alice.address())],
+        vec![TxOutput::native(500, alice.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -76,8 +76,8 @@ fn append_extends_the_log_without_rewriting() {
     let pay = Transaction::signed(
         &[(coin, &alice)],
         vec![
-            TxOutput::new(300, bob.address()),
-            TxOutput::new(200, alice.address()),
+            TxOutput::native(300, bob.address()),
+            TxOutput::native(200, alice.address()),
         ],
         Vec::new(),
     );
@@ -92,7 +92,7 @@ fn append_extends_the_log_without_rewriting() {
 
     let pay2 = Transaction::signed(
         &[(change, &alice)],
-        vec![TxOutput::new(200, carol.address())],
+        vec![TxOutput::native(200, carol.address())],
         Vec::new(),
     );
     let b2 = ledger.insert(vec![b1], 1, 2, 0, &[pay2]).unwrap();

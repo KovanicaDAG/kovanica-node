@@ -640,6 +640,12 @@ public protocol LightNodeProtocol: AnyObject, Sendable {
     func balanceOfAddress(address: String) throws  -> String
     
     /**
+     * Spendable balance of an address for a specific asset.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    func balanceOfAsset(address: String, assetIdHex: String?) throws  -> String
+    
+    /**
      * Spendable balance of actor `seed` in atoms, as a decimal string
      * (balances are u128; strings avoid FFI integer truncation).
      */
@@ -842,11 +848,24 @@ public protocol LightNodeProtocol: AnyObject, Sendable {
     func send(fromSeed: UInt64, amount: UInt64, toSeed: UInt64) throws  -> SendReceipt
     
     /**
+     * Transfer `amount` of a specific asset from actor `from_seed` to actor
+     * `to_seed`, sealed immediately in a mined block.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    func sendAsset(fromSeed: UInt64, amount: UInt64, toSeed: UInt64, assetIdHex: String?) throws  -> SendReceipt
+    
+    /**
      * Transfer using an imported secret: the wallet passes its 32-byte
      * ed25519 seed as hex; the secret is used for this call only and never
      * stored. `to_address` accepts 64-hex or `kvnc…dag` form.
      */
     func sendFrom(signingSecretHex: String, amount: UInt64, toAddress: String) throws  -> SendReceipt
+    
+    /**
+     * Transfer `amount` of a specific asset using an imported secret.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+    func sendFromAsset(signingSecretHex: String, amount: UInt64, toAddress: String, assetIdHex: String?) throws  -> SendReceipt
     
     /**
      * Receive the per-block subsidy coinbase on produced blocks under this
@@ -1016,6 +1035,21 @@ open func balanceOfAddress(address: String)throws  -> String  {
     uniffi_kovanica_ffi_fn_method_lightnode_balance_of_address(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(address),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Spendable balance of an address for a specific asset.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+open func balanceOfAsset(address: String, assetIdHex: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_balance_of_asset(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(address),
+        FfiConverterOptionString.lower(assetIdHex),uniffiCallStatus
     )
 })
 }
@@ -1472,6 +1506,24 @@ open func send(fromSeed: UInt64, amount: UInt64, toSeed: UInt64)throws  -> SendR
 }
     
     /**
+     * Transfer `amount` of a specific asset from actor `from_seed` to actor
+     * `to_seed`, sealed immediately in a mined block.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+open func sendAsset(fromSeed: UInt64, amount: UInt64, toSeed: UInt64, assetIdHex: String?)throws  -> SendReceipt  {
+    return try  FfiConverterTypeSendReceipt_lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_send_asset(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(fromSeed),
+        FfiConverterUInt64.lower(amount),
+        FfiConverterUInt64.lower(toSeed),
+        FfiConverterOptionString.lower(assetIdHex),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Transfer using an imported secret: the wallet passes its 32-byte
      * ed25519 seed as hex; the secret is used for this call only and never
      * stored. `to_address` accepts 64-hex or `kvnc…dag` form.
@@ -1484,6 +1536,23 @@ open func sendFrom(signingSecretHex: String, amount: UInt64, toAddress: String)t
         FfiConverterString.lower(signingSecretHex),
         FfiConverterUInt64.lower(amount),
         FfiConverterString.lower(toAddress),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Transfer `amount` of a specific asset using an imported secret.
+     * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+     */
+open func sendFromAsset(signingSecretHex: String, amount: UInt64, toAddress: String, assetIdHex: String?)throws  -> SendReceipt  {
+    return try  FfiConverterTypeSendReceipt_lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_send_from_asset(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(signingSecretHex),
+        FfiConverterUInt64.lower(amount),
+        FfiConverterString.lower(toAddress),
+        FfiConverterOptionString.lower(assetIdHex),uniffiCallStatus
     )
 })
 }
@@ -1839,6 +1908,10 @@ public struct HistoryEntry: Equatable, Hashable {
      * Value moved, in base units (decimal string).
      */
     public var amount: String
+    /**
+     * Asset id (lowercase hex), if non-native. `None` = native KVNC.
+     */
+    public var assetIdHex: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1854,11 +1927,15 @@ public struct HistoryEntry: Equatable, Hashable {
          */direction: TxDirection, 
         /**
          * Value moved, in base units (decimal string).
-         */amount: String) {
+         */amount: String, 
+        /**
+         * Asset id (lowercase hex), if non-native. `None` = native KVNC.
+         */assetIdHex: String?) {
         self.blockIdHex = blockIdHex
         self.txIdHex = txIdHex
         self.direction = direction
         self.amount = amount
+        self.assetIdHex = assetIdHex
     }
 
     
@@ -1880,7 +1957,8 @@ public struct FfiConverterTypeHistoryEntry: FfiConverterRustBuffer {
                 blockIdHex: FfiConverterString.read(from: &buf), 
                 txIdHex: FfiConverterString.read(from: &buf), 
                 direction: FfiConverterTypeTxDirection.read(from: &buf), 
-                amount: FfiConverterString.read(from: &buf)
+                amount: FfiConverterString.read(from: &buf), 
+                assetIdHex: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1889,6 +1967,7 @@ public struct FfiConverterTypeHistoryEntry: FfiConverterRustBuffer {
         FfiConverterString.write(value.txIdHex, into: &buf)
         FfiConverterTypeTxDirection.write(value.direction, into: &buf)
         FfiConverterString.write(value.amount, into: &buf)
+        FfiConverterOptionString.write(value.assetIdHex, into: &buf)
     }
 }
 
@@ -2100,6 +2179,10 @@ public struct MultisigSpendOutput: Equatable, Hashable {
      * Recipient address: 64-hex, 66-hex, or `kvnc…dag`.
      */
     public var address: String
+    /**
+     * Asset id (lowercase hex), if non-native. `None` = native KVNC.
+     */
+    public var assetIdHex: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2109,9 +2192,13 @@ public struct MultisigSpendOutput: Equatable, Hashable {
          */value: UInt64, 
         /**
          * Recipient address: 64-hex, 66-hex, or `kvnc…dag`.
-         */address: String) {
+         */address: String, 
+        /**
+         * Asset id (lowercase hex), if non-native. `None` = native KVNC.
+         */assetIdHex: String?) {
         self.value = value
         self.address = address
+        self.assetIdHex = assetIdHex
     }
 
     
@@ -2131,13 +2218,15 @@ public struct FfiConverterTypeMultisigSpendOutput: FfiConverterRustBuffer {
         return
             try MultisigSpendOutput(
                 value: FfiConverterUInt64.read(from: &buf), 
-                address: FfiConverterString.read(from: &buf)
+                address: FfiConverterString.read(from: &buf), 
+                assetIdHex: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: MultisigSpendOutput, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.value, into: &buf)
         FfiConverterString.write(value.address, into: &buf)
+        FfiConverterOptionString.write(value.assetIdHex, into: &buf)
     }
 }
 
@@ -2803,6 +2892,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_address() != 13509) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset() != 41422) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed() != 2697) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2896,7 +2988,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_kovanica_ffi_checksum_method_lightnode_send() != 59372) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_send_asset() != 10369) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_send_from() != 26817) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_send_from_asset() != 15040) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_set_miner_seed() != 15947) {

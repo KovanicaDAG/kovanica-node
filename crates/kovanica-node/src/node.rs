@@ -17,9 +17,9 @@ use kovanica_dag::{vrf_keypair_from_seed, vrf_prove};
 use kovanica_state::multisig::{verify_threshold_signatures, MultisigScript};
 use kovanica_state::stake::{Freeze, UNBOND_MATURITY, UNBOND_PREFIX};
 use kovanica_state::{
-    apply_block, decode_block_payload, encode_block_payload, verify, Address, HalvingSchedule,
-    HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore, OutPoint, Sig,
-    StakedVrf, Transaction, TxId, TxOutput, UtxoSet, DEFAULT_HALVING_ERA,
+    apply_block, decode_block_payload, encode_block_payload, verify, Address, AssetId,
+    HalvingSchedule, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore,
+    OutPoint, Sig, StakedVrf, Transaction, TxId, TxOutput, UtxoSet, DEFAULT_HALVING_ERA,
 };
 
 use crate::mempool_v2::{MempoolConfig, MempoolV2};
@@ -257,6 +257,8 @@ pub struct WalletEvent {
     pub direction: WalletDirection,
     /// Value moved, in base units.
     pub amount: u64,
+    /// Asset id, if non-native. `None` = native KVNC.
+    pub asset_id: Option<AssetId>,
 }
 
 /// A MerkleBlock response for SPV clients: proves transaction inclusion in a block
@@ -628,7 +630,7 @@ impl Node {
         }
         let founder = Self::address(founder_seed);
         let coinbase =
-            Transaction::coinbase(vec![TxOutput::new(amount, founder)], b"genesis".to_vec());
+            Transaction::coinbase(vec![TxOutput::native(amount, founder)], b"genesis".to_vec());
         let schedule = HalvingSchedule::new(subsidy, DEFAULT_HALVING_ERA);
         let ledger = if finality_depth == u64::MAX && payload_pruning_depth == u64::MAX {
             Ledger::new(k, schedule, &[coinbase]).map_err(NodeError::Ledger)?
@@ -754,6 +756,19 @@ impl Node {
     /// The spendable balance of `owner` in the current full ledger state.
     pub fn balance(&self, owner: &Address) -> Result<u128, NodeError> {
         Ok(self.ledger()?.ledger_state().balance(owner))
+    }
+
+    /// The spendable balance of `owner` for a specific `asset_id` in the current
+    /// full ledger state. `asset_id = None` means native KVNC.
+    pub fn balance_of_asset(
+        &self,
+        owner: &Address,
+        asset_id: Option<kovanica_state::AssetId>,
+    ) -> Result<u128, NodeError> {
+        Ok(self
+            .ledger()?
+            .ledger_state()
+            .balance_of_asset(owner, asset_id))
     }
 
     /// The current tips.
@@ -888,9 +903,9 @@ impl Node {
 
         // Value-conserving unbond: fee 0, change (if any) back to `to` as an
         // ordinary unfrozen output.
-        let mut outputs = vec![TxOutput::new(amount, to)];
+        let mut outputs = vec![TxOutput::native(amount, to)];
         if total > amount {
-            outputs.push(TxOutput::new(total - amount, to));
+            outputs.push(TxOutput::native(total - amount, to));
         }
         let unsigned = Transaction::unsigned(&picks, outputs, UNBOND_PREFIX.to_vec());
         let tx_id = unsigned.id();
@@ -971,10 +986,22 @@ impl Node {
         amount: u64,
         to_addr: Address,
     ) -> Result<Transaction, NodeError> {
+        self.build_transfer_with_asset(kp, amount, to_addr, None)
+    }
+
+    /// Build a signed transfer of a specific asset from an explicit keypair
+    /// to an arbitrary address.
+    fn build_transfer_with_asset(
+        &self,
+        kp: &KeyPair,
+        amount: u64,
+        to_addr: Address,
+        asset_id: Option<kovanica_state::AssetId>,
+    ) -> Result<Transaction, NodeError> {
         if amount == 0 {
             return Err(NodeError::ZeroAmount);
         }
-        let unsigned = self.prepare_transfer(kp.address(), amount, to_addr)?;
+        let unsigned = self.prepare_transfer_asset(kp.address(), amount, to_addr, asset_id)?;
         let mut tx = unsigned.tx;
         let sig = Sig::from_bytes(kp.sign(&unsigned.sighash));
         for i in 0..tx.inputs().len() {
@@ -994,6 +1021,18 @@ impl Node {
         amount: u64,
         to: Address,
     ) -> Result<Prepared, NodeError> {
+        self.prepare_transfer_asset(from, amount, to, None)
+    }
+
+    /// Select covering UTXOs for `from` and build an **unsigned** transfer of a
+    /// specific asset. `asset_id = None` means native KVNC.
+    pub fn prepare_transfer_asset(
+        &self,
+        from: Address,
+        amount: u64,
+        to: Address,
+        asset_id: Option<kovanica_state::AssetId>,
+    ) -> Result<Prepared, NodeError> {
         if amount == 0 {
             return Err(NodeError::ZeroAmount);
         }
@@ -1004,7 +1043,7 @@ impl Node {
         let state = self.ledger()?.ledger_state();
         let mut owned: Vec<(OutPoint, u64)> = state
             .iter()
-            .filter(|(_, out)| out.owner == from)
+            .filter(|(_, out)| out.owner == from && out.asset_id == asset_id)
             .map(|(op, out)| (*op, out.value))
             .collect();
         owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -1020,10 +1059,10 @@ impl Node {
         if total < need {
             return Err(NodeError::InsufficientFunds);
         }
-        let mut outputs = vec![TxOutput::new(amount, to)];
+        let mut outputs = vec![TxOutput::new(amount, asset_id, to)];
         let change = total - need;
         if change > 0 {
-            outputs.push(TxOutput::new(change, from));
+            outputs.push(TxOutput::new(change, asset_id, from));
         }
         let outpoints: Vec<OutPoint> = selected.iter().map(|(op, _)| *op).collect();
         let tx = Transaction::unsigned(&outpoints, outputs, Vec::new());
@@ -1076,7 +1115,20 @@ impl Node {
     /// seed-based [`Node::send_to`] is a thin wrapper over this — wallets that
     /// hold real secrets call it directly.
     pub fn send_with(&mut self, kp: &KeyPair, amount: u64, to: Address) -> Result<Sent, NodeError> {
-        let tx = self.build_transfer_with(kp, amount, to)?;
+        self.send_with_asset(kp, amount, to, None)
+    }
+
+    /// Send `amount` of a specific asset from an explicit keypair to an arbitrary
+    /// address **immediately**, as a new block built on the current tips.
+    /// `asset_id = None` means native KVNC.
+    pub fn send_with_asset(
+        &mut self,
+        kp: &KeyPair,
+        amount: u64,
+        to: Address,
+        asset_id: Option<kovanica_state::AssetId>,
+    ) -> Result<Sent, NodeError> {
+        let tx = self.build_transfer_with_asset(kp, amount, to, asset_id)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
         let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
@@ -1095,14 +1147,40 @@ impl Node {
     /// Send `amount` from actor `from_seed` to an arbitrary address
     /// **immediately**, as a new block built on the current tips.
     pub fn send_to(&mut self, from_seed: u64, amount: u64, to: Address) -> Result<Sent, NodeError> {
-        self.send_with(&KeyPair::from_u64(from_seed), amount, to)
+        self.send_to_asset(from_seed, amount, to, None)
+    }
+
+    /// Send `amount` of a specific asset from actor `from_seed` to an arbitrary
+    /// address **immediately**, as a new block built on the current tips.
+    /// `asset_id = None` means native KVNC.
+    pub fn send_to_asset(
+        &mut self,
+        from_seed: u64,
+        amount: u64,
+        to: Address,
+        asset_id: Option<kovanica_state::AssetId>,
+    ) -> Result<Sent, NodeError> {
+        self.send_with_asset(&KeyPair::from_u64(from_seed), amount, to, asset_id)
     }
 
     /// Send `amount` from actor `from_seed` to actor `to_seed` **immediately**,
     /// as a new block built on the current tips. (For the mempool flow use
     /// [`Node::pool`] then [`Node::produce_block`].)
     pub fn send(&mut self, from_seed: u64, amount: u64, to_seed: u64) -> Result<Sent, NodeError> {
-        self.send_to(from_seed, amount, Self::address(to_seed))
+        self.send_asset(from_seed, amount, to_seed, None)
+    }
+
+    /// Send `amount` of a specific asset from actor `from_seed` to actor `to_seed`
+    /// **immediately**, as a new block built on the current tips.
+    /// `asset_id = None` means native KVNC.
+    pub fn send_asset(
+        &mut self,
+        from_seed: u64,
+        amount: u64,
+        to_seed: u64,
+        asset_id: Option<kovanica_state::AssetId>,
+    ) -> Result<Sent, NodeError> {
+        self.send_to_asset(from_seed, amount, Self::address(to_seed), asset_id)
     }
 
     // ------------------------------------------------------------------
@@ -1174,7 +1252,7 @@ impl Node {
         let mut final_outputs = outputs;
         let change = source_value - need;
         if change > 0 {
-            final_outputs.push(TxOutput::new(change, address));
+            final_outputs.push(TxOutput::native(change, address));
         }
 
         let mut tx =
@@ -1533,7 +1611,7 @@ impl Node {
             return Vec::new();
         }
         vec![Transaction::coinbase(
-            vec![TxOutput::new(total, miner)],
+            vec![TxOutput::native(total, miner)],
             timestamp_ms.to_le_bytes().to_vec(),
         )]
     }
@@ -1753,8 +1831,8 @@ impl Node {
         let ledger = self.ledger()?;
         let dag = ledger.dag();
 
-        // outpoint -> value of outputs the scan has seen owned by `owner`.
-        let mut mine: HashMap<OutPoint, u64> = HashMap::new();
+        // outpoint -> (value, asset_id) of outputs the scan has seen owned by `owner`.
+        let mut mine: HashMap<OutPoint, (u64, Option<AssetId>)> = HashMap::new();
         let mut events = Vec::new();
 
         for (scanned, id) in dag.linearize().into_iter().enumerate() {
@@ -1771,9 +1849,11 @@ impl Node {
 
             for tx in &txs {
                 let mut spent = 0u64;
+                let mut spent_asset_id = None;
                 for input in tx.inputs() {
-                    if let Some(value) = mine.get(&input.outpoint) {
+                    if let Some((value, asset_id)) = mine.get(&input.outpoint) {
                         spent += *value;
+                        spent_asset_id = *asset_id;
                     }
                 }
                 if spent > 0 {
@@ -1782,17 +1862,22 @@ impl Node {
                         block_id: id,
                         direction: WalletDirection::Sent,
                         amount: spent,
+                        asset_id: spent_asset_id,
                     });
                 }
 
                 for (index, output) in tx.outputs().iter().enumerate() {
                     if output.owner == *owner {
-                        mine.insert(OutPoint::new(tx.id(), index as u32), output.value);
+                        mine.insert(
+                            OutPoint::new(tx.id(), index as u32),
+                            (output.value, output.asset_id),
+                        );
                         events.push(WalletEvent {
                             tx_id: tx.id(),
                             block_id: id,
                             direction: WalletDirection::Received,
                             amount: output.value,
+                            asset_id: output.asset_id,
                         });
                     }
                 }

@@ -855,7 +855,11 @@ mod tests {
     fn test_merkle_block_roundtrip() {
         let kp = KeyPair::from_u64(1);
         let op = OutPoint::new(TxId::from_bytes([1u8; 32]), 0);
-        let tx = Transaction::signed(&[(op, &kp)], vec![TxOutput::new(100, kp.address())], vec![]);
+        let tx = Transaction::signed(
+            &[(op, &kp)],
+            vec![TxOutput::native(100, kp.address())],
+            vec![],
+        );
 
         let proof = MerkleProof {
             tx_id: *tx.id().as_bytes(),

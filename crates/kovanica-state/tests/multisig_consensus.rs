@@ -63,7 +63,8 @@ fn build_multisig_spend(
 }
 
 fn funded_ledger(owner: Address, funding: u64) -> (Ledger, OutPoint) {
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(funding, owner)], b"genesis".to_vec());
+    let coinbase =
+        Transaction::coinbase(vec![TxOutput::native(funding, owner)], b"genesis".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     let ledger = Ledger::new(K, SCHEDULE, &[coinbase]).expect("valid genesis");
     (ledger, coin)
@@ -80,7 +81,7 @@ fn test_multisig_1_of_1_spend_success() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -89,7 +90,7 @@ fn test_multisig_1_of_1_spend_success() {
         coin,
         script.encode(),
         &[&keys[0]],
-        vec![TxOutput::new(950, alice)],
+        vec![TxOutput::native(950, alice)],
         b"1of1".to_vec(),
     );
 
@@ -110,7 +111,7 @@ fn test_multisig_2_of_2_spend_success() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(2_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(2_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 2_000).unwrap();
 
@@ -119,7 +120,7 @@ fn test_multisig_2_of_2_spend_success() {
         coin,
         script.encode(),
         &[&keys[0], &keys[1]],
-        vec![TxOutput::new(1_900, recipient)],
+        vec![TxOutput::native(1_900, recipient)],
         b"2of2".to_vec(),
     );
 
@@ -147,7 +148,8 @@ fn test_multisig_2_of_3_all_subsets_success() {
 
     for (k_a, k_b) in subsets {
         let mut utxo = UtxoSet::new();
-        let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+        let coinbase =
+            Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
         let coin = OutPoint::new(coinbase.id(), 0);
         apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -156,7 +158,7 @@ fn test_multisig_2_of_3_all_subsets_success() {
             coin,
             script.encode(),
             &[k_a, k_b],
-            vec![TxOutput::new(900, recipient)],
+            vec![TxOutput::native(900, recipient)],
             b"sub".to_vec(),
         );
 
@@ -174,7 +176,7 @@ fn test_multisig_3_of_5_spend_success() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(5_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(5_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 5_000).unwrap();
 
@@ -184,7 +186,7 @@ fn test_multisig_3_of_5_spend_success() {
         coin,
         script.encode(),
         &[&keys[0], &keys[2], &keys[4]],
-        vec![TxOutput::new(4_800, recipient)],
+        vec![TxOutput::native(4_800, recipient)],
         b"3of5".to_vec(),
     );
 
@@ -201,7 +203,7 @@ fn test_multisig_16_of_16_max_keys_success() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(16_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(16_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 16_000).unwrap();
 
@@ -211,7 +213,7 @@ fn test_multisig_16_of_16_max_keys_success() {
         coin,
         script.encode(),
         &signers,
-        vec![TxOutput::new(15_500, recipient)],
+        vec![TxOutput::native(15_500, recipient)],
         b"16of16".to_vec(),
     );
 
@@ -228,7 +230,7 @@ fn test_multisig_1_of_16_min_threshold_max_keys_success() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -238,7 +240,7 @@ fn test_multisig_1_of_16_min_threshold_max_keys_success() {
         coin,
         script.encode(),
         &[&keys[14]],
-        vec![TxOutput::new(900, recipient)],
+        vec![TxOutput::native(900, recipient)],
         b"1of16".to_vec(),
     );
 
@@ -258,7 +260,7 @@ fn test_redeem_script_zero_threshold_rejected() {
     let p2sh_addr = Address::from_script(&raw_script);
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -268,7 +270,7 @@ fn test_redeem_script_zero_threshold_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -282,7 +284,7 @@ fn test_redeem_script_zero_key_count_rejected() {
     let p2sh_addr = Address::from_script(&raw_script);
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -292,7 +294,7 @@ fn test_redeem_script_zero_key_count_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, Address::p2pk([0u8; 32]))],
+        vec![TxOutput::native(900, Address::p2pk([0u8; 32]))],
         b"m".to_vec(),
     );
 
@@ -307,7 +309,7 @@ fn test_redeem_script_threshold_exceeds_key_count_rejected() {
     let p2sh_addr = Address::from_script(&raw_script);
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -317,7 +319,7 @@ fn test_redeem_script_threshold_exceeds_key_count_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -333,7 +335,7 @@ fn test_redeem_script_key_count_exceeds_max_16_rejected() {
     let p2sh_addr = Address::from_script(&raw_script);
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -343,7 +345,7 @@ fn test_redeem_script_key_count_exceeds_max_16_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -358,7 +360,7 @@ fn test_redeem_script_max_byte_values_rejected() {
     let p2sh_addr = Address::from_script(&raw_script);
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -368,7 +370,7 @@ fn test_redeem_script_max_byte_values_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, Address::p2pk([0u8; 32]))],
+        vec![TxOutput::native(900, Address::p2pk([0u8; 32]))],
         b"m".to_vec(),
     );
 
@@ -386,7 +388,7 @@ fn test_redeem_script_empty_or_too_short_rejected() {
     let p2sh_addr = Address::from_script(&raw_script);
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -396,7 +398,7 @@ fn test_redeem_script_empty_or_too_short_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, Address::p2pk([0u8; 32]))],
+        vec![TxOutput::native(900, Address::p2pk([0u8; 32]))],
         b"m".to_vec(),
     );
 
@@ -412,7 +414,7 @@ fn test_redeem_script_truncated_rejected() {
 
     let p2sh_addr = Address::from_script(&raw_script);
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -422,7 +424,7 @@ fn test_redeem_script_truncated_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -438,7 +440,7 @@ fn test_redeem_script_trailing_garbage_bytes_rejected() {
 
     let p2sh_addr = Address::from_script(&raw_script);
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -448,7 +450,7 @@ fn test_redeem_script_trailing_garbage_bytes_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -463,7 +465,7 @@ fn test_redeem_script_duplicate_public_keys_rejected() {
     let p2sh_addr = Address::from_script(&raw_script);
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -473,7 +475,7 @@ fn test_redeem_script_duplicate_public_keys_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -494,7 +496,7 @@ fn test_valid_script_wrong_address_hash_rejected() {
     let mut utxo = UtxoSet::new();
     // Locked to Script B
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(1_000, script_b.address())],
+        vec![TxOutput::native(1_000, script_b.address())],
         b"cb".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -505,7 +507,7 @@ fn test_valid_script_wrong_address_hash_rejected() {
         coin,
         script_a.encode(),
         &[&keys[0]],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -519,8 +521,10 @@ fn test_single_bit_flip_in_script_hash_rejected() {
     let script = MultisigScript::new(1, vec![*keys[0].address().payload()]).unwrap();
 
     let mut utxo = UtxoSet::new();
-    let coinbase =
-        Transaction::coinbase(vec![TxOutput::new(1_000, script.address())], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(
+        vec![TxOutput::native(1_000, script.address())],
+        b"cb".to_vec(),
+    );
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -531,7 +535,7 @@ fn test_single_bit_flip_in_script_hash_rejected() {
         coin,
         tampered_script,
         &[&keys[0]],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -555,7 +559,7 @@ fn test_missing_signatures_insufficient_threshold_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -564,7 +568,7 @@ fn test_missing_signatures_insufficient_threshold_rejected() {
         coin,
         script.encode(),
         &[&keys[0]], // only 1
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -590,7 +594,7 @@ fn test_zero_signatures_witness_only_script_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -599,7 +603,7 @@ fn test_zero_signatures_witness_only_script_rejected() {
         coin,
         script.encode(),
         &[], // 0 signatures
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -626,7 +630,7 @@ fn test_excess_signatures_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -635,7 +639,7 @@ fn test_excess_signatures_rejected() {
         coin,
         script.encode(),
         &[&keys[0], &keys[1], &keys[2]], // 3 signatures
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -657,7 +661,7 @@ fn test_empty_witness_stack_on_p2sh_spend_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -666,7 +670,7 @@ fn test_empty_witness_stack_on_p2sh_spend_rejected() {
             outpoint: coin,
             witness: Vec::new(), // completely empty
         }],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -696,7 +700,7 @@ fn test_corrupted_signature_bytes_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -704,7 +708,7 @@ fn test_corrupted_signature_bytes_rejected() {
         coin,
         script.encode(),
         &[&keys[0], &keys[1]],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
     // Corrupt signature byte
@@ -726,7 +730,7 @@ fn test_signature_from_unauthorized_key_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -735,7 +739,7 @@ fn test_signature_from_unauthorized_key_rejected() {
         coin,
         script.encode(),
         &[&keys[0], &outsider],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -750,7 +754,7 @@ fn test_signature_wrong_sighash_replay_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -762,7 +766,7 @@ fn test_signature_wrong_sighash_replay_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -777,7 +781,7 @@ fn test_malformed_signature_length_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -789,7 +793,7 @@ fn test_malformed_signature_length_rejected() {
     };
     let tx = Transaction::new(
         vec![dummy_spend],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
 
@@ -812,7 +816,7 @@ fn test_duplicate_signature_reuse_rejected() {
     let p2sh_addr = script.address();
 
     let mut utxo = UtxoSet::new();
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(1_000, p2sh_addr)], b"cb".to_vec());
+    let coinbase = Transaction::coinbase(vec![TxOutput::native(1_000, p2sh_addr)], b"cb".to_vec());
     let coin = OutPoint::new(coinbase.id(), 0);
     apply_block(&mut utxo, &[coinbase], 1_000).unwrap();
 
@@ -821,7 +825,7 @@ fn test_duplicate_signature_reuse_rejected() {
             outpoint: coin,
             witness: Vec::new(),
         }],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"m".to_vec(),
     );
     let sighash = tx.sighash();
@@ -850,7 +854,7 @@ fn test_pre_activation_p2sh_output_rejected() {
     // Attempt to create P2SH output at blue score 1
     let tx = Transaction::signed(
         &[(coin, &keys[0])],
-        vec![TxOutput::new(900, p2sh_addr)],
+        vec![TxOutput::native(900, p2sh_addr)],
         b"pre".to_vec(),
     );
 
@@ -881,7 +885,7 @@ fn test_exact_activation_boundary_transition() {
     // Advance chain: Block 1 (blue score 1)
     let tx1 = Transaction::signed(
         &[(current_coin, &keys[0])],
-        vec![TxOutput::new(950, keys[0].address())],
+        vec![TxOutput::native(950, keys[0].address())],
         b"b1".to_vec(),
     );
     current_coin = OutPoint::new(tx1.id(), 0);
@@ -893,7 +897,7 @@ fn test_exact_activation_boundary_transition() {
     // Attempting P2SH output in Block 2 must fail!
     let tx_fail = Transaction::signed(
         &[(current_coin, &keys[0])],
-        vec![TxOutput::new(900, p2sh_addr)],
+        vec![TxOutput::native(900, p2sh_addr)],
         b"b2_fail".to_vec(),
     );
     let err = ledger
@@ -911,7 +915,7 @@ fn test_exact_activation_boundary_transition() {
     // Submit valid P2PK tx for Block 2
     let tx2 = Transaction::signed(
         &[(current_coin, &keys[0])],
-        vec![TxOutput::new(900, keys[0].address())],
+        vec![TxOutput::native(900, keys[0].address())],
         b"b2".to_vec(),
     );
     current_coin = OutPoint::new(tx2.id(), 0);
@@ -923,7 +927,7 @@ fn test_exact_activation_boundary_transition() {
     // P2SH output is now accepted!
     let tx3 = Transaction::signed(
         &[(current_coin, &keys[0])],
-        vec![TxOutput::new(850, p2sh_addr)],
+        vec![TxOutput::native(850, p2sh_addr)],
         b"b3".to_vec(),
     );
     let p2sh_coin = OutPoint::new(tx3.id(), 0);
@@ -936,7 +940,7 @@ fn test_exact_activation_boundary_transition() {
         p2sh_coin,
         script.encode(),
         &[&keys[0]],
-        vec![TxOutput::new(800, keys[0].address())],
+        vec![TxOutput::native(800, keys[0].address())],
         b"b4".to_vec(),
     );
     let res = ledger.insert(vec![parent], 1, 4, 0, &[spend_tx]);
@@ -953,7 +957,7 @@ fn test_legacy_p2pk_permanently_valid_post_activation() {
 
     let transfer = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(900, bob.address())],
+        vec![TxOutput::native(900, bob.address())],
         b"p2pk".to_vec(),
     );
     let id = ledger.insert(vec![ledger.genesis()], 1, 1, 0, &[transfer]);
@@ -975,8 +979,8 @@ fn test_mixed_block_p2pk_and_p2sh_transactions_coexist() {
     let mut utxo = UtxoSet::new();
     let cb1 = Transaction::coinbase(
         vec![
-            TxOutput::new(1_000, kp_a.address()),
-            TxOutput::new(2_000, p2sh_addr),
+            TxOutput::native(1_000, kp_a.address()),
+            TxOutput::native(2_000, p2sh_addr),
         ],
         b"cb".to_vec(),
     );
@@ -987,7 +991,7 @@ fn test_mixed_block_p2pk_and_p2sh_transactions_coexist() {
     // Tx 1: P2PK -> P2SH
     let tx1 = Transaction::signed(
         &[(coin_p2pk, &kp_a)],
-        vec![TxOutput::new(900, p2sh_addr)],
+        vec![TxOutput::native(900, p2sh_addr)],
         b"tx1".to_vec(),
     );
     // Tx 2: P2SH -> P2PK
@@ -995,7 +999,7 @@ fn test_mixed_block_p2pk_and_p2sh_transactions_coexist() {
         coin_p2sh,
         script.encode(),
         &[&kp_a],
-        vec![TxOutput::new(1_900, kp_b.address())],
+        vec![TxOutput::native(1_900, kp_b.address())],
         b"tx2".to_vec(),
     );
 
@@ -1019,8 +1023,8 @@ fn test_single_tx_mixed_inputs_p2pk_and_p2sh() {
     let mut utxo = UtxoSet::new();
     let cb = Transaction::coinbase(
         vec![
-            TxOutput::new(1_000, kp_a.address()), // P2PK
-            TxOutput::new(2_000, p2sh_addr),      // P2SH
+            TxOutput::native(1_000, kp_a.address()), // P2PK
+            TxOutput::native(2_000, p2sh_addr),      // P2SH
         ],
         b"cb".to_vec(),
     );
@@ -1040,7 +1044,7 @@ fn test_single_tx_mixed_inputs_p2pk_and_p2sh() {
                 witness: Vec::new(),
             },
         ],
-        vec![TxOutput::new(2_900, kp_b.address())],
+        vec![TxOutput::native(2_900, kp_b.address())],
         b"mixed".to_vec(),
     );
     let sighash = tx.sighash();
@@ -1067,7 +1071,7 @@ fn test_single_tx_mixed_inputs_p2pk_and_p2sh() {
 fn test_p2pk_spent_with_multisig_witness_rejected() {
     let kp = KeyPair::from_u64(1);
     let mut utxo = UtxoSet::new();
-    let cb = Transaction::coinbase(vec![TxOutput::new(1_000, kp.address())], b"cb".to_vec());
+    let cb = Transaction::coinbase(vec![TxOutput::native(1_000, kp.address())], b"cb".to_vec());
     let coin = OutPoint::new(cb.id(), 0);
     apply_block(&mut utxo, &[cb], 1_000).unwrap();
 
@@ -1077,7 +1081,7 @@ fn test_p2pk_spent_with_multisig_witness_rejected() {
             outpoint: coin,
             witness: vec![vec![0u8; 64], vec![0u8; 64]], // 2 items
         }],
-        vec![TxOutput::new(900, kp.address())],
+        vec![TxOutput::native(900, kp.address())],
         b"m".to_vec(),
     );
 
@@ -1098,7 +1102,10 @@ fn test_p2sh_spent_with_single_sig_witness_rejected() {
     let script = MultisigScript::new(1, vec![*kp.address().payload()]).unwrap();
 
     let mut utxo = UtxoSet::new();
-    let cb = Transaction::coinbase(vec![TxOutput::new(1_000, script.address())], b"cb".to_vec());
+    let cb = Transaction::coinbase(
+        vec![TxOutput::native(1_000, script.address())],
+        b"cb".to_vec(),
+    );
     let coin = OutPoint::new(cb.id(), 0);
     apply_block(&mut utxo, &[cb], 1_000).unwrap();
 
@@ -1108,7 +1115,7 @@ fn test_p2sh_spent_with_single_sig_witness_rejected() {
             outpoint: coin,
             witness: vec![vec![0u8; 64]], // 1 item (a signature, not the redeem script)
         }],
-        vec![TxOutput::new(900, kp.address())],
+        vec![TxOutput::native(900, kp.address())],
         b"m".to_vec(),
     );
 
@@ -1124,8 +1131,10 @@ fn test_multisig_double_spend_in_parallel_blocks_resolved_by_linearization() {
     let p2sh_addr = script.address();
 
     // Genesis funds miner (P2PK)
-    let genesis_cb =
-        Transaction::coinbase(vec![TxOutput::new(1_000, miner.address())], b"gen".to_vec());
+    let genesis_cb = Transaction::coinbase(
+        vec![TxOutput::native(1_000, miner.address())],
+        b"gen".to_vec(),
+    );
     let coin_gen = OutPoint::new(genesis_cb.id(), 0);
 
     let genesis_block = Block::genesis(1, 0, 0, encode_block_payload(&[genesis_cb]));
@@ -1135,7 +1144,7 @@ fn test_multisig_double_spend_in_parallel_blocks_resolved_by_linearization() {
     // Block 1 transfers miner -> P2SH address
     let fund_p2sh = Transaction::signed(
         &[(coin_gen, &miner)],
-        vec![TxOutput::new(950, p2sh_addr)],
+        vec![TxOutput::native(950, p2sh_addr)],
         b"fund".to_vec(),
     );
     let coin_p2sh = OutPoint::new(fund_p2sh.id(), 0);
@@ -1156,7 +1165,7 @@ fn test_multisig_double_spend_in_parallel_blocks_resolved_by_linearization() {
         coin_p2sh,
         script.encode(),
         &[&kp],
-        vec![TxOutput::new(900, alice)],
+        vec![TxOutput::native(900, alice)],
         b"a".to_vec(),
     );
     let block_a = Block::new(vec![id_1], 10, 2, 0, encode_block_payload(&[spend_a]));
@@ -1167,7 +1176,7 @@ fn test_multisig_double_spend_in_parallel_blocks_resolved_by_linearization() {
         coin_p2sh,
         script.encode(),
         &[&kp],
-        vec![TxOutput::new(900, bob)],
+        vec![TxOutput::native(900, bob)],
         b"b".to_vec(),
     );
     let block_b = Block::new(vec![id_1], 5, 2, 0, encode_block_payload(&[spend_b]));
@@ -1205,7 +1214,7 @@ fn test_multisig_ledger_snapshot_and_replay_roundtrip() {
         coin,
         script.encode(),
         &[&kp],
-        vec![TxOutput::new(900, recipient)],
+        vec![TxOutput::native(900, recipient)],
         b"snap".to_vec(),
     );
     ledger

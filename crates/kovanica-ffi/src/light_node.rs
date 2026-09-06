@@ -132,6 +132,8 @@ pub struct HistoryEntry {
     pub direction: TxDirection,
     /// Value moved, in base units (decimal string).
     pub amount: String,
+    /// Asset id (lowercase hex), if non-native. `None` = native KVNC.
+    pub asset_id_hex: Option<String>,
 }
 
 /// Genesis parameters for a fresh light node.
@@ -181,6 +183,8 @@ pub struct MultisigSpendOutput {
     pub value: u64,
     /// Recipient address: 64-hex, 66-hex, or `kvnc…dag`.
     pub address: String,
+    /// Asset id (lowercase hex), if non-native. `None` = native KVNC.
+    pub asset_id_hex: Option<String>,
 }
 
 /// A Kovanica light node: ledger + mempool + hybrid validator identity.
@@ -362,9 +366,9 @@ impl LightNode {
                     .find(|(op, _v)| *op == funder)
                     .map(|(_, v)| *v - amount)
                     .unwrap_or(0);
-                let mut outputs = vec![TxOutput::new(amount, addr)];
+                let mut outputs = vec![TxOutput::native(amount, addr)];
                 if rest > 0 {
-                    outputs.push(TxOutput::new(rest, addr));
+                    outputs.push(TxOutput::native(rest, addr));
                 }
                 let mut split =
                     Transaction::unsigned(std::slice::from_ref(&funder), outputs, Vec::new());
@@ -378,7 +382,7 @@ impl LightNode {
 
         let bond = Transaction::signed(
             &[(source_op, &kp)],
-            vec![TxOutput::new(amount, addr)],
+            vec![TxOutput::native(amount, addr)],
             bond_tag(&vrf_pk),
         );
         let bond_id = bond.id();
@@ -461,9 +465,9 @@ impl LightNode {
                     .find(|(op, _v)| *op == funder)
                     .map(|(_, v)| *v - amount)
                     .unwrap_or(0);
-                let mut outputs = vec![TxOutput::new(amount, addr)];
+                let mut outputs = vec![TxOutput::native(amount, addr)];
                 if rest > 0 {
-                    outputs.push(TxOutput::new(rest, addr));
+                    outputs.push(TxOutput::native(rest, addr));
                 }
                 let mut split =
                     Transaction::unsigned(std::slice::from_ref(&funder), outputs, Vec::new());
@@ -477,7 +481,7 @@ impl LightNode {
 
         let bond = Transaction::signed(
             &[(source_op, &kp)],
-            vec![TxOutput::new(amount, addr)],
+            vec![TxOutput::native(amount, addr)],
             bond_tag(&vrf_pk),
         );
         let bond_id = bond.id();
@@ -561,6 +565,37 @@ impl LightNode {
         })
     }
 
+    /// Transfer `amount` of a specific asset from actor `from_seed` to actor
+    /// `to_seed`, sealed immediately in a mined block.
+    /// `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+    pub fn send_asset(
+        &self,
+        from_seed: u64,
+        amount: u64,
+        to_seed: u64,
+        asset_id_hex: Option<String>,
+    ) -> Result<SendReceipt, LightNodeError> {
+        let asset_id = match asset_id_hex {
+            Some(hex) => {
+                let raw = decode_hex(&hex, "asset id")?;
+                if raw.len() != 32 {
+                    return Err(invalid("asset id must be 32 bytes hex"));
+                }
+                Some(kovanica_state::AssetId::from_bytes(
+                    <[u8; 32]>::try_from(raw.as_slice())
+                        .map_err(|_| invalid("asset id must be 32 bytes hex"))?,
+                ))
+            }
+            None => None,
+        };
+        let mut node = self.lock();
+        let sent = node.send_asset(from_seed, amount, to_seed, asset_id)?;
+        Ok(SendReceipt {
+            block_id_hex: sent.block.to_hex(),
+            tx_id_hex: hex::encode(sent.tx.as_bytes()),
+        })
+    }
+
     /// Transfer using an imported secret: the wallet passes its 32-byte
     /// ed25519 seed as hex; the secret is used for this call only and never
     /// stored. `to_address` accepts 64-hex or `kvnc…dag` form.
@@ -575,6 +610,39 @@ impl LightNode {
             .map_err(|e| invalid(format!("bad address: {e}")))?;
         let mut node = self.lock();
         let sent = node.send_with(&kp, amount, to)?;
+        Ok(SendReceipt {
+            block_id_hex: sent.block.to_hex(),
+            tx_id_hex: hex::encode(sent.tx.as_bytes()),
+        })
+    }
+
+    /// Transfer `amount` of a specific asset using an imported secret.
+    /// `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+    pub fn send_from_asset(
+        &self,
+        signing_secret_hex: String,
+        amount: u64,
+        to_address: String,
+        asset_id_hex: Option<String>,
+    ) -> Result<SendReceipt, LightNodeError> {
+        let kp = keypair_from_secret(&signing_secret_hex)?;
+        let to = kovanica_state::Address::parse(&to_address)
+            .map_err(|e| invalid(format!("bad address: {e}")))?;
+        let asset_id = match asset_id_hex {
+            Some(hex) => {
+                let raw = decode_hex(&hex, "asset id")?;
+                if raw.len() != 32 {
+                    return Err(invalid("asset id must be 32 bytes hex"));
+                }
+                Some(kovanica_state::AssetId::from_bytes(
+                    <[u8; 32]>::try_from(raw.as_slice())
+                        .map_err(|_| invalid("asset id must be 32 bytes hex"))?,
+                ))
+            }
+            None => None,
+        };
+        let mut node = self.lock();
+        let sent = node.send_with_asset(&kp, amount, to, asset_id)?;
         Ok(SendReceipt {
             block_id_hex: sent.block.to_hex(),
             tx_id_hex: hex::encode(sent.tx.as_bytes()),
@@ -640,6 +708,32 @@ impl LightNode {
         let addr = kovanica_state::Address::parse(&address)
             .map_err(|e| invalid(format!("bad address: {e}")))?;
         let balance = self.lock().balance(&addr)?;
+        Ok(balance.to_string())
+    }
+
+    /// Spendable balance of an address for a specific asset.
+    /// `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
+    pub fn balance_of_asset(
+        &self,
+        address: String,
+        asset_id_hex: Option<String>,
+    ) -> Result<String, LightNodeError> {
+        let addr = kovanica_state::Address::parse(&address)
+            .map_err(|e| invalid(format!("bad address: {e}")))?;
+        let asset_id = match asset_id_hex {
+            Some(hex) => {
+                let raw = decode_hex(&hex, "asset id")?;
+                if raw.len() != 32 {
+                    return Err(invalid("asset id must be 32 bytes hex"));
+                }
+                Some(kovanica_state::AssetId::from_bytes(
+                    <[u8; 32]>::try_from(raw.as_slice())
+                        .map_err(|_| invalid("asset id must be 32 bytes hex"))?,
+                ))
+            }
+            None => None,
+        };
+        let balance = self.lock().balance_of_asset(&addr, asset_id)?;
         Ok(balance.to_string())
     }
 
@@ -759,6 +853,7 @@ impl LightNode {
                     kovanica_node::WalletDirection::Sent => TxDirection::Sent,
                 },
                 amount: ev.amount.to_string(),
+                asset_id_hex: ev.asset_id.map(|a| a.to_hex()),
             })
             .collect())
     }
@@ -924,7 +1019,7 @@ impl LightNode {
                     .ok_or_else(|| invalid("output sum overflow"))?;
                 let owner = kovanica_state::Address::parse(&o.address)
                     .map_err(|e| invalid(format!("bad output address: {e}")))?;
-                Ok(TxOutput::new(o.value, owner))
+                Ok(TxOutput::native(o.value, owner))
             })
             .collect::<Result<Vec<_>, LightNodeError>>()?;
         let tx = self

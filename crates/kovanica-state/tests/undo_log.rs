@@ -22,7 +22,7 @@ const SCHEDULE: HalvingSchedule = HalvingSchedule::new(SUBSIDY, DEFAULT_HALVING_
 /// ledger and the coinbase outpoint.
 fn funded(finality_depth: u64, funding: u64) -> (Ledger, OutPoint) {
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(funding, KeyPair::from_u64(1).address())],
+        vec![TxOutput::native(funding, KeyPair::from_u64(1).address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -33,9 +33,9 @@ fn funded(finality_depth: u64, funding: u64) -> (Ledger, OutPoint) {
 /// A signed transfer of `value` from `from` (spending `coin`) to `to`, with the
 /// remainder returned to `from` as change so no value is burned as fees.
 fn transfer(coin: OutPoint, from: &KeyPair, to: &Address, value: u64, funding: u64) -> Transaction {
-    let mut outputs = vec![TxOutput::new(value, *to)];
+    let mut outputs = vec![TxOutput::native(value, *to)];
     if funding > value {
-        outputs.push(TxOutput::new(funding - value, from.address()));
+        outputs.push(TxOutput::native(funding - value, from.address()));
     }
     Transaction::signed(&[(coin, from)], outputs, Vec::new())
 }

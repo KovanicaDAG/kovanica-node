@@ -85,7 +85,7 @@ mod tests {
     fn tx(seed: u8) -> Transaction {
         let kp = KeyPair::from_u64(1);
         let op = OutPoint::new(TxId::from_bytes([seed; 32]), 0);
-        Transaction::signed(&[(op, &kp)], vec![TxOutput::new(1, kp.address())], vec![])
+        Transaction::signed(&[(op, &kp)], vec![TxOutput::native(1, kp.address())], vec![])
     }
 
     #[test]
@@ -115,7 +115,7 @@ mod tests {
 
         pool.add(t);
         let mut utxo = UtxoSet::new();
-        utxo.insert(op, TxOutput::new(1, KeyPair::from_u64(1).address()));
+        utxo.insert(op, TxOutput::native(1, KeyPair::from_u64(1).address()));
         assert_eq!(pool.evict_invalid(&utxo), 0);
         assert_eq!(pool.len(), 1);
     }

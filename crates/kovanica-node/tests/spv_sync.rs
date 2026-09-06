@@ -314,7 +314,7 @@ fn test_spv_tampered_merkle_proof_rejection() {
         let op = OutPoint::new(TxId::from_bytes([1u8; 32]), 0);
         *tx = Transaction::signed(
             &[(op, &kp)],
-            vec![TxOutput::new(999_999, kp.address())],
+            vec![TxOutput::native(999_999, kp.address())],
             vec![],
         );
     }

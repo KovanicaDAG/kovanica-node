@@ -555,7 +555,11 @@ mod tests {
     fn tx(addr: Address, value: u64, tag: &[u8]) -> Transaction {
         let kp = KeyPair::from_u64(1);
         let op = OutPoint::new(TxId::from_bytes([1u8; 32]), 0);
-        Transaction::signed(&[(op, &kp)], vec![TxOutput::new(value, addr)], tag.to_vec())
+        Transaction::signed(
+            &[(op, &kp)],
+            vec![TxOutput::native(value, addr)],
+            tag.to_vec(),
+        )
     }
 
     fn header_chain(n: usize) -> (Vec<BlockHeader>, Vec<Vec<Transaction>>) {
@@ -568,7 +572,10 @@ mod tests {
         for i in 0..n {
             let kp = KeyPair::from_u64(i as u64 + 1);
             let tx = if i == 0 {
-                Transaction::coinbase(vec![TxOutput::new(1000, kp.address())], b"genesis".to_vec())
+                Transaction::coinbase(
+                    vec![TxOutput::native(1000, kp.address())],
+                    b"genesis".to_vec(),
+                )
             } else {
                 tx(kp.address(), 100, &format!("b{}", i).into_bytes())
             };

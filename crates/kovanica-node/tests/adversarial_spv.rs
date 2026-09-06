@@ -28,7 +28,10 @@ fn dummy_tx(seed: u64, amount: u64) -> Transaction {
     let op = OutPoint::new(TxId::from_bytes([seed as u8; 32]), 0);
     Transaction::signed(
         &[(op, &kp)],
-        vec![TxOutput::new(amount, KeyPair::from_u64(seed + 1).address())],
+        vec![TxOutput::native(
+            amount,
+            KeyPair::from_u64(seed + 1).address(),
+        )],
         vec![],
     )
 }

@@ -25,7 +25,7 @@ const SCHEDULE: HalvingSchedule = HalvingSchedule::new(SUBSIDY, DEFAULT_HALVING_
 
 fn funded(finality_depth: u64, funding: u64) -> (Ledger, OutPoint) {
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(funding, KeyPair::from_u64(1).address())],
+        vec![TxOutput::native(funding, KeyPair::from_u64(1).address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -34,9 +34,9 @@ fn funded(finality_depth: u64, funding: u64) -> (Ledger, OutPoint) {
 }
 
 fn transfer(coin: OutPoint, from: &KeyPair, to: &Address, value: u64, funding: u64) -> Transaction {
-    let mut outputs = vec![TxOutput::new(value, *to)];
+    let mut outputs = vec![TxOutput::native(value, *to)];
     if funding > value {
-        outputs.push(TxOutput::new(funding - value, from.address()));
+        outputs.push(TxOutput::native(funding - value, from.address()));
     }
     Transaction::signed(&[(coin, from)], outputs, Vec::new())
 }
@@ -44,7 +44,7 @@ fn transfer(coin: OutPoint, from: &KeyPair, to: &Address, value: u64, funding: u
 fn bond_tx(coin: OutPoint, owner: &KeyPair, value: u64, vrf_pk: [u8; 32]) -> Transaction {
     Transaction::signed(
         &[(coin, owner)],
-        vec![TxOutput::new(value, owner.address())],
+        vec![TxOutput::native(value, owner.address())],
         bond_tag(&vrf_pk),
     )
 }
@@ -52,7 +52,7 @@ fn bond_tx(coin: OutPoint, owner: &KeyPair, value: u64, vrf_pk: [u8; 32]) -> Tra
 fn unbond_tx(coin: OutPoint, owner: &KeyPair, value: u64) -> Transaction {
     Transaction::signed(
         &[(coin, owner)],
-        vec![TxOutput::new(value, owner.address())],
+        vec![TxOutput::native(value, owner.address())],
         kovanica_state::stake::UNBOND_PREFIX.to_vec(),
     )
 }
@@ -487,7 +487,8 @@ fn coinbase_maturity_and_value_conservation() {
     let genesis = ledger.genesis();
 
     // Same-block spend of a coinbase output must be rejected.
-    let coinbase = Transaction::coinbase(vec![TxOutput::new(100, bob.address())], b"cb1".to_vec());
+    let coinbase =
+        Transaction::coinbase(vec![TxOutput::native(100, bob.address())], b"cb1".to_vec());
     let premature_spend = transfer(
         OutPoint::new(coinbase.id(), 0),
         &bob,
@@ -520,7 +521,10 @@ fn coinbase_maturity_and_value_conservation() {
     assert_eq!(ledger.state(&b2).unwrap().total_value(), 1_100);
 
     // Coinbase overspend must be rejected.
-    let big_cb = Transaction::coinbase(vec![TxOutput::new(2_000, bob.address())], b"cb2".to_vec());
+    let big_cb = Transaction::coinbase(
+        vec![TxOutput::native(2_000, bob.address())],
+        b"cb2".to_vec(),
+    );
     assert!(
         ledger.insert(vec![b2], 1, 4, 0, &[big_cb]).is_err(),
         "coinbase overspend must be rejected"

@@ -150,19 +150,74 @@ impl TxInput {
     }
 }
 
-/// A newly created output: an amount and the address that may later spend it.
+/// A 32-byte BLAKE3 digest identifying an asset definition.
+///
+/// The native KVNC asset is represented by `None` (or `AssetId::native()`).
+/// All other assets carry their definition hash.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct AssetId([u8; 32]);
+
+impl AssetId {
+    /// Construct an `AssetId` from raw bytes.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw 32 bytes of the asset id.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// The native KVNC asset id (all zeros).
+    pub const fn native() -> Self {
+        Self([0u8; 32])
+    }
+
+    /// Whether this is the native KVNC asset.
+    pub fn is_native(&self) -> bool {
+        self.0 == [0u8; 32]
+    }
+
+    /// Lowercase hex rendering.
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
+impl fmt::Display for AssetId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+/// A newly created output: an amount, an optional asset id, and the address that may later spend it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TxOutput {
     /// The value locked in this output.
     pub value: u64,
+    /// The asset this output locks. `None` = native KVNC.
+    pub asset_id: Option<AssetId>,
     /// The address that owns (may spend) this output.
     pub owner: Address,
 }
 
 impl TxOutput {
-    /// Construct an output.
-    pub const fn new(value: u64, owner: Address) -> Self {
-        Self { value, owner }
+    /// Construct an output with an explicit asset id.
+    pub const fn new(value: u64, asset_id: Option<AssetId>, owner: Address) -> Self {
+        Self {
+            value,
+            asset_id,
+            owner,
+        }
+    }
+
+    /// Construct a native KVNC output (asset_id = None).
+    pub const fn native(value: u64, owner: Address) -> Self {
+        Self {
+            value,
+            asset_id: None,
+            owner,
+        }
     }
 }
 
@@ -354,6 +409,14 @@ impl Transaction {
         buf.extend_from_slice(&(self.outputs.len() as u64).to_le_bytes());
         for output in &self.outputs {
             buf.extend_from_slice(&output.value.to_le_bytes());
+            // asset_id: 1 byte flag (0 = None/native, 1 = Some) + 32 bytes if Some
+            match output.asset_id {
+                None => buf.push(0),
+                Some(asset_id) => {
+                    buf.push(1);
+                    buf.extend_from_slice(asset_id.as_bytes());
+                }
+            }
             buf.extend_from_slice(output.owner.as_bytes());
         }
         buf.extend_from_slice(&(self.tag.len() as u64).to_le_bytes());
@@ -506,14 +569,25 @@ impl<'a> Reader<'a> {
                 witness,
             });
         }
-        // Minimum output size: 8 (value) + 33 (owner address) = 41 bytes.
-        let n_outputs = self.read_count(41)?;
+        // Minimum output size: 8 (value) + 1 (asset flag) + 33 (owner address) = 42 bytes.
+        // If asset flag is 1, add 32 bytes for asset_id.
+        let n_outputs = self.read_count(42)?;
         let mut outputs = Vec::with_capacity(n_outputs);
         for _ in 0..n_outputs {
             let value = self.read_u64()?;
+            let asset_flag = self.read_array::<1>()?[0];
+            let asset_id = if asset_flag == 0 {
+                None
+            } else {
+                Some(AssetId::from_bytes(self.read_array::<32>()?))
+            };
             let owner_bytes = self.read_array::<33>()?;
             let owner = Address::from_versioned_bytes(owner_bytes);
-            outputs.push(TxOutput { value, owner });
+            outputs.push(TxOutput {
+                value,
+                asset_id,
+                owner,
+            });
         }
         let tag_len = self.read_count(1)?;
         let tag = self.read_array_dyn(tag_len)?;
@@ -546,7 +620,11 @@ mod tests {
     fn id_and_sighash_are_deterministic() {
         let kp = KeyPair::from_u64(1);
         let op = OutPoint::new(TxId::from_bytes([9u8; 32]), 0);
-        let tx = Transaction::signed(&[(op, &kp)], vec![TxOutput::new(5, addr(2))], b"t".to_vec());
+        let tx = Transaction::signed(
+            &[(op, &kp)],
+            vec![TxOutput::native(5, addr(2))],
+            b"t".to_vec(),
+        );
         assert_eq!(tx.id(), tx.id());
         assert_eq!(tx.sighash(), tx.sighash());
     }
@@ -568,7 +646,7 @@ mod tests {
         let kp1 = KeyPair::from_u64(10);
         let kp2 = KeyPair::from_u64(20);
         let script = vec![1, 2, 0xAA];
-        let outputs = vec![TxOutput::new(50, addr(3))];
+        let outputs = vec![TxOutput::native(50, addr(3))];
 
         let tx1 = Transaction::signed_multisig(
             op,
@@ -587,10 +665,10 @@ mod tests {
     fn payload_roundtrips() {
         let kp = KeyPair::from_u64(1);
         let op = OutPoint::new(TxId::from_bytes([7u8; 32]), 3);
-        let coinbase = Transaction::coinbase(vec![TxOutput::new(50, addr(1))], b"h0".to_vec());
+        let coinbase = Transaction::coinbase(vec![TxOutput::native(50, addr(1))], b"h0".to_vec());
         let transfer = Transaction::signed(
             &[(op, &kp)],
-            vec![TxOutput::new(20, addr(2)), TxOutput::new(30, addr(3))],
+            vec![TxOutput::native(20, addr(2)), TxOutput::native(30, addr(3))],
             Vec::new(),
         );
         let txs = vec![coinbase, transfer];
@@ -608,7 +686,7 @@ mod tests {
             op,
             script,
             &[&kp1, &kp2],
-            vec![TxOutput::new(100, Address::p2sh([0x33u8; 32]))],
+            vec![TxOutput::native(100, Address::p2sh([0x33u8; 32]))],
             b"tag".to_vec(),
         );
         let bytes = encode_block_payload(std::slice::from_ref(&multisig_tx));
@@ -627,7 +705,7 @@ mod tests {
 
     #[test]
     fn truncated_payload_is_rejected() {
-        let tx = Transaction::coinbase(vec![TxOutput::new(1, addr(1))], b"h".to_vec());
+        let tx = Transaction::coinbase(vec![TxOutput::native(1, addr(1))], b"h".to_vec());
         let mut bytes = encode_block_payload(&[tx]);
         bytes.truncate(bytes.len() - 1);
         assert_eq!(

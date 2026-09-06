@@ -29,7 +29,7 @@ pub fn arbitrary_transaction(
     for _ in 0..output_count {
         let value = u.int_in_range(1..=1000)?;
         let addr = arbitrary_address(u)?;
-        outputs.push(TxOutput::new(value, addr));
+        outputs.push(TxOutput::native(value, addr));
     }
 
     // Generate inputs from the keypair's UTXOs (simplified for fuzzing)
@@ -191,7 +191,7 @@ fn arbitrary_ledger(u: &mut Unstructured) -> Result<(Ledger, Vec<u8>), Arbitrary
     let mut outputs = Vec::with_capacity(output_count);
     for _ in 0..output_count {
         let value = u.int_in_range(1..=1000)?;
-        outputs.push(TxOutput::new(value, arbitrary_address(u)?));
+        outputs.push(TxOutput::native(value, arbitrary_address(u)?));
     }
     let coinbase = Transaction::coinbase(outputs, Vec::new());
     let schedule = HalvingSchedule::new(u.int_in_range(1..=10_000)?, u.int_in_range(1..=100)?);
@@ -270,7 +270,7 @@ mod proptest_helpers {
     prop_compose! {
         pub fn arb_txoutput()(value in 1..=10000u64, addr in arb_address())
             -> TxOutput {
-            TxOutput::new(value, addr)
+            TxOutput::native(value, addr)
         }
     }
 
@@ -300,7 +300,7 @@ mod proptest_helpers {
     #[test]
     fn test_tx_roundtrip_prop() {
         let keypair = KeyPair::from_u64(1);
-        let outputs = vec![TxOutput::new(1000, KeyPair::from_u64(2).address())];
+        let outputs = vec![TxOutput::native(1000, KeyPair::from_u64(2).address())];
         let inputs = vec![OutPoint::new(TxId::from_bytes([1u8; 32]), 0)];
         let tx = arb_transaction_inner(keypair, outputs, inputs);
         let encoded = encode_block_payload(std::slice::from_ref(&tx));

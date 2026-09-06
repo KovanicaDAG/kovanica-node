@@ -64,7 +64,7 @@ fn staked_block_produced_gossiped_and_readmitted() {
         .unwrap();
     let bond = Transaction::signed(
         &[(coin, &founder)],
-        vec![TxOutput::new(1_000, founder.address())],
+        vec![TxOutput::native(1_000, founder.address())],
         bond_tag(&pk),
     );
     producer.submit_tx(bond).unwrap();

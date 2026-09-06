@@ -20,7 +20,7 @@ const SUBSIDY: u64 = 1_000;
 /// DAG, the genesis id, and the outpoint of the minted coinbase output.
 fn dag_funding(owner: &KeyPair, funding: u64) -> (Dag, BlockId, OutPoint) {
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(funding, owner.address())],
+        vec![TxOutput::native(funding, owner.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -66,8 +66,8 @@ fn chained_transfers_apply_in_order() {
     let a_to_b = Transaction::signed(
         &[(coin, &alice)],
         vec![
-            TxOutput::new(100, bob.address()),
-            TxOutput::new(400, alice.address()),
+            TxOutput::native(100, bob.address()),
+            TxOutput::native(400, alice.address()),
         ],
         vec![],
     );
@@ -76,7 +76,7 @@ fn chained_transfers_apply_in_order() {
 
     let b_to_c = Transaction::signed(
         &[(bob_coin, &bob)],
-        vec![TxOutput::new(100, carol.address())],
+        vec![TxOutput::native(100, carol.address())],
         vec![],
     );
     dag.insert(tx_block(&[b1], &[b_to_c])).unwrap();
@@ -100,12 +100,12 @@ fn double_spend_across_parallel_blocks_resolved_by_linearization() {
 
     let pay_bob = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(500, bob.address())],
+        vec![TxOutput::native(500, bob.address())],
         b"to-bob".to_vec(),
     );
     let pay_carol = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(500, carol.address())],
+        vec![TxOutput::native(500, carol.address())],
         b"to-carol".to_vec(),
     );
 
@@ -161,12 +161,12 @@ fn final_state_is_independent_of_insertion_order() {
         let (mut dag, genesis, coin) = dag_funding(&alice, 500);
         let pay_bob = Transaction::signed(
             &[(coin, &alice)],
-            vec![TxOutput::new(500, bob.address())],
+            vec![TxOutput::native(500, bob.address())],
             b"to-bob".to_vec(),
         );
         let pay_carol = Transaction::signed(
             &[(coin, &alice)],
-            vec![TxOutput::new(500, carol.address())],
+            vec![TxOutput::native(500, carol.address())],
             b"to-carol".to_vec(),
         );
         let (b_bob, b_carol) = if swap {
@@ -197,7 +197,7 @@ fn invalid_block_is_rejected_without_halting_the_ledger() {
     // Mallory forges a spend of Alice's coin (bad signature).
     let forged = Transaction::signed(
         &[(coin, &mallory)],
-        vec![TxOutput::new(500, mallory.address())],
+        vec![TxOutput::native(500, mallory.address())],
         b"forge".to_vec(),
     );
     let bad = dag.insert(tx_block(&[genesis], &[forged])).unwrap();
@@ -205,7 +205,7 @@ fn invalid_block_is_rejected_without_halting_the_ledger() {
     // Alice legitimately pays Bob, building on the bad block's tip.
     let legit = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(300, bob.address())],
+        vec![TxOutput::native(300, bob.address())],
         b"legit".to_vec(),
     );
     let good = dag.insert(tx_block(&[bad], &[legit])).unwrap();

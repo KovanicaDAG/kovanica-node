@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use crate::keys::Address;
-use crate::tx::{OutPoint, TxId, TxOutput};
+use crate::tx::{AssetId, OutPoint, TxId, TxOutput};
 
 /// The set of unspent transaction outputs — the full ledger state at a point in
 /// the linearized order.
@@ -65,12 +65,23 @@ impl UtxoSet {
         self.map.values().map(|o| u128::from(o.value)).sum()
     }
 
-    /// Spendable balance owned by `owner`: the sum of the unspent outputs locked
-    /// to that address.
+    /// Spendable balance owned by `owner`: the sum of the unspent **native KVNC**
+    /// outputs locked to that address. Asset outputs (RFC-002) are excluded —
+    /// query them with [`Self::balance_of_asset`].
     pub fn balance(&self, owner: &Address) -> u128 {
         self.map
             .values()
-            .filter(|o| &o.owner == owner)
+            .filter(|o| &o.owner == owner && o.asset_id.is_none())
+            .map(|o| u128::from(o.value))
+            .sum()
+    }
+
+    /// Spendable balance owned by `owner` for a specific `asset_id`.
+    /// `asset_id = None` means native KVNC.
+    pub fn balance_of_asset(&self, owner: &Address, asset_id: Option<AssetId>) -> u128 {
+        self.map
+            .values()
+            .filter(|o| &o.owner == owner && o.asset_id == asset_id)
             .map(|o| u128::from(o.value))
             .sum()
     }
@@ -78,6 +89,7 @@ impl UtxoSet {
     /// Serialise the UTXO set for checkpoint persistence. Returns a
     /// self-contained byte encoding: count followed by (outpoint, output) pairs,
     /// sorted by outpoint for deterministic encoding.
+    /// v4: includes optional asset_id (32 bytes) after owner.
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(self.map.len() as u64).to_le_bytes());
@@ -88,17 +100,25 @@ impl UtxoSet {
             buf.extend_from_slice(&op.index.to_le_bytes());
             buf.extend_from_slice(&output.value.to_le_bytes());
             buf.extend_from_slice(output.owner.as_bytes());
+            // asset_id: 0 = native (None), 1 = present + 32 bytes
+            if let Some(asset_id) = output.asset_id {
+                buf.push(1);
+                buf.extend_from_slice(asset_id.as_bytes());
+            } else {
+                buf.push(0);
+            }
         }
         buf
     }
 
     /// Returns the length of the encoded UTXO set (for skipping during decode).
     pub fn encoded_len(&self) -> usize {
-        8 + self.map.len() * (32 + 4 + 8 + 33)
+        8 + self.map.len() * (32 + 4 + 8 + 33 + 1 + 32)
     }
 
     /// Decode a UTXO set from a checkpoint encoding, advancing `bytes` past the
     /// consumed data so the caller can continue parsing.
+    /// v4: reads optional asset_id (32 bytes) after owner.
     pub fn decode(bytes: &mut &[u8]) -> Result<Self, UtxoDecodeError> {
         let mut reader = CheckpointReader::new(bytes);
         let count = reader.read_u64()? as usize;
@@ -108,7 +128,17 @@ impl UtxoSet {
             let index = reader.read_u32()?;
             let value = reader.read_u64()?;
             let owner = Address::from_versioned_bytes(reader.read_array::<33>()?);
-            map.insert(OutPoint::new(tx, index), TxOutput::new(value, owner));
+            // asset_id flag
+            let asset_flag = reader.read_u8()?;
+            let asset_id = if asset_flag == 1 {
+                Some(AssetId::from_bytes(reader.read_array::<32>()?))
+            } else {
+                None
+            };
+            map.insert(
+                OutPoint::new(tx, index),
+                TxOutput::new(value, asset_id, owner),
+            );
         }
         *bytes = &bytes[reader.pos..];
         Ok(Self { map })
@@ -162,6 +192,14 @@ impl<'a> CheckpointReader<'a> {
     fn read_u64(&mut self) -> Result<u64, UtxoDecodeError> {
         Ok(u64::from_le_bytes(self.read_array::<8>()?))
     }
+    fn read_u8(&mut self) -> Result<u8, UtxoDecodeError> {
+        if self.remaining() < 1 {
+            return Err(UtxoDecodeError::UnexpectedEof);
+        }
+        let b = self.buf[self.pos];
+        self.pos += 1;
+        Ok(b)
+    }
 }
 
 #[cfg(test)]
@@ -175,10 +213,10 @@ mod tests {
         let owner = KeyPair::from_u64(1).address();
         let op = OutPoint::new(TxId::from_bytes([1u8; 32]), 0);
         let mut set = UtxoSet::new();
-        set.insert(op, TxOutput::new(10, owner));
+        set.insert(op, TxOutput::native(10, owner));
         set.insert(
             OutPoint::new(TxId::from_bytes([2u8; 32]), 1),
-            TxOutput::new(20, owner),
+            TxOutput::native(20, owner),
         );
 
         let bytes = set.encode();
@@ -186,7 +224,7 @@ mod tests {
         let restored = UtxoSet::decode(&mut slice).unwrap();
 
         assert_eq!(restored.len(), 2);
-        assert_eq!(restored.get(&op), Some(&TxOutput::new(10, owner)));
+        assert_eq!(restored.get(&op), Some(&TxOutput::native(10, owner)));
         assert_eq!(restored.total_value(), 30);
     }
 
@@ -205,11 +243,11 @@ mod tests {
         let op = OutPoint::new(TxId::from_bytes([1u8; 32]), 0);
         let mut set = UtxoSet::new();
         assert!(set.is_empty());
-        set.insert(op, TxOutput::new(10, owner));
-        assert_eq!(set.get(&op), Some(&TxOutput::new(10, owner)));
+        set.insert(op, TxOutput::native(10, owner));
+        assert_eq!(set.get(&op), Some(&TxOutput::native(10, owner)));
         assert_eq!(set.balance(&owner), 10);
         assert_eq!(set.total_value(), 10);
-        assert_eq!(set.remove(&op), Some(TxOutput::new(10, owner)));
+        assert_eq!(set.remove(&op), Some(TxOutput::native(10, owner)));
         assert!(set.is_empty());
     }
 }

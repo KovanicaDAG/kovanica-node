@@ -9,7 +9,7 @@ use kovanica_state::{
 fn bench_ledger_apply(c: &mut Criterion) {
     let founder = KeyPair::from_u64(1);
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(1_000_000, founder.address())],
+        vec![TxOutput::native(1_000_000, founder.address())],
         b"genesis".to_vec(),
     );
     let schedule = HalvingSchedule::new(1_000, 1);
@@ -29,7 +29,7 @@ fn bench_ledger_apply(c: &mut Criterion) {
                     .collect::<Vec<_>>();
                 let mut t = Transaction::unsigned(
                     &inputs,
-                    vec![TxOutput::new(100, recipient.address())],
+                    vec![TxOutput::native(100, recipient.address())],
                     vec![],
                 );
                 let sighash = t.sighash();

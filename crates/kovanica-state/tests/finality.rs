@@ -18,7 +18,7 @@ const SCHEDULE: HalvingSchedule = HalvingSchedule::new(SUBSIDY, DEFAULT_HALVING_
 /// ledger and the coinbase outpoint.
 fn funded(finality_depth: u64, funding: u64) -> (Ledger, OutPoint) {
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(funding, KeyPair::from_u64(1).address())],
+        vec![TxOutput::native(funding, KeyPair::from_u64(1).address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -82,7 +82,7 @@ fn building_on_final_history_is_rejected() {
     let alice = KeyPair::from_u64(1);
     let tx = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(500, KeyPair::from_u64(2).address())],
+        vec![TxOutput::native(500, KeyPair::from_u64(2).address())],
         vec![],
     );
     let err = ledger.insert(vec![early], 1, 0, 0, &[tx]).unwrap_err();
@@ -122,7 +122,7 @@ fn reorg_above_finality_follows_the_heavier_branch() {
     // Light branch: alice -> bob (block `a`), the only tip, so it's selected.
     let to_bob = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(500, bob.address())],
+        vec![TxOutput::native(500, bob.address())],
         b"bob".to_vec(),
     );
     let a = ledger.insert(vec![genesis], 1, 0, 0, &[to_bob]).unwrap();
@@ -134,7 +134,7 @@ fn reorg_above_finality_follows_the_heavier_branch() {
     // (A block's own work counts toward its *descendants'* blue work, not its own.)
     let to_carol = Transaction::signed(
         &[(coin, &alice)],
-        vec![TxOutput::new(500, carol.address())],
+        vec![TxOutput::native(500, carol.address())],
         b"carol".to_vec(),
     );
     let h1 = ledger

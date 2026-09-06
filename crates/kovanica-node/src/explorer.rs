@@ -2119,7 +2119,7 @@ fn handle_multisig_build(
             Some(v) => v,
             None => return bad_request(stream, &format!("outputs[{i}].amount_atoms is required")),
         };
-        outputs.push(TxOutput::new(amount, addr));
+        outputs.push(TxOutput::native(amount, addr));
     }
 
     let node = match selected_node(app, q) {
@@ -3774,7 +3774,7 @@ mod tests {
             .unwrap();
         let bond = Transaction::signed(
             &[(coin, &founder)],
-            vec![TxOutput::new(value, founder.address())],
+            vec![TxOutput::native(value, founder.address())],
             bond_tag(&pk),
         );
         app.mesh.node_mut("alpha").unwrap().submit_tx(bond).unwrap();
@@ -3868,7 +3868,7 @@ mod tests {
             .unwrap();
         let bond = Transaction::signed(
             &[(coin, &founder)],
-            vec![TxOutput::new(value, founder.address())],
+            vec![TxOutput::native(value, founder.address())],
             bond_tag(&pk),
         );
         app.mesh.node_mut("alpha").unwrap().submit_tx(bond).unwrap();

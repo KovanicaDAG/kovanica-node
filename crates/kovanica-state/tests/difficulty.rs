@@ -28,7 +28,7 @@ fn retarget() -> Retarget {
 /// A difficulty-enforcing ledger with an empty-payload-friendly genesis.
 fn difficulty_ledger() -> Ledger {
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(
+        vec![TxOutput::native(
             SUBSIDY,
             kovanica_state::KeyPair::from_u64(1).address(),
         )],

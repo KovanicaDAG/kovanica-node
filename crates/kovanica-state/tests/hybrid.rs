@@ -68,7 +68,7 @@ impl Validator {
 fn funded_ledger(funding: u64) -> (Ledger, KeyPair, OutPoint) {
     let founder = KeyPair::from_u64(1);
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(funding, founder.address())],
+        vec![TxOutput::native(funding, founder.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -80,7 +80,7 @@ fn funded_ledger(funding: u64) -> (Ledger, KeyPair, OutPoint) {
 fn funded_finality_ledger(funding: u64, depth: u64) -> (Ledger, KeyPair, OutPoint) {
     let founder = KeyPair::from_u64(1);
     let coinbase = Transaction::coinbase(
-        vec![TxOutput::new(funding, founder.address())],
+        vec![TxOutput::native(funding, founder.address())],
         b"genesis".to_vec(),
     );
     let coin = OutPoint::new(coinbase.id(), 0);
@@ -99,7 +99,7 @@ fn full_bond_tx(
 ) -> Transaction {
     Transaction::signed(
         &[(coin, founder)],
-        vec![TxOutput::new(funding, founder.address())],
+        vec![TxOutput::native(funding, founder.address())],
         bond_tag(&validator.pk),
     )
 }

@@ -263,6 +263,11 @@ uint64_t uniffi_kovanica_ffi_fn_constructor_lightnode_new(RustBuffer config, Rus
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_balance_of_address(uint64_t ptr, RustBuffer address, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_ASSET
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_ASSET
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_balance_of_asset(uint64_t ptr, RustBuffer address, RustBuffer asset_id_hex, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_SEED
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_SEED
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_balance_of_seed(uint64_t ptr, uint64_t seed, RustCallStatus *_Nonnull out_status
@@ -418,9 +423,19 @@ RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_selected_tip(uint64_t ptr, Ru
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_send(uint64_t ptr, uint64_t from_seed, uint64_t amount, uint64_t to_seed, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_ASSET
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_ASSET
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_send_asset(uint64_t ptr, uint64_t from_seed, uint64_t amount, uint64_t to_seed, RustBuffer asset_id_hex, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_FROM
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_FROM
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_send_from(uint64_t ptr, RustBuffer signing_secret_hex, uint64_t amount, RustBuffer to_address, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_FROM_ASSET
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_FROM_ASSET
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_send_from_asset(uint64_t ptr, RustBuffer signing_secret_hex, uint64_t amount, RustBuffer to_address, RustBuffer asset_id_hex, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SET_MINER_SEED
@@ -754,6 +769,12 @@ uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_address(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_ASSET
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_ASSET
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_SEED
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_SEED
 uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed(void
@@ -940,9 +961,21 @@ uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_send(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_ASSET
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_ASSET
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_send_asset(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_FROM
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_FROM
 uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_send_from(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_FROM_ASSET
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_FROM_ASSET
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_send_from_asset(void
     
 );
 #endif
