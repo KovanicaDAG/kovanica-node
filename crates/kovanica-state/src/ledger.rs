@@ -70,6 +70,7 @@ use kovanica_dag::{
     decode_snapshot, Block, BlockId, BlockPreview, Dag, DagError, KParam, Retarget, SnapshotError,
 };
 
+use crate::htlc::HtlcScript;
 use crate::keys::{verify, verify_pk, Address};
 use crate::multisig::{verify_threshold_signatures, MultisigScript};
 use crate::script_v2::ScriptV2;
@@ -89,6 +90,9 @@ pub const STEALTH_ACTIVATION_SCORE: u64 = 0;
 
 /// Default blue-score threshold for RFC-003 script v2 activation.
 pub const SCRIPT_V2_ACTIVATION_SCORE: u64 = 0;
+
+/// Default blue-score threshold for RFC-004 HTLC activation.
+pub const HTLC_ACTIVATION_SCORE: u64 = 0;
 
 /// Halving schedule for block subsidy.
 ///
@@ -283,6 +287,30 @@ pub enum LedgerError {
         blue_score: u64,
         activation_score: u64,
     },
+
+    // HTLC (RFC-004) Variants
+    /// HTLC transaction submitted prior to consensus activation blue score
+    PreActivationHtlc {
+        tx: TxId,
+        blue_score: u64,
+        activation_score: u64,
+    },
+    /// The HTLC redeem preimage does not hash to the committed preimage hash.
+    HtlcPreimageMismatch { tx: TxId, input: usize },
+    /// An HTLC refund was attempted before the chain reached the timeout height.
+    HtlcTimeoutNotReached {
+        tx: TxId,
+        input: usize,
+        height: u64,
+        timeout: u32,
+    },
+    /// A transaction's `n_lock_time` exceeds the block's height, so it is
+    /// non-final and cannot be mined (BIP-65/BIP-113).
+    NonFinalTransaction {
+        tx: TxId,
+        n_lock_time: u32,
+        height: u64,
+    },
 }
 
 impl core::fmt::Display for LedgerError {
@@ -389,6 +417,35 @@ impl core::fmt::Display for LedgerError {
                 f,
                 "script v2 tx {tx} rejected before activation: blue score {blue_score} <= activation {activation_score}"
             ),
+            LedgerError::PreActivationHtlc {
+                tx,
+                blue_score,
+                activation_score,
+            } => write!(
+                f,
+                "htlc tx {tx} rejected before activation: blue score {blue_score} <= activation {activation_score}"
+            ),
+            LedgerError::HtlcPreimageMismatch { tx, input } => write!(
+                f,
+                "htlc preimage mismatch on input {input} of {tx}"
+            ),
+            LedgerError::HtlcTimeoutNotReached {
+                tx,
+                input,
+                height,
+                timeout,
+            } => write!(
+                f,
+                "htlc refund on input {input} of {tx} before timeout: height {height} < timeout {timeout}"
+            ),
+            LedgerError::NonFinalTransaction {
+                tx,
+                n_lock_time,
+                height,
+            } => write!(
+                f,
+                "transaction {tx} is non-final: n_lock_time {n_lock_time} > block height {height}"
+            ),
         }
     }
 }
@@ -439,6 +496,7 @@ pub fn apply_block(
         NATIVE_TOKEN_ACTIVATION_SCORE,
         STEALTH_ACTIVATION_SCORE,
         SCRIPT_V2_ACTIVATION_SCORE,
+        HTLC_ACTIVATION_SCORE,
     )
 }
 
@@ -471,11 +529,12 @@ pub fn apply_block_with_stake(
         NATIVE_TOKEN_ACTIVATION_SCORE,
         STEALTH_ACTIVATION_SCORE,
         SCRIPT_V2_ACTIVATION_SCORE,
+        HTLC_ACTIVATION_SCORE,
     )
 }
 
 /// Shared implementation behind [`apply_block`] / [`apply_block_with_stake`].
-/// The two activation scores are explicit parameters so both entry points pass
+/// The activation scores are explicit parameters so both entry points pass
 /// their own policy; grouping them would churn every call site for no gain.
 #[allow(clippy::too_many_arguments)]
 fn apply_block_inner(
@@ -489,6 +548,7 @@ fn apply_block_inner(
     native_token_activation_score: u64,
     stealth_activation_score: u64,
     script_v2_activation_score: u64,
+    htlc_activation_score: u64,
 ) -> Result<BlockSummary, LedgerError> {
     // Stage all changes on a copy; only commit if the whole block validates, so
     // a rejected block has no effect (atomicity).
@@ -515,6 +575,7 @@ fn apply_block_inner(
             native_token_activation_score,
             stealth_activation_score,
             script_v2_activation_score,
+            htlc_activation_score,
         )?;
         total_fees = total_fees
             .checked_add(fee)
@@ -560,9 +621,25 @@ fn apply_regular(
     native_token_activation_score: u64,
     stealth_activation_score: u64,
     script_v2_activation_score: u64,
+    htlc_activation_score: u64,
 ) -> Result<u64, LedgerError> {
     if tx.inputs().is_empty() || tx.outputs().is_empty() {
         return Err(LedgerError::EmptyTransaction(tx.id()));
+    }
+
+    // BIP-65/BIP-113 (Bitcoin's absolute locktime semantics): a transaction
+    // whose `n_lock_time` exceeds the block's height is non-final and cannot be
+    // mined. Combined with script v2's CLTV check (`tx.n_lock_time >= v`), the
+    // effective constraint is `block_height >= n_lock_time >= v` — which makes
+    // CLTV *real*: before this rule, a spender could bypass any CLTV by
+    // declaring `n_lock_time = 4_000_000_000`. `n_lock_time` defaults to 0 in
+    // every constructor, so only lock-time-signed transactions are affected.
+    if u64::from(tx.n_lock_time()) > height {
+        return Err(LedgerError::NonFinalTransaction {
+            tx: tx.id(),
+            n_lock_time: tx.n_lock_time(),
+            height,
+        });
     }
 
     // Pre-activation gating on outputs:
@@ -612,6 +689,19 @@ fn apply_regular(
                     tx: tx.id(),
                     blue_score,
                     activation_score: script_v2_activation_score,
+                });
+            }
+        }
+    }
+
+    // RFC-004 HTLC pre-activation gating on outputs:
+    if blue_score <= htlc_activation_score {
+        for output in tx.outputs() {
+            if output.owner.is_htlc() {
+                return Err(LedgerError::PreActivationHtlc {
+                    tx: tx.id(),
+                    blue_score,
+                    activation_score: htlc_activation_score,
                 });
             }
         }
@@ -673,6 +763,15 @@ fn apply_regular(
                 tx: tx.id(),
                 blue_score,
                 activation_score: script_v2_activation_score,
+            });
+        }
+
+        // RFC-004 HTLC pre-activation gating on spends:
+        if blue_score <= htlc_activation_score && prev.owner.is_htlc() {
+            return Err(LedgerError::PreActivationHtlc {
+                tx: tx.id(),
+                blue_score,
+                activation_score: htlc_activation_score,
             });
         }
 
@@ -806,6 +905,101 @@ fn apply_regular(
                     tx: tx.id(),
                     input: i,
                 });
+            }
+        } else if prev.owner.is_htlc() {
+            // Pay-to-HTLC (RFC-004): witness[0] = template bytes; BLAKE3(template)
+            // must match the owner's script hash; the template then authorises one
+            // of two mutually-exclusive paths discriminated by witness length —
+            // deterministic, no branch evaluation:
+            //   len 3 → REDEEM (preimage + recipient signature) — BIP-199
+            //   len 2 → REFUND (sender signature, only after the timeout height)
+            if input.witness.is_empty() {
+                return Err(LedgerError::InvalidWitnessCount {
+                    tx: tx.id(),
+                    input: i,
+                    expected: 2,
+                    actual: 0,
+                });
+            }
+            let template_bytes = &input.witness[0];
+            let script_hash = *blake3::hash(template_bytes).as_bytes();
+            if script_hash != *prev.owner.payload() {
+                return Err(LedgerError::ScriptHashMismatch {
+                    tx: tx.id(),
+                    input: i,
+                });
+            }
+            let script = HtlcScript::parse(template_bytes).map_err(|e| {
+                LedgerError::InvalidRedeemScript {
+                    tx: tx.id(),
+                    input: i,
+                    reason: e.as_str(),
+                }
+            })?;
+            match input.witness.len() {
+                3 => {
+                    // REDEEM: witness[1] = preimage (any length), witness[2] =
+                    // recipient signature. No time constraint (BIP-199).
+                    let sig_bytes = &input.witness[2];
+                    if sig_bytes.len() != 64 {
+                        return Err(LedgerError::BadSignatureSize {
+                            tx: tx.id(),
+                            input: i,
+                            len: sig_bytes.len(),
+                        });
+                    }
+                    let preimage = &input.witness[1];
+                    if *blake3::hash(preimage).as_bytes() != *script.preimage_hash() {
+                        return Err(LedgerError::HtlcPreimageMismatch {
+                            tx: tx.id(),
+                            input: i,
+                        });
+                    }
+                    let mut sig_arr = [0u8; 64];
+                    sig_arr.copy_from_slice(sig_bytes);
+                    if !verify_pk(script.recipient_pk(), &sighash, &sig_arr) {
+                        return Err(LedgerError::BadSignature {
+                            tx: tx.id(),
+                            input: i,
+                        });
+                    }
+                }
+                2 => {
+                    // REFUND: witness[1] = sender signature, valid only once the
+                    // chain height has reached the template's timeout.
+                    let sig_bytes = &input.witness[1];
+                    if sig_bytes.len() != 64 {
+                        return Err(LedgerError::BadSignatureSize {
+                            tx: tx.id(),
+                            input: i,
+                            len: sig_bytes.len(),
+                        });
+                    }
+                    if height < u64::from(script.timeout()) {
+                        return Err(LedgerError::HtlcTimeoutNotReached {
+                            tx: tx.id(),
+                            input: i,
+                            height,
+                            timeout: script.timeout(),
+                        });
+                    }
+                    let mut sig_arr = [0u8; 64];
+                    sig_arr.copy_from_slice(sig_bytes);
+                    if !verify_pk(script.sender_pk(), &sighash, &sig_arr) {
+                        return Err(LedgerError::BadSignature {
+                            tx: tx.id(),
+                            input: i,
+                        });
+                    }
+                }
+                n => {
+                    return Err(LedgerError::InvalidWitnessCount {
+                        tx: tx.id(),
+                        input: i,
+                        expected: 2,
+                        actual: n,
+                    });
+                }
             }
         } else if prev.owner.is_stealth() {
             // Stealth address (RFC-003): witness is exactly one 64-byte signature
@@ -1079,6 +1273,7 @@ pub fn apply_dag(dag: &Dag, subsidy: u64) -> LedgerRun {
                 NATIVE_TOKEN_ACTIVATION_SCORE,
                 STEALTH_ACTIVATION_SCORE,
                 SCRIPT_V2_ACTIVATION_SCORE,
+                HTLC_ACTIVATION_SCORE,
             ) {
                 Ok(_) => run.accepted.push(id),
                 Err(e) => run.rejected.push((id, e)),
@@ -1457,6 +1652,8 @@ pub struct Ledger {
     stealth_activation_score: u64,
     /// Blue score activation threshold for RFC-003 script v2 transactions.
     script_v2_activation_score: u64,
+    /// Blue score activation threshold for RFC-004 HTLC transactions.
+    htlc_activation_score: u64,
 }
 
 impl Ledger {
@@ -1505,6 +1702,7 @@ impl Ledger {
             native_token_activation_score: NATIVE_TOKEN_ACTIVATION_SCORE,
             stealth_activation_score: STEALTH_ACTIVATION_SCORE,
             script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
+            htlc_activation_score: HTLC_ACTIVATION_SCORE,
         })
     }
 
@@ -1546,6 +1744,16 @@ impl Ledger {
     /// The blue-score activation threshold for RFC-003 script v2 transactions.
     pub fn script_v2_activation_score(&self) -> u64 {
         self.script_v2_activation_score
+    }
+
+    /// Set the blue-score activation threshold for RFC-004 HTLC transactions.
+    pub fn set_htlc_activation_score(&mut self, score: u64) {
+        self.htlc_activation_score = score;
+    }
+
+    /// The blue-score activation threshold for RFC-004 HTLC transactions.
+    pub fn htlc_activation_score(&self) -> u64 {
+        self.htlc_activation_score
     }
 
     /// Like [`Ledger::new`], but with a finite finality depth: blocks more than
@@ -2013,6 +2221,7 @@ impl Ledger {
                     self.native_token_activation_score,
                     self.stealth_activation_score,
                     self.script_v2_activation_score,
+                    self.htlc_activation_score,
                 );
             }
         }
@@ -2030,6 +2239,7 @@ impl Ledger {
             self.native_token_activation_score,
             self.stealth_activation_score,
             self.script_v2_activation_score,
+            self.htlc_activation_score,
         )?;
 
         // Commit: add to the DAG (structural checks run here), then store the
@@ -2584,6 +2794,7 @@ impl Ledger {
             native_token_activation_score: NATIVE_TOKEN_ACTIVATION_SCORE,
             stealth_activation_score: STEALTH_ACTIVATION_SCORE,
             script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
+            htlc_activation_score: HTLC_ACTIVATION_SCORE,
         };
         ledger.deltas.insert(checkpoint_id, checkpoint_delta);
         ledger

@@ -20,7 +20,7 @@
 //! checkpoint <path> / load_checkpoint <path>  finality checkpoint persistence
 //! ```
 
-use kovanica_state::Address;
+use kovanica_state::{Address, HtlcScript, KeyPair, OutPoint, TxId};
 
 use crate::node::Node;
 
@@ -29,7 +29,11 @@ pub const HELP: &str = "commands: help | genesis <k> <subsidy> <amount> <seed> |
 genesis_finality <k> <subsidy> <amount> <seed> <finality_depth> | \
 address <seed> | balance <seed|addr-hex> | send <from-seed> <amount> <to-seed> | \
 pool <from-seed> <amount> <to-seed> | produce | pending | tips | tip | len | \
-staking [vrf-pk-hex] | save <path> | load <path> | checkpoint <path> | load_checkpoint <path>";
+staking [vrf-pk-hex] | save <path> | load <path> | checkpoint <path> | load_checkpoint <path> | \
+htlc_create <from-seed> <amount> <recipient-pk-hex> <preimage-hash-hex> <timeout> | \
+htlc_redeem <from-seed> <outpoint-tx-hex> <outpoint-index> <script-hex> <preimage-hex> <to-addr> | \
+htlc_refund <from-seed> <outpoint-tx-hex> <outpoint-index> <script-hex> <to-addr> | \
+htlc_balance <script-hex>";
 
 /// Run one command line against `node`, returning the response line. Never
 /// panics on bad input; malformed commands produce an `err ...` response.
@@ -153,6 +157,66 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
             Ok(out)
         }
 
+        "htlc_create" => {
+            let [from, amount, recipient_pk_hex, preimage_hash_hex, timeout] = fixed::<5>(&args)?;
+            let kp = KeyPair::from_u64(u64_arg(from)?);
+            let mut recipient_pk = [0u8; 32];
+            hex::decode_to_slice(recipient_pk_hex, &mut recipient_pk)
+                .map_err(|e| format!("bad recipient-pk-hex: {e}"))?;
+            let mut preimage_hash = [0u8; 32];
+            hex::decode_to_slice(preimage_hash_hex, &mut preimage_hash)
+                .map_err(|e| format!("bad preimage-hash-hex: {e}"))?;
+            let info = node
+                .create_htlc(
+                    &kp,
+                    u64_arg(amount)?,
+                    None,
+                    recipient_pk,
+                    preimage_hash,
+                    u32_arg(timeout)?,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "{} {} {}",
+                info.tx_id,
+                hex::encode(info.script.bytes()),
+                info.address
+            ))
+        }
+
+        "htlc_redeem" => {
+            let [from, outpoint_tx_hex, outpoint_index, script_hex, preimage_hex, to_addr] =
+                fixed::<6>(&args)?;
+            let kp = KeyPair::from_u64(u64_arg(from)?);
+            let outpoint = parse_outpoint(outpoint_tx_hex, outpoint_index)?;
+            let script = parse_htlc_script(script_hex)?;
+            let preimage =
+                hex::decode(preimage_hex).map_err(|e| format!("bad preimage-hex: {e}"))?;
+            let to = Address::parse(to_addr).map_err(|e| e.to_string())?;
+            let tx_id = node
+                .redeem_htlc(&kp, outpoint, &script, &preimage, to)
+                .map_err(|e| e.to_string())?;
+            Ok(tx_id.to_string())
+        }
+
+        "htlc_refund" => {
+            let [from, outpoint_tx_hex, outpoint_index, script_hex, to_addr] = fixed::<5>(&args)?;
+            let kp = KeyPair::from_u64(u64_arg(from)?);
+            let outpoint = parse_outpoint(outpoint_tx_hex, outpoint_index)?;
+            let script = parse_htlc_script(script_hex)?;
+            let to = Address::parse(to_addr).map_err(|e| e.to_string())?;
+            let tx_id = node
+                .refund_htlc(&kp, outpoint, &script, to)
+                .map_err(|e| e.to_string())?;
+            Ok(tx_id.to_string())
+        }
+
+        "htlc_balance" => {
+            let [script_hex] = fixed::<1>(&args)?;
+            let script = parse_htlc_script(script_hex)?;
+            Ok(node.balance_of_htlc(&script).to_string())
+        }
+
         "len" => Ok(node.block_count().map_err(|e| e.to_string())?.to_string()),
 
         "save" => {
@@ -199,6 +263,24 @@ fn u64_arg(s: &str) -> Result<u64, String> {
 fn u16_arg(s: &str) -> Result<u16, String> {
     s.parse::<u16>()
         .map_err(|_| format!("'{s}' is not a small number"))
+}
+
+fn u32_arg(s: &str) -> Result<u32, String> {
+    s.parse::<u32>()
+        .map_err(|_| format!("'{s}' is not a number"))
+}
+
+/// Parse an outpoint from a transaction-id hex string and an output index.
+fn parse_outpoint(tx_hex: &str, index: &str) -> Result<OutPoint, String> {
+    let mut tx = [0u8; 32];
+    hex::decode_to_slice(tx_hex, &mut tx).map_err(|e| format!("bad outpoint-tx-hex: {e}"))?;
+    Ok(OutPoint::new(TxId::from_bytes(tx), u32_arg(index)?))
+}
+
+/// Parse a 100-byte HTLC template from hex.
+fn parse_htlc_script(script_hex: &str) -> Result<HtlcScript, String> {
+    let bytes = hex::decode(script_hex).map_err(|e| format!("bad script-hex: {e}"))?;
+    HtlcScript::parse(&bytes).map_err(|e| e.to_string())
 }
 
 /// A balance target is either an address (Base58, versioned/legacy hex) or an actor seed.

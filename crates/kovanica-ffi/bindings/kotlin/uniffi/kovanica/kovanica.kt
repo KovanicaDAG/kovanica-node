@@ -677,6 +677,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset(
     ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_htlc(
+    ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_script(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed(
@@ -699,6 +701,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_combine_multisig_sigs(
     ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_create_htlc(
+    ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_create_multisig_address(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_enable_hybrid(
@@ -719,6 +723,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_history_of(
     ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_htlc_preimage_hash_hex(
+    ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_htlc_script_hex(
+    ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_hybrid_enabled(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_load_snapshot(
@@ -736,6 +744,10 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_receive_blocks(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_receive_light_sync(
+    ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_redeem_htlc(
+    ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_refund_htlc(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_save_snapshot(
     ): Int
@@ -809,6 +821,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_asset(`ptr`: Long,`address`: RustBuffer.ByValue,`assetIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_htlc(`ptr`: Long,`scriptHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_script(`ptr`: Long,`scriptHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_seed(`ptr`: Long,`seed`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -831,6 +845,8 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_kovanica_ffi_fn_method_lightnode_combine_multisig_sigs(`ptr`: Long,`txBlob`: RustBuffer.ByValue,`partialSigs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_create_htlc(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`amount`: Long,`assetIdHex`: RustBuffer.ByValue,`recipientPkHex`: RustBuffer.ByValue,`preimageHashHex`: RustBuffer.ByValue,`timeout`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_create_multisig_address(`ptr`: Long,`threshold`: Byte,`pubkeysHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_enable_hybrid(`ptr`: Long,`rateNum`: Long,`rateDen`: Long,`nominalWork`: RustBuffer.ByValue,`retarget`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -851,6 +867,10 @@ internal object UniffiLib {
     ): Byte
     external fun uniffi_kovanica_ffi_fn_method_lightnode_history_of(`ptr`: Long,`address`: RustBuffer.ByValue,`maxBlocks`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_htlc_preimage_hash_hex(`ptr`: Long,`preimageHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_htlc_script_hex(`ptr`: Long,`preimageHashHex`: RustBuffer.ByValue,`recipientPkHex`: RustBuffer.ByValue,`senderPkHex`: RustBuffer.ByValue,`timeout`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_hybrid_enabled(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     external fun uniffi_kovanica_ffi_fn_method_lightnode_load_snapshot(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -869,6 +889,10 @@ internal object UniffiLib {
     ): Int
     external fun uniffi_kovanica_ffi_fn_method_lightnode_receive_light_sync(`ptr`: Long,`blob`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_redeem_htlc(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`outpointTxHex`: RustBuffer.ByValue,`outpointIndex`: Int,`scriptHex`: RustBuffer.ByValue,`preimageHex`: RustBuffer.ByValue,`toAddress`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_refund_htlc(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`outpointTxHex`: RustBuffer.ByValue,`outpointIndex`: Int,`scriptHex`: RustBuffer.ByValue,`toAddress`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_save_snapshot(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_kovanica_ffi_fn_method_lightnode_selected_tip(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1036,6 +1060,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset() != 41422) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_htlc() != 39071) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_script() != 46559) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1069,6 +1096,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_combine_multisig_sigs() != 55489) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_create_htlc() != 45579) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_create_multisig_address() != 49800) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1099,6 +1129,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_history_of() != 27998) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_htlc_preimage_hash_hex() != 53972) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_htlc_script_hex() != 4516) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_hybrid_enabled() != 35199) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1124,6 +1160,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_receive_light_sync() != 51134) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_redeem_htlc() != 36801) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_refund_htlc() != 54357) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_save_snapshot() != 41165) {
@@ -1673,6 +1715,11 @@ public interface LightNodeInterface {
     fun `balanceOfAsset`(`address`: kotlin.String, `assetIdHex`: kotlin.String?): kotlin.String
     
     /**
+     * The spendable balance locked to an HTLC template's address, in atoms.
+     */
+    fun `balanceOfHtlc`(`scriptHex`: kotlin.String): kotlin.ULong
+    
+    /**
      * Spendable balance of a **script v2** address (the BLAKE3 digest of
      * `script_hex`) in atoms.
      */
@@ -1742,6 +1789,15 @@ public interface LightNodeInterface {
      * blob ready for [`Self::submit_multisig_tx`].
      */
     fun `combineMultisigSigs`(`txBlob`: kotlin.ByteArray, `partialSigs`: List<kotlin.ByteArray>): kotlin.ByteArray
+    
+    /**
+     * Create an HTLC output locking `amount` (of `asset_id_hex`, or native
+     * KVNC when `None`) to a Version 0x04 address committing to
+     * `preimage_hash`, `recipient_pk`, this signer as sender, and `timeout`.
+     * The funding transaction is mined immediately. Returns the template,
+     * address, and funding outpoint.
+     */
+    fun `createHtlc`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `assetIdHex`: kotlin.String?, `recipientPkHex`: kotlin.String, `preimageHashHex`: kotlin.String, `timeout`: kotlin.UInt): HtlcInfo
     
     /**
      * Create a threshold-multisig P2SH address from `threshold` and a list of
@@ -1814,6 +1870,19 @@ public interface LightNodeInterface {
     fun `historyOf`(`address`: kotlin.String, `maxBlocks`: kotlin.UInt): List<HistoryEntry>
     
     /**
+     * Compute `BLAKE3(preimage)` as lowercase hex — the preimage hash to
+     * commit to in an HTLC template.
+     */
+    fun `htlcPreimageHashHex`(`preimageHex`: kotlin.String): kotlin.String
+    
+    /**
+     * Build an HTLC template from its four parameters and return the
+     * canonical 100-byte template as lowercase hex. Useful for constructing
+     * a script to pass to [`Self::balance_of_htlc`] or to share out of band.
+     */
+    fun `htlcScriptHex`(`preimageHashHex`: kotlin.String, `recipientPkHex`: kotlin.String, `senderPkHex`: kotlin.String, `timeout`: kotlin.UInt): kotlin.String
+    
+    /**
      * Whether hybrid admission is active.
      */
     fun `hybridEnabled`(): kotlin.Boolean
@@ -1868,6 +1937,22 @@ public interface LightNodeInterface {
      * staked blocks carry nominal work). Returns accepted header count.
      */
     fun `receiveLightSync`(`blob`: kotlin.ByteArray): kotlin.UInt
+    
+    /**
+     * Redeem an HTLC output with the correct preimage. `signing_secret_hex`
+     * is the **recipient**'s 32-byte Ed25519 secret (hex); the witness is
+     * `[template, preimage, recipient_sig]` and has no time constraint
+     * (BIP-199). Returns the redeem transaction id (lowercase hex).
+     */
+    fun `redeemHtlc`(`signingSecretHex`: kotlin.String, `outpointTxHex`: kotlin.String, `outpointIndex`: kotlin.UInt, `scriptHex`: kotlin.String, `preimageHex`: kotlin.String, `toAddress`: kotlin.String): kotlin.String
+    
+    /**
+     * Refund an HTLC output after its timeout. `signing_secret_hex` is the
+     * **sender**'s 32-byte Ed25519 secret (hex); the witness is
+     * `[template, sender_sig]`. The ledger rejects the refund until the chain
+     * height reaches `script.timeout()`. Returns the refund tx id (hex).
+     */
+    fun `refundHtlc`(`signingSecretHex`: kotlin.String, `outpointTxHex`: kotlin.String, `outpointIndex`: kotlin.UInt, `scriptHex`: kotlin.String, `toAddress`: kotlin.String): kotlin.String
     
     /**
      * Write a full snapshot (UTXO + stake registry + blocks) to `path`.
@@ -2172,6 +2257,24 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
 
     
     /**
+     * The spendable balance locked to an HTLC template's address, in atoms.
+     */
+    @Throws(LightNodeException::class)override fun `balanceOfHtlc`(`scriptHex`: kotlin.String): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_balance_of_htlc(
+        it,
+        
+        FfiConverterString.lower(`scriptHex`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Spendable balance of a **script v2** address (the BLAKE3 digest of
      * `script_hex`) in atoms.
      */
@@ -2388,6 +2491,33 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
 
     
     /**
+     * Create an HTLC output locking `amount` (of `asset_id_hex`, or native
+     * KVNC when `None`) to a Version 0x04 address committing to
+     * `preimage_hash`, `recipient_pk`, this signer as sender, and `timeout`.
+     * The funding transaction is mined immediately. Returns the template,
+     * address, and funding outpoint.
+     */
+    @Throws(LightNodeException::class)override fun `createHtlc`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `assetIdHex`: kotlin.String?, `recipientPkHex`: kotlin.String, `preimageHashHex`: kotlin.String, `timeout`: kotlin.UInt): HtlcInfo {
+            return FfiConverterTypeHtlcInfo.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_create_htlc(
+        it,
+        
+        FfiConverterString.lower(`signingSecretHex`),
+        FfiConverterULong.lower(`amount`),
+        FfiConverterOptionalString.lower(`assetIdHex`),
+        FfiConverterString.lower(`recipientPkHex`),
+        FfiConverterString.lower(`preimageHashHex`),
+        FfiConverterUInt.lower(`timeout`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Create a threshold-multisig P2SH address from `threshold` and a list of
      * 64-hex Ed25519 public keys. Returns the human address plus the redeem
      * script (which must be shared with all cosigners out of band).
@@ -2589,6 +2719,48 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
 
     
     /**
+     * Compute `BLAKE3(preimage)` as lowercase hex — the preimage hash to
+     * commit to in an HTLC template.
+     */
+    @Throws(LightNodeException::class)override fun `htlcPreimageHashHex`(`preimageHex`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_htlc_preimage_hash_hex(
+        it,
+        
+        FfiConverterString.lower(`preimageHex`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Build an HTLC template from its four parameters and return the
+     * canonical 100-byte template as lowercase hex. Useful for constructing
+     * a script to pass to [`Self::balance_of_htlc`] or to share out of band.
+     */
+    @Throws(LightNodeException::class)override fun `htlcScriptHex`(`preimageHashHex`: kotlin.String, `recipientPkHex`: kotlin.String, `senderPkHex`: kotlin.String, `timeout`: kotlin.UInt): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_htlc_script_hex(
+        it,
+        
+        FfiConverterString.lower(`preimageHashHex`),
+        FfiConverterString.lower(`recipientPkHex`),
+        FfiConverterString.lower(`senderPkHex`),
+        FfiConverterUInt.lower(`timeout`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Whether hybrid admission is active.
      */override fun `hybridEnabled`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
@@ -2748,6 +2920,57 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
         it,
         
         FfiConverterByteArray.lower(`blob`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Redeem an HTLC output with the correct preimage. `signing_secret_hex`
+     * is the **recipient**'s 32-byte Ed25519 secret (hex); the witness is
+     * `[template, preimage, recipient_sig]` and has no time constraint
+     * (BIP-199). Returns the redeem transaction id (lowercase hex).
+     */
+    @Throws(LightNodeException::class)override fun `redeemHtlc`(`signingSecretHex`: kotlin.String, `outpointTxHex`: kotlin.String, `outpointIndex`: kotlin.UInt, `scriptHex`: kotlin.String, `preimageHex`: kotlin.String, `toAddress`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_redeem_htlc(
+        it,
+        
+        FfiConverterString.lower(`signingSecretHex`),
+        FfiConverterString.lower(`outpointTxHex`),
+        FfiConverterUInt.lower(`outpointIndex`),
+        FfiConverterString.lower(`scriptHex`),
+        FfiConverterString.lower(`preimageHex`),
+        FfiConverterString.lower(`toAddress`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Refund an HTLC output after its timeout. `signing_secret_hex` is the
+     * **sender**'s 32-byte Ed25519 secret (hex); the witness is
+     * `[template, sender_sig]`. The ledger rejects the refund until the chain
+     * height reaches `script.timeout()`. Returns the refund tx id (hex).
+     */
+    @Throws(LightNodeException::class)override fun `refundHtlc`(`signingSecretHex`: kotlin.String, `outpointTxHex`: kotlin.String, `outpointIndex`: kotlin.UInt, `scriptHex`: kotlin.String, `toAddress`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_refund_htlc(
+        it,
+        
+        FfiConverterString.lower(`signingSecretHex`),
+        FfiConverterString.lower(`outpointTxHex`),
+        FfiConverterUInt.lower(`outpointIndex`),
+        FfiConverterString.lower(`scriptHex`),
+        FfiConverterString.lower(`toAddress`),_status)
 }
     }
     )
@@ -3347,6 +3570,77 @@ public object FfiConverterTypeHistoryEntry: FfiConverterRustBuffer<HistoryEntry>
             FfiConverterTypeTxDirection.write(value.`direction`, buf)
             FfiConverterString.write(value.`amount`, buf)
             FfiConverterOptionalString.write(value.`assetIdHex`, buf)
+    }
+}
+
+
+
+/**
+ * A created HTLC output (RFC-004), as seen from the mobile FFI.
+ */
+data class HtlcInfo (
+    /**
+     * The validated 100-byte HTLC template, lowercase hex.
+     */
+    var `scriptHex`: kotlin.String
+    , 
+    /**
+     * The Version 0x04 address the output is locked to (`kvnc…dag`).
+     */
+    var `address`: kotlin.String
+    , 
+    /**
+     * Id of the funding transaction, lowercase hex.
+     */
+    var `txId`: kotlin.String
+    , 
+    /**
+     * Funding transaction id of the outpoint, lowercase hex.
+     */
+    var `outpointTx`: kotlin.String
+    , 
+    /**
+     * Output index of the HTLC output within the funding transaction.
+     */
+    var `outpointIndex`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeHtlcInfo: FfiConverterRustBuffer<HtlcInfo> {
+    override fun read(buf: ByteBuffer): HtlcInfo {
+        return HtlcInfo(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: HtlcInfo) = (
+            FfiConverterString.allocationSize(value.`scriptHex`) +
+            FfiConverterString.allocationSize(value.`address`) +
+            FfiConverterString.allocationSize(value.`txId`) +
+            FfiConverterString.allocationSize(value.`outpointTx`) +
+            FfiConverterUInt.allocationSize(value.`outpointIndex`)
+    )
+
+    override fun write(value: HtlcInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`scriptHex`, buf)
+            FfiConverterString.write(value.`address`, buf)
+            FfiConverterString.write(value.`txId`, buf)
+            FfiConverterString.write(value.`outpointTx`, buf)
+            FfiConverterUInt.write(value.`outpointIndex`, buf)
     }
 }
 

@@ -646,6 +646,11 @@ public protocol LightNodeProtocol: AnyObject, Sendable {
     func balanceOfAsset(address: String, assetIdHex: String?) throws  -> String
     
     /**
+     * The spendable balance locked to an HTLC template's address, in atoms.
+     */
+    func balanceOfHtlc(scriptHex: String) throws  -> UInt64
+    
+    /**
      * Spendable balance of a **script v2** address (the BLAKE3 digest of
      * `script_hex`) in atoms.
      */
@@ -715,6 +720,15 @@ public protocol LightNodeProtocol: AnyObject, Sendable {
      * blob ready for [`Self::submit_multisig_tx`].
      */
     func combineMultisigSigs(txBlob: Data, partialSigs: [Data]) throws  -> Data
+    
+    /**
+     * Create an HTLC output locking `amount` (of `asset_id_hex`, or native
+     * KVNC when `None`) to a Version 0x04 address committing to
+     * `preimage_hash`, `recipient_pk`, this signer as sender, and `timeout`.
+     * The funding transaction is mined immediately. Returns the template,
+     * address, and funding outpoint.
+     */
+    func createHtlc(signingSecretHex: String, amount: UInt64, assetIdHex: String?, recipientPkHex: String, preimageHashHex: String, timeout: UInt32) throws  -> HtlcInfo
     
     /**
      * Create a threshold-multisig P2SH address from `threshold` and a list of
@@ -787,6 +801,19 @@ public protocol LightNodeProtocol: AnyObject, Sendable {
     func historyOf(address: String, maxBlocks: UInt32) throws  -> [HistoryEntry]
     
     /**
+     * Compute `BLAKE3(preimage)` as lowercase hex — the preimage hash to
+     * commit to in an HTLC template.
+     */
+    func htlcPreimageHashHex(preimageHex: String) throws  -> String
+    
+    /**
+     * Build an HTLC template from its four parameters and return the
+     * canonical 100-byte template as lowercase hex. Useful for constructing
+     * a script to pass to [`Self::balance_of_htlc`] or to share out of band.
+     */
+    func htlcScriptHex(preimageHashHex: String, recipientPkHex: String, senderPkHex: String, timeout: UInt32) throws  -> String
+    
+    /**
      * Whether hybrid admission is active.
      */
     func hybridEnabled()  -> Bool
@@ -841,6 +868,22 @@ public protocol LightNodeProtocol: AnyObject, Sendable {
      * staked blocks carry nominal work). Returns accepted header count.
      */
     func receiveLightSync(blob: Data) throws  -> UInt32
+    
+    /**
+     * Redeem an HTLC output with the correct preimage. `signing_secret_hex`
+     * is the **recipient**'s 32-byte Ed25519 secret (hex); the witness is
+     * `[template, preimage, recipient_sig]` and has no time constraint
+     * (BIP-199). Returns the redeem transaction id (lowercase hex).
+     */
+    func redeemHtlc(signingSecretHex: String, outpointTxHex: String, outpointIndex: UInt32, scriptHex: String, preimageHex: String, toAddress: String) throws  -> String
+    
+    /**
+     * Refund an HTLC output after its timeout. `signing_secret_hex` is the
+     * **sender**'s 32-byte Ed25519 secret (hex); the witness is
+     * `[template, sender_sig]`. The ledger rejects the refund until the chain
+     * height reaches `script.timeout()`. Returns the refund tx id (hex).
+     */
+    func refundHtlc(signingSecretHex: String, outpointTxHex: String, outpointIndex: UInt32, scriptHex: String, toAddress: String) throws  -> String
     
     /**
      * Write a full snapshot (UTXO + stake registry + blocks) to `path`.
@@ -1084,6 +1127,19 @@ open func balanceOfAsset(address: String, assetIdHex: String?)throws  -> String 
 }
     
     /**
+     * The spendable balance locked to an HTLC template's address, in atoms.
+     */
+open func balanceOfHtlc(scriptHex: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_balance_of_htlc(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scriptHex),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Spendable balance of a **script v2** address (the BLAKE3 digest of
      * `script_hex`) in atoms.
      */
@@ -1245,6 +1301,28 @@ open func combineMultisigSigs(txBlob: Data, partialSigs: [Data])throws  -> Data 
 }
     
     /**
+     * Create an HTLC output locking `amount` (of `asset_id_hex`, or native
+     * KVNC when `None`) to a Version 0x04 address committing to
+     * `preimage_hash`, `recipient_pk`, this signer as sender, and `timeout`.
+     * The funding transaction is mined immediately. Returns the template,
+     * address, and funding outpoint.
+     */
+open func createHtlc(signingSecretHex: String, amount: UInt64, assetIdHex: String?, recipientPkHex: String, preimageHashHex: String, timeout: UInt32)throws  -> HtlcInfo  {
+    return try  FfiConverterTypeHtlcInfo_lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_create_htlc(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(signingSecretHex),
+        FfiConverterUInt64.lower(amount),
+        FfiConverterOptionString.lower(assetIdHex),
+        FfiConverterString.lower(recipientPkHex),
+        FfiConverterString.lower(preimageHashHex),
+        FfiConverterUInt32.lower(timeout),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Create a threshold-multisig P2SH address from `threshold` and a list of
      * 64-hex Ed25519 public keys. Returns the human address plus the redeem
      * script (which must be shared with all cosigners out of band).
@@ -1399,6 +1477,38 @@ open func historyOf(address: String, maxBlocks: UInt32)throws  -> [HistoryEntry]
 }
     
     /**
+     * Compute `BLAKE3(preimage)` as lowercase hex — the preimage hash to
+     * commit to in an HTLC template.
+     */
+open func htlcPreimageHashHex(preimageHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_htlc_preimage_hash_hex(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(preimageHex),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Build an HTLC template from its four parameters and return the
+     * canonical 100-byte template as lowercase hex. Useful for constructing
+     * a script to pass to [`Self::balance_of_htlc`] or to share out of band.
+     */
+open func htlcScriptHex(preimageHashHex: String, recipientPkHex: String, senderPkHex: String, timeout: UInt32)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_htlc_script_hex(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(preimageHashHex),
+        FfiConverterString.lower(recipientPkHex),
+        FfiConverterString.lower(senderPkHex),
+        FfiConverterUInt32.lower(timeout),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Whether hybrid admission is active.
      */
 open func hybridEnabled() -> Bool  {
@@ -1517,6 +1627,47 @@ open func receiveLightSync(blob: Data)throws  -> UInt32  {
     uniffi_kovanica_ffi_fn_method_lightnode_receive_light_sync(
             self.uniffiCloneHandle(),
         FfiConverterData.lower(blob),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Redeem an HTLC output with the correct preimage. `signing_secret_hex`
+     * is the **recipient**'s 32-byte Ed25519 secret (hex); the witness is
+     * `[template, preimage, recipient_sig]` and has no time constraint
+     * (BIP-199). Returns the redeem transaction id (lowercase hex).
+     */
+open func redeemHtlc(signingSecretHex: String, outpointTxHex: String, outpointIndex: UInt32, scriptHex: String, preimageHex: String, toAddress: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_redeem_htlc(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(signingSecretHex),
+        FfiConverterString.lower(outpointTxHex),
+        FfiConverterUInt32.lower(outpointIndex),
+        FfiConverterString.lower(scriptHex),
+        FfiConverterString.lower(preimageHex),
+        FfiConverterString.lower(toAddress),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Refund an HTLC output after its timeout. `signing_secret_hex` is the
+     * **sender**'s 32-byte Ed25519 secret (hex); the witness is
+     * `[template, sender_sig]`. The ledger rejects the refund until the chain
+     * height reaches `script.timeout()`. Returns the refund tx id (hex).
+     */
+open func refundHtlc(signingSecretHex: String, outpointTxHex: String, outpointIndex: UInt32, scriptHex: String, toAddress: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_refund_htlc(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(signingSecretHex),
+        FfiConverterString.lower(outpointTxHex),
+        FfiConverterUInt32.lower(outpointIndex),
+        FfiConverterString.lower(scriptHex),
+        FfiConverterString.lower(toAddress),uniffiCallStatus
     )
 })
 }
@@ -2078,6 +2229,105 @@ public func FfiConverterTypeHistoryEntry_lift(_ buf: RustBuffer) throws -> Histo
 #endif
 public func FfiConverterTypeHistoryEntry_lower(_ value: HistoryEntry) -> RustBuffer {
     return FfiConverterTypeHistoryEntry.lower(value)
+}
+
+
+/**
+ * A created HTLC output (RFC-004), as seen from the mobile FFI.
+ */
+public struct HtlcInfo: Equatable, Hashable {
+    /**
+     * The validated 100-byte HTLC template, lowercase hex.
+     */
+    public var scriptHex: String
+    /**
+     * The Version 0x04 address the output is locked to (`kvnc…dag`).
+     */
+    public var address: String
+    /**
+     * Id of the funding transaction, lowercase hex.
+     */
+    public var txId: String
+    /**
+     * Funding transaction id of the outpoint, lowercase hex.
+     */
+    public var outpointTx: String
+    /**
+     * Output index of the HTLC output within the funding transaction.
+     */
+    public var outpointIndex: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The validated 100-byte HTLC template, lowercase hex.
+         */scriptHex: String, 
+        /**
+         * The Version 0x04 address the output is locked to (`kvnc…dag`).
+         */address: String, 
+        /**
+         * Id of the funding transaction, lowercase hex.
+         */txId: String, 
+        /**
+         * Funding transaction id of the outpoint, lowercase hex.
+         */outpointTx: String, 
+        /**
+         * Output index of the HTLC output within the funding transaction.
+         */outpointIndex: UInt32) {
+        self.scriptHex = scriptHex
+        self.address = address
+        self.txId = txId
+        self.outpointTx = outpointTx
+        self.outpointIndex = outpointIndex
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension HtlcInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHtlcInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HtlcInfo {
+        return
+            try HtlcInfo(
+                scriptHex: FfiConverterString.read(from: &buf), 
+                address: FfiConverterString.read(from: &buf), 
+                txId: FfiConverterString.read(from: &buf), 
+                outpointTx: FfiConverterString.read(from: &buf), 
+                outpointIndex: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HtlcInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.scriptHex, into: &buf)
+        FfiConverterString.write(value.address, into: &buf)
+        FfiConverterString.write(value.txId, into: &buf)
+        FfiConverterString.write(value.outpointTx, into: &buf)
+        FfiConverterUInt32.write(value.outpointIndex, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHtlcInfo_lift(_ buf: RustBuffer) throws -> HtlcInfo {
+    return try FfiConverterTypeHtlcInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHtlcInfo_lower(_ value: HtlcInfo) -> RustBuffer {
+    return FfiConverterTypeHtlcInfo.lower(value)
 }
 
 
@@ -2989,6 +3239,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset() != 41422) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_htlc() != 39071) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_script() != 46559) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3022,6 +3275,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_kovanica_ffi_checksum_method_lightnode_combine_multisig_sigs() != 55489) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_create_htlc() != 45579) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_create_multisig_address() != 49800) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3052,6 +3308,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_kovanica_ffi_checksum_method_lightnode_history_of() != 27998) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_htlc_preimage_hash_hex() != 53972) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_htlc_script_hex() != 4516) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_hybrid_enabled() != 35199) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3077,6 +3339,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_receive_light_sync() != 51134) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_redeem_htlc() != 36801) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_refund_htlc() != 54357) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_save_snapshot() != 41165) {

@@ -187,6 +187,21 @@ pub struct MultisigSpendOutput {
     pub asset_id_hex: Option<String>,
 }
 
+/// A created HTLC output (RFC-004), as seen from the mobile FFI.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct HtlcInfo {
+    /// The validated 100-byte HTLC template, lowercase hex.
+    pub script_hex: String,
+    /// The Version 0x04 address the output is locked to (`kvnc…dag`).
+    pub address: String,
+    /// Id of the funding transaction, lowercase hex.
+    pub tx_id: String,
+    /// Funding transaction id of the outpoint, lowercase hex.
+    pub outpoint_tx: String,
+    /// Output index of the HTLC output within the funding transaction.
+    pub outpoint_index: u32,
+}
+
 /// A Kovanica light node: ledger + mempool + hybrid validator identity.
 ///
 /// Sync model for mobile: call [`Self::export_blocks`] to hand peers your
@@ -1129,6 +1144,119 @@ impl LightNode {
             .map_err(LightNodeError::from)?;
         Ok(hex::encode(tx_id.as_bytes()))
     }
+
+    // ------------------------------------------------------------------
+    // HTLC / atomic swap (RFC-004)
+    // ------------------------------------------------------------------
+
+    /// Create an HTLC output locking `amount` (of `asset_id_hex`, or native
+    /// KVNC when `None`) to a Version 0x04 address committing to
+    /// `preimage_hash`, `recipient_pk`, this signer as sender, and `timeout`.
+    /// The funding transaction is mined immediately. Returns the template,
+    /// address, and funding outpoint.
+    pub fn create_htlc(
+        &self,
+        signing_secret_hex: String,
+        amount: u64,
+        asset_id_hex: Option<String>,
+        recipient_pk_hex: String,
+        preimage_hash_hex: String,
+        timeout: u32,
+    ) -> Result<HtlcInfo, LightNodeError> {
+        let kp = keypair_from_secret(&signing_secret_hex)?;
+        let recipient_pk = decode_32(&recipient_pk_hex, "recipient public key")?;
+        let preimage_hash = decode_32(&preimage_hash_hex, "preimage hash")?;
+        let asset_id = parse_asset_id(asset_id_hex)?;
+        let mut node = self.lock();
+        let info = node.create_htlc(&kp, amount, asset_id, recipient_pk, preimage_hash, timeout)?;
+        Ok(HtlcInfo {
+            script_hex: hex::encode(info.script.bytes()),
+            address: info.address.to_kvnc(),
+            tx_id: info.tx_id.to_hex(),
+            outpoint_tx: info.outpoint.tx.to_hex(),
+            outpoint_index: info.outpoint.index,
+        })
+    }
+
+    /// Redeem an HTLC output with the correct preimage. `signing_secret_hex`
+    /// is the **recipient**'s 32-byte Ed25519 secret (hex); the witness is
+    /// `[template, preimage, recipient_sig]` and has no time constraint
+    /// (BIP-199). Returns the redeem transaction id (lowercase hex).
+    pub fn redeem_htlc(
+        &self,
+        signing_secret_hex: String,
+        outpoint_tx_hex: String,
+        outpoint_index: u32,
+        script_hex: String,
+        preimage_hex: String,
+        to_address: String,
+    ) -> Result<String, LightNodeError> {
+        let kp = keypair_from_secret(&signing_secret_hex)?;
+        let outpoint = parse_outpoint(&outpoint_tx_hex, outpoint_index)?;
+        let script = parse_htlc_script(&script_hex)?;
+        let preimage = decode_hex(&preimage_hex, "preimage")?;
+        let to = kovanica_state::Address::parse(&to_address)
+            .map_err(|e| invalid(format!("bad address: {e}")))?;
+        let mut node = self.lock();
+        let tx_id = node.redeem_htlc(&kp, outpoint, &script, &preimage, to)?;
+        Ok(tx_id.to_hex())
+    }
+
+    /// Refund an HTLC output after its timeout. `signing_secret_hex` is the
+    /// **sender**'s 32-byte Ed25519 secret (hex); the witness is
+    /// `[template, sender_sig]`. The ledger rejects the refund until the chain
+    /// height reaches `script.timeout()`. Returns the refund tx id (hex).
+    pub fn refund_htlc(
+        &self,
+        signing_secret_hex: String,
+        outpoint_tx_hex: String,
+        outpoint_index: u32,
+        script_hex: String,
+        to_address: String,
+    ) -> Result<String, LightNodeError> {
+        let kp = keypair_from_secret(&signing_secret_hex)?;
+        let outpoint = parse_outpoint(&outpoint_tx_hex, outpoint_index)?;
+        let script = parse_htlc_script(&script_hex)?;
+        let to = kovanica_state::Address::parse(&to_address)
+            .map_err(|e| invalid(format!("bad address: {e}")))?;
+        let mut node = self.lock();
+        let tx_id = node.refund_htlc(&kp, outpoint, &script, to)?;
+        Ok(tx_id.to_hex())
+    }
+
+    /// The spendable balance locked to an HTLC template's address, in atoms.
+    pub fn balance_of_htlc(&self, script_hex: String) -> Result<u64, LightNodeError> {
+        let script = parse_htlc_script(&script_hex)?;
+        Ok(self.lock().balance_of_htlc(&script))
+    }
+
+    /// Build an HTLC template from its four parameters and return the
+    /// canonical 100-byte template as lowercase hex. Useful for constructing
+    /// a script to pass to [`Self::balance_of_htlc`] or to share out of band.
+    pub fn htlc_script_hex(
+        &self,
+        preimage_hash_hex: String,
+        recipient_pk_hex: String,
+        sender_pk_hex: String,
+        timeout: u32,
+    ) -> Result<String, LightNodeError> {
+        let preimage_hash = decode_32(&preimage_hash_hex, "preimage hash")?;
+        let recipient_pk = decode_32(&recipient_pk_hex, "recipient public key")?;
+        let sender_pk = decode_32(&sender_pk_hex, "sender public key")?;
+        let script =
+            kovanica_state::htlc::HtlcScript::new(preimage_hash, recipient_pk, sender_pk, timeout)
+                .map_err(|e| invalid(format!("invalid HTLC template: {e}")))?;
+        Ok(hex::encode(script.bytes()))
+    }
+
+    /// Compute `BLAKE3(preimage)` as lowercase hex — the preimage hash to
+    /// commit to in an HTLC template.
+    pub fn htlc_preimage_hash_hex(&self, preimage_hex: String) -> Result<String, LightNodeError> {
+        let preimage = decode_hex(&preimage_hex, "preimage")?;
+        Ok(hex::encode(kovanica_node::atomic_swap::preimage_hash(
+            &preimage,
+        )))
+    }
 }
 
 fn encode_light_sync(node: &Node, from_id_hex: Option<String>) -> Vec<u8> {
@@ -1352,4 +1480,47 @@ fn keypair_from_secret(secret_hex: &str) -> Result<kovanica_state::KeyPair, Ligh
             got: raw.len() as u32,
         })?;
     Ok(kovanica_state::KeyPair::from_seed(bytes))
+}
+
+/// Decode a 32-byte hex string into a fixed array.
+fn decode_32(s: &str, field: &str) -> Result<[u8; 32], LightNodeError> {
+    let raw = decode_hex(s, field)?;
+    <[u8; 32]>::try_from(raw.as_slice())
+        .map_err(|_| invalid(format!("{field} must be 32 bytes hex")))
+}
+
+/// Parse an `Option<String>` asset id hex into an `Option<AssetId>`.
+fn parse_asset_id(
+    asset_id_hex: Option<String>,
+) -> Result<Option<kovanica_state::AssetId>, LightNodeError> {
+    match asset_id_hex {
+        Some(hex) => {
+            let raw = decode_hex(&hex, "asset id")?;
+            if raw.len() != 32 {
+                return Err(invalid("asset id must be 32 bytes hex"));
+            }
+            Ok(Some(kovanica_state::AssetId::from_bytes(
+                <[u8; 32]>::try_from(raw.as_slice())
+                    .map_err(|_| invalid("asset id must be 32 bytes hex"))?,
+            )))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Parse an HTLC template from its 100-byte hex form.
+fn parse_htlc_script(script_hex: &str) -> Result<kovanica_state::htlc::HtlcScript, LightNodeError> {
+    let raw = decode_hex(script_hex, "HTLC script")?;
+    kovanica_state::htlc::HtlcScript::parse(&raw)
+        .map_err(|e| invalid(format!("invalid HTLC script: {e}")))
+}
+
+/// Parse an outpoint from a tx-id hex string and index.
+fn parse_outpoint(tx_hex: &str, index: u32) -> Result<OutPoint, LightNodeError> {
+    let raw = decode_hex(tx_hex, "outpoint tx")?;
+    let tx = kovanica_state::TxId::from_bytes(
+        <[u8; 32]>::try_from(raw.as_slice())
+            .map_err(|_| invalid("outpoint tx must be 32 bytes hex"))?,
+    );
+    Ok(OutPoint::new(tx, index))
 }

@@ -33,6 +33,7 @@
 //! assert_eq!(rpc::execute_line(&mut node, "balance 2"), "ok 200");
 //! ```
 
+pub mod atomic_swap;
 pub mod dht;
 pub mod dns_seed;
 pub mod explorer;
@@ -48,6 +49,10 @@ pub mod relay;
 pub mod rpc;
 pub mod spv;
 
+pub use atomic_swap::{
+    extract_preimage, generate_preimage, preimage_hash, SwapError, SwapParams, SwapRole,
+    SwapSession,
+};
 pub use dht::{
     DhtMsg, KBucket, NodeId, NodeLookup, PeerContact, RoutingTable, UpdateResult,
     TAG_DHT_FIND_NODE, TAG_DHT_NODES, TAG_DHT_PING, TAG_DHT_PONG,
@@ -76,8 +81,8 @@ pub use net::{
     SyncStats,
 };
 pub use node::{
-    BlockHeader, BlockRecord, MerkleBlock, MiningTemplate, Node, NodeError, Prepared, Sent,
-    WalletDirection, WalletEvent,
+    BlockHeader, BlockRecord, HtlcInfo, MerkleBlock, MiningTemplate, Node, NodeError, Prepared,
+    Sent, WalletDirection, WalletEvent,
 };
 pub use p2p::{GossipEvent, GossipKind, Mesh, P2pError};
 pub use p2p_hardening::{P2pHardening, P2pHardeningConfig, PeerStats};

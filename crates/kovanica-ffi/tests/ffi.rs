@@ -484,3 +484,159 @@ fn send_to_script_v2_and_stealth_over_ffi() {
     // Sender's remaining balance: 1000 - 200 - 300 - 2 fees = 498.
     assert_eq!(node.balance_of_seed(1).unwrap(), "498");
 }
+
+#[test]
+fn htlc_over_ffi() {
+    let node = fresh();
+
+    // The deterministic founder actor (seed 1) is funded by genesis (1000).
+    // Its Ed25519 secret is the little-endian encoding of 1 padded to 32 bytes.
+    let founder_secret = "0100000000000000000000000000000000000000000000000000000000000000";
+    let recipient_secret = "0200000000000000000000000000000000000000000000000000000000000000";
+
+    // Recipient (Bob) is seed 2; sender (Alice) is the founder.
+    let recipient_pk = hex::encode(kovanica_node::Node::address(2).payload());
+
+    // Preimage + its BLAKE3 hash through the FFI helper.
+    let preimage = [0x42u8; 32];
+    let preimage_hash = node.htlc_preimage_hash_hex(hex::encode(preimage)).unwrap();
+    assert_eq!(hex::decode(&preimage_hash).unwrap().len(), 32);
+
+    // Build the template directly and check it round-trips.
+    let script_hex = node
+        .htlc_script_hex(
+            preimage_hash.clone(),
+            recipient_pk.clone(),
+            hex::encode(kovanica_node::Node::address(1).payload()),
+            1,
+        )
+        .unwrap();
+    assert_eq!(hex::decode(&script_hex).unwrap().len(), 100);
+
+    // Create the HTLC: founder locks 200 to Bob, timeout 1.
+    let info = node
+        .create_htlc(
+            founder_secret.into(),
+            200,
+            None,
+            recipient_pk.clone(),
+            preimage_hash.clone(),
+            1,
+        )
+        .unwrap();
+    assert_eq!(info.script_hex, script_hex);
+    assert_eq!(hex::decode(&info.tx_id).unwrap().len(), 32);
+    assert_eq!(hex::decode(&info.outpoint_tx).unwrap().len(), 32);
+    assert_eq!(info.outpoint_index, 0);
+    assert!(info.address.starts_with("kvnc"));
+    assert_eq!(node.balance_of_htlc(script_hex.clone()).unwrap(), 200);
+
+    // Redeem: Bob redeems with the preimage to his own address (BIP-199: no
+    // time constraint, even though the chain has passed T = 1).
+    let redeem_tx = node
+        .redeem_htlc(
+            recipient_secret.into(),
+            info.outpoint_tx.clone(),
+            info.outpoint_index,
+            script_hex.clone(),
+            hex::encode(preimage),
+            kovanica_node::Node::address(2).to_hex(),
+        )
+        .unwrap();
+    assert_eq!(hex::decode(&redeem_tx).unwrap().len(), 32);
+    assert_eq!(node.balance_of_htlc(script_hex.clone()).unwrap(), 0);
+
+    // Refund path: founder locks a second HTLC (timeout 1) and refunds it
+    // once the chain height reaches the timeout.
+    let info2 = node
+        .create_htlc(
+            founder_secret.into(),
+            150,
+            None,
+            recipient_pk,
+            preimage_hash,
+            1,
+        )
+        .unwrap();
+    assert_eq!(node.balance_of_htlc(info2.script_hex.clone()).unwrap(), 150);
+    let refund_tx = node
+        .refund_htlc(
+            founder_secret.into(),
+            info2.outpoint_tx,
+            info2.outpoint_index,
+            info2.script_hex.clone(),
+            kovanica_node::Node::address(1).to_hex(),
+        )
+        .unwrap();
+    assert_eq!(hex::decode(&refund_tx).unwrap().len(), 32);
+    assert_eq!(node.balance_of_htlc(info2.script_hex).unwrap(), 0);
+}
+
+#[test]
+fn swap_session_over_ffi() {
+    use kovanica_node::{SwapParams, SwapRole, SwapSession};
+
+    let node = fresh();
+    let founder_secret = "0100000000000000000000000000000000000000000000000000000000000000";
+    let preimage = [0x42u8; 32];
+
+    let alice_pk = *kovanica_node::Node::address(1).payload();
+    let bob_pk = *kovanica_node::Node::address(2).payload();
+
+    // Construct the swap session via the node API: Alice swaps 500 for Bob's
+    // 400, T_B = 1 < T_A = 3.
+    let session = SwapSession::new(
+        &SwapParams {
+            amount_a: 500,
+            asset_a: None,
+            amount_b: 400,
+            asset_b: None,
+            timeout_a: 3,
+            timeout_b: 1,
+        },
+        alice_pk,
+        bob_pk,
+        preimage,
+    )
+    .unwrap();
+
+    // The session's HTLC-A template matches what the FFI template builder
+    // produces for the same parameters.
+    let script_hex = node
+        .htlc_script_hex(
+            hex::encode(session.preimage_hash),
+            hex::encode(bob_pk),
+            hex::encode(alice_pk),
+            session.htlc_a.timeout(),
+        )
+        .unwrap();
+    assert_eq!(script_hex, hex::encode(session.htlc_a.bytes()));
+
+    // Create HTLC-A through the FFI surface and verify the session recognizes
+    // it as Bob's leg (and rejects it as Alice's).
+    let info = node
+        .create_htlc(
+            founder_secret.into(),
+            500,
+            None,
+            hex::encode(bob_pk),
+            hex::encode(session.preimage_hash),
+            session.htlc_a.timeout(),
+        )
+        .unwrap();
+    let on_chain =
+        kovanica_state::htlc::HtlcScript::parse(&hex::decode(&info.script_hex).unwrap()).unwrap();
+    assert!(session.verify_against(&on_chain, SwapRole::Bob));
+    assert!(!session.verify_against(&on_chain, SwapRole::Alice));
+
+    // Timeout ordering is enforced: T_B must be strictly less than T_A.
+    let bad = SwapParams {
+        amount_a: 500,
+        asset_a: None,
+        amount_b: 400,
+        asset_b: None,
+        timeout_a: 1,
+        timeout_b: 3,
+    };
+    assert!(SwapSession::new(&bad, alice_pk, bob_pk, preimage).is_err());
+}

@@ -18,9 +18,9 @@ use kovanica_state::multisig::{verify_threshold_signatures, MultisigScript};
 use kovanica_state::stake::{Freeze, UNBOND_MATURITY, UNBOND_PREFIX};
 use kovanica_state::{
     apply_block, decode_block_payload, encode_block_payload, verify, Address, AssetId,
-    HalvingSchedule, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore,
-    OutPoint, Sig, StakedVrf, StealthAddress, Transaction, TxId, TxOutput, UtxoSet,
-    DEFAULT_HALVING_ERA,
+    HalvingSchedule, HtlcScript, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError,
+    LedgerStore, OutPoint, Sig, StakedVrf, StealthAddress, Transaction, TxId, TxInput, TxOutput,
+    UtxoSet, DEFAULT_HALVING_ERA,
 };
 
 use crate::mempool_v2::{MempoolConfig, MempoolV2};
@@ -98,6 +98,8 @@ pub enum NodeError {
     UnknownMultisigAddress { address: Address },
     /// The supplied multisig redeem script or partial signatures are invalid.
     Multisig(&'static str),
+    /// An HTLC template failed to construct (invalid key or duplicate keys).
+    Htlc(&'static str),
     /// Not enough valid partial signatures were supplied to reach the threshold.
     InsufficientMultisigSignatures { have: usize, need: u8 },
     /// A multisig operation expected a single input but the transaction has more.
@@ -135,6 +137,7 @@ impl core::fmt::Display for NodeError {
                 write!(f, "unknown multisig address {address}")
             }
             NodeError::Multisig(msg) => write!(f, "multisig error: {msg}"),
+            NodeError::Htlc(msg) => write!(f, "htlc error: {msg}"),
             NodeError::InsufficientMultisigSignatures { have, need } => {
                 write!(f, "insufficient multisig signatures: have {have}, need {need}")
             }
@@ -173,6 +176,21 @@ pub struct Prepared {
     pub value: u64,
     /// Protocol fee burned-or-paid to the miner (atoms).
     pub fee: u64,
+}
+
+/// Information about a created HTLC output (RFC-004).
+#[derive(Clone, Debug)]
+pub struct HtlcInfo {
+    /// The validated HTLC template (100 bytes: preimage hash, recipient pk,
+    /// sender pk, timeout).
+    pub script: HtlcScript,
+    /// The Version 0x04 address the output is locked to
+    /// (`0x04 || BLAKE3(template)`).
+    pub address: Address,
+    /// Id of the funding transaction.
+    pub tx_id: TxId,
+    /// The funding transaction's output 0 — the HTLC output itself.
+    pub outpoint: OutPoint,
 }
 
 /// The wire form of a block for gossip: everything a peer needs to re-insert it.
@@ -1342,6 +1360,208 @@ impl Node {
     pub fn balance_of_stealth(&self, to: &StealthAddress) -> u64 {
         let addr = to.address();
         self.balance(&addr).unwrap_or(0) as u64
+    }
+
+    // ------------------------------------------------------------------
+    // HTLC (RFC-004) wallet helpers
+    // ------------------------------------------------------------------
+
+    /// Create an HTLC output: `amount` of `asset_id` locked to a Version 0x04
+    /// address committing to `preimage_hash`, `recipient_pk`, this keypair as
+    /// sender, and `timeout`. The funding transaction is mined immediately as
+    /// a new block on the current tips (the same flow as
+    /// [`Node::send_to_script_v2`]).
+    ///
+    /// The returned [`HtlcInfo`] carries the validated template, the address,
+    /// and the funding outpoint (output 0) — everything a counterparty needs
+    /// to verify the contract on-chain and later redeem or refund it.
+    pub fn create_htlc(
+        &mut self,
+        kp: &KeyPair,
+        amount: u64,
+        asset_id: Option<AssetId>,
+        recipient_pk: [u8; 32],
+        preimage_hash: [u8; 32],
+        timeout: u32,
+    ) -> Result<HtlcInfo, NodeError> {
+        if amount == 0 {
+            return Err(NodeError::ZeroAmount);
+        }
+        let script = HtlcScript::new(
+            preimage_hash,
+            recipient_pk,
+            *kp.address().payload(),
+            timeout,
+        )
+        .map_err(|e| NodeError::Htlc(e.as_str()))?;
+        let address = script.address();
+        let tx = self.build_transfer_with_asset(kp, amount, address, asset_id)?;
+        let tx_id = tx.id();
+        let outpoint = OutPoint::new(tx_id, 0);
+        self.insert_tx_block(tx)?;
+        Ok(HtlcInfo {
+            script,
+            address,
+            tx_id,
+            outpoint,
+        })
+    }
+
+    /// Redeem an HTLC output with the correct preimage. `kp` is the
+    /// **recipient** (the party who knows the preimage); the witness is
+    /// `[template, preimage, recipient_sig]` and has **no time constraint**
+    /// (BIP-199).
+    ///
+    /// Native HTLCs spend the single HTLC input and pay the fee out of the
+    /// locked value (`htlc_value - min_fee` to `to`). Asset HTLCs send the
+    /// asset to `to` and add a native fee input selected largest-first from
+    /// `kp`'s UTXOs (mirroring [`Node::build_transfer_with_asset`]).
+    pub fn redeem_htlc(
+        &mut self,
+        kp: &KeyPair,
+        outpoint: OutPoint,
+        script: &HtlcScript,
+        preimage: &[u8],
+        to: Address,
+    ) -> Result<TxId, NodeError> {
+        let tx = self.build_htlc_spend(kp, outpoint, script, to, |sig| {
+            script.redeem_witness(preimage, sig)
+        })?;
+        self.insert_tx_block(tx)
+    }
+
+    /// Refund an HTLC output after its timeout. `kp` is the **sender**; the
+    /// witness is `[template, sender_sig]`. The ledger rejects the refund with
+    /// `HtlcTimeoutNotReached` until the chain height reaches `script.timeout()`
+    /// (the refund block's own height must be `>= timeout`).
+    pub fn refund_htlc(
+        &mut self,
+        kp: &KeyPair,
+        outpoint: OutPoint,
+        script: &HtlcScript,
+        to: Address,
+    ) -> Result<TxId, NodeError> {
+        let tx =
+            self.build_htlc_spend(kp, outpoint, script, to, |sig| script.refund_witness(sig))?;
+        self.insert_tx_block(tx)
+    }
+
+    /// The spendable balance locked to an HTLC template's address in the
+    /// current full ledger state.
+    pub fn balance_of_htlc(&self, script: &HtlcScript) -> u64 {
+        let addr = script.address();
+        self.balance(&addr).unwrap_or(0) as u64
+    }
+
+    /// Scan the DAG in linearized (canonical) order for a **redeem** of
+    /// `script` at or after `from_height` (blue score), and return the
+    /// revealed preimage — Bob's trustless discovery of Alice's redeem of
+    /// HTLC-B. Blocks with pruned payloads are skipped.
+    pub fn scan_for_htlc_redeem(
+        &self,
+        script: &HtlcScript,
+        from_height: u64,
+    ) -> Option<(TxId, Vec<u8>)> {
+        let ledger = self.ledger().ok()?;
+        let dag = ledger.dag();
+        for id in dag.linearize() {
+            let Some(block) = dag.block(&id) else {
+                continue;
+            };
+            let height = dag.ghostdag(&id).map(|g| g.blue_score).unwrap_or(0);
+            if height < from_height {
+                continue;
+            }
+            let Ok(txs) = decode_block_payload(block.payload()) else {
+                continue;
+            };
+            for tx in &txs {
+                if let Some(preimage) = crate::atomic_swap::extract_preimage(tx, script) {
+                    return Some((tx.id(), preimage));
+                }
+            }
+        }
+        None
+    }
+
+    /// Build a signed spend of an HTLC output. The HTLC input's witness is
+    /// supplied by the caller (redeem or refund); for asset HTLCs a native fee
+    /// input is selected largest-first from `kp`'s UTXOs. The same signature
+    /// authorises the HTLC path and the P2PK fee input.
+    fn build_htlc_spend(
+        &self,
+        kp: &KeyPair,
+        outpoint: OutPoint,
+        script: &HtlcScript,
+        to: Address,
+        witness_for: impl FnOnce([u8; 64]) -> Vec<Vec<u8>>,
+    ) -> Result<Transaction, NodeError> {
+        let fee = self.min_fee();
+        let state = self.ledger()?.ledger_state();
+        let htlc_out = state.get(&outpoint).ok_or(NodeError::InsufficientFunds)?;
+        if htlc_out.owner != script.address() {
+            return Err(NodeError::InsufficientFunds);
+        }
+
+        let mut inputs = vec![TxInput::new(outpoint, Vec::new())];
+        let mut outputs = Vec::new();
+        match htlc_out.asset_id {
+            None => {
+                let value = htlc_out
+                    .value
+                    .checked_sub(fee)
+                    .ok_or(NodeError::InsufficientFunds)?;
+                outputs.push(TxOutput::native(value, to));
+            }
+            Some(asset) => {
+                outputs.push(TxOutput::new(htlc_out.value, Some(asset), to));
+                // Native fee input, largest-first from kp's UTXOs.
+                let mut owned: Vec<(OutPoint, u64)> = state
+                    .iter()
+                    .filter(|(_, out)| out.owner == kp.address() && out.asset_id.is_none())
+                    .map(|(op, out)| (*op, out.value))
+                    .collect();
+                owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                let (fee_op, fee_value) = owned
+                    .into_iter()
+                    .find(|(_, v)| *v >= fee)
+                    .ok_or(NodeError::InsufficientFunds)?;
+                inputs.push(TxInput::new(fee_op, Vec::new()));
+                let change = fee_value - fee;
+                if change > 0 {
+                    outputs.push(TxOutput::native(change, kp.address()));
+                }
+            }
+        }
+
+        let mut tx = Transaction::new(inputs, outputs, Vec::new());
+        let sighash = tx.sighash();
+        let sig = kp.sign(&sighash);
+        tx.inputs_mut()[0].witness = witness_for(sig);
+        if tx.inputs().len() > 1 {
+            tx.attach_signature(1, Sig::from_bytes(sig));
+        }
+        Ok(tx)
+    }
+
+    /// Insert a single signed transaction as a new block on the current tips
+    /// and return its id. The shared tail of the immediate-send flows
+    /// (`send_with_asset`, `send_to_script_v2`, `send_to_stealth`, and the
+    /// HTLC helpers).
+    fn insert_tx_block(&mut self, tx: Transaction) -> Result<TxId, NodeError> {
+        let tx_id = tx.id();
+        let parents = self.ledger()?.dag().tips();
+        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
+        let dag = self.ledger()?.dag();
+        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
+        let block = ledger
+            .insert(parents, work, timestamp, nonce, &[tx])
+            .map_err(NodeError::Insert)?;
+        self.note_inserted(block);
+        self.evict_mempool();
+        Ok(tx_id)
     }
 
     // ------------------------------------------------------------------

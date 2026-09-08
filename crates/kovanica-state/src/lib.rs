@@ -69,6 +69,7 @@
 //! assert_eq!(run.utxo.balance(&alice.address()), 0);
 //! ```
 
+pub mod htlc;
 pub mod keys;
 pub mod ledger;
 pub mod multisig;
@@ -80,11 +81,13 @@ pub mod tx;
 pub mod utxo;
 pub mod validation;
 
+pub use htlc::{HtlcScript, HtlcScriptError, HTLC_SCRIPT_LEN};
 pub use keys::{verify, verify_pk, Address, KeyPair, StealthAddress};
 pub use ledger::{
     apply_block, apply_dag, BlockSummary, HalvingSchedule, HybridConfig, Ledger,
     LedgerCheckpointError, LedgerError, LedgerInsertError, LedgerRun, LedgerSnapshotError,
-    StakedVrf, DEFAULT_HALVING_ERA, MULTISIG_ACTIVATION_SCORE, NATIVE_TOKEN_ACTIVATION_SCORE,
+    StakedVrf, DEFAULT_HALVING_ERA, HTLC_ACTIVATION_SCORE, MULTISIG_ACTIVATION_SCORE,
+    NATIVE_TOKEN_ACTIVATION_SCORE,
 };
 pub use multisig::{verify_threshold_signatures, MultisigScript, MAX_MULTISIG_KEYS};
 pub use spv::{

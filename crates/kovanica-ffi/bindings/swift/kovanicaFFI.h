@@ -268,6 +268,11 @@ RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_balance_of_address(uint64_t p
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_balance_of_asset(uint64_t ptr, RustBuffer address, RustBuffer asset_id_hex, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_HTLC
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_HTLC
+uint64_t uniffi_kovanica_ffi_fn_method_lightnode_balance_of_htlc(uint64_t ptr, RustBuffer script_hex, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_SCRIPT
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_SCRIPT
 uint64_t uniffi_kovanica_ffi_fn_method_lightnode_balance_of_script(uint64_t ptr, RustBuffer script_hex, RustCallStatus *_Nonnull out_status
@@ -323,6 +328,11 @@ uint64_t uniffi_kovanica_ffi_fn_method_lightnode_chain_height(uint64_t ptr, Rust
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_combine_multisig_sigs(uint64_t ptr, RustBuffer tx_blob, RustBuffer partial_sigs, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_CREATE_HTLC
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_CREATE_HTLC
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_create_htlc(uint64_t ptr, RustBuffer signing_secret_hex, uint64_t amount, RustBuffer asset_id_hex, RustBuffer recipient_pk_hex, RustBuffer preimage_hash_hex, uint32_t timeout, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_CREATE_MULTISIG_ADDRESS
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_CREATE_MULTISIG_ADDRESS
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_create_multisig_address(uint64_t ptr, uint8_t threshold, RustBuffer pubkeys_hex, RustCallStatus *_Nonnull out_status
@@ -373,6 +383,16 @@ int8_t uniffi_kovanica_ffi_fn_method_lightnode_filter_matches_any(uint64_t ptr, 
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_history_of(uint64_t ptr, RustBuffer address, uint32_t max_blocks, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_HTLC_PREIMAGE_HASH_HEX
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_HTLC_PREIMAGE_HASH_HEX
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_htlc_preimage_hash_hex(uint64_t ptr, RustBuffer preimage_hex, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_HTLC_SCRIPT_HEX
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_HTLC_SCRIPT_HEX
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_htlc_script_hex(uint64_t ptr, RustBuffer preimage_hash_hex, RustBuffer recipient_pk_hex, RustBuffer sender_pk_hex, uint32_t timeout, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_HYBRID_ENABLED
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_HYBRID_ENABLED
 int8_t uniffi_kovanica_ffi_fn_method_lightnode_hybrid_enabled(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -416,6 +436,16 @@ uint32_t uniffi_kovanica_ffi_fn_method_lightnode_receive_blocks(uint64_t ptr, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_RECEIVE_LIGHT_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_RECEIVE_LIGHT_SYNC
 uint32_t uniffi_kovanica_ffi_fn_method_lightnode_receive_light_sync(uint64_t ptr, RustBuffer blob, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_REDEEM_HTLC
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_REDEEM_HTLC
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_redeem_htlc(uint64_t ptr, RustBuffer signing_secret_hex, RustBuffer outpoint_tx_hex, uint32_t outpoint_index, RustBuffer script_hex, RustBuffer preimage_hex, RustBuffer to_address, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_REFUND_HTLC
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_REFUND_HTLC
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_refund_htlc(uint64_t ptr, RustBuffer signing_secret_hex, RustBuffer outpoint_tx_hex, uint32_t outpoint_index, RustBuffer script_hex, RustBuffer to_address, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SAVE_SNAPSHOT
@@ -795,6 +825,12 @@ uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_HTLC
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_HTLC
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_htlc(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_SCRIPT
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_SCRIPT
 uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_script(void
@@ -861,6 +897,12 @@ uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_combine_multisig_sigs(voi
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_CREATE_HTLC
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_CREATE_HTLC
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_create_htlc(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_CREATE_MULTISIG_ADDRESS
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_CREATE_MULTISIG_ADDRESS
 uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_create_multisig_address(void
@@ -921,6 +963,18 @@ uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_history_of(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_HTLC_PREIMAGE_HASH_HEX
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_HTLC_PREIMAGE_HASH_HEX
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_htlc_preimage_hash_hex(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_HTLC_SCRIPT_HEX
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_HTLC_SCRIPT_HEX
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_htlc_script_hex(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_HYBRID_ENABLED
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_HYBRID_ENABLED
 uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_hybrid_enabled(void
@@ -972,6 +1026,18 @@ uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_receive_blocks(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_RECEIVE_LIGHT_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_RECEIVE_LIGHT_SYNC
 uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_receive_light_sync(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_REDEEM_HTLC
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_REDEEM_HTLC
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_redeem_htlc(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_REFUND_HTLC
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_REFUND_HTLC
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_refund_htlc(void
     
 );
 #endif

@@ -593,14 +593,15 @@ fn test_script_v2_cltv_spend() {
 
     let (mut ledger, coin) = funded_ledger(script_addr, 1_000);
 
-    // n_lock_time = 100 >= v = 50 → passes.
+    // Real CLTV semantics (BIP-65/BIP-113): the block's height (1) must be
+    // >= n_lock_time (1) >= v (1). n_lock_time = 1, v = 1 → passes.
     let spend = build_script_v2_spend_with_lock(
         coin,
         script,
-        vec![vec![1u8], 50u32.to_le_bytes().to_vec()],
+        vec![vec![1u8], 1u32.to_le_bytes().to_vec()],
         vec![TxOutput::native(900, bob.address())],
         b"cltv".to_vec(),
-        100,
+        1,
         0,
     );
 
@@ -621,14 +622,16 @@ fn test_script_v2_cltv_rejected() {
 
     let (mut ledger, coin) = funded_ledger(script_addr, 1_000);
 
-    // n_lock_time = 50 < v = 100 → LockTimeViolation → BadSignature.
+    // Real CLTV semantics (BIP-65/BIP-113): at block height 1, n_lock_time = 1
+    // is final (1 <= 1), but the script check n_lock_time >= v fails for v = 2
+    // → LockTimeViolation → BadSignature.
     let spend = build_script_v2_spend_with_lock(
         coin,
         script,
-        vec![vec![1u8], 100u32.to_le_bytes().to_vec()],
+        vec![vec![1u8], 2u32.to_le_bytes().to_vec()],
         vec![TxOutput::native(900, bob.address())],
         b"cltv-fail".to_vec(),
-        50,
+        1,
         0,
     );
 

@@ -5,6 +5,7 @@
 //! - Version 0x01: Pay-to-Witness-Script-Hash (P2SH, 32-byte BLAKE3 redeem script digest).
 //! - Version 0x02: Pay-to-Script-V2 (P2SV2, 32-byte BLAKE3 script v2 digest).
 //! - Version 0x03: Stealth address (scan_pk || spend_pk, two 32-byte Ed25519/Ristretto255 keys).
+//! - Version 0x04: HTLC template hash (32-byte BLAKE3 digest of an RFC-004 HTLC template).
 //!
 //! A [`TxOutput`] records the address that owns it (see [`crate::tx`]). To spend an output, a
 //! transaction input must carry a witness that verifies against that address.
@@ -38,6 +39,9 @@ use crate::tx::StealthExt;
 /// A 33-byte versioned account address:
 /// - Version 0x00: Pay-to-Public-Key (P2PK, 32-byte Ed25519 public key payload).
 /// - Version 0x01: Pay-to-Witness-Script-Hash (P2SH, 32-byte BLAKE3 redeem script digest).
+/// - Version 0x02: Pay-to-Script-V2 (P2SV2, 32-byte BLAKE3 script v2 digest).
+/// - Version 0x03: Stealth address (scan_pk || spend_pk, two 32-byte Ed25519/Ristretto255 keys).
+/// - Version 0x04: HTLC template hash (32-byte BLAKE3 digest of an RFC-004 HTLC template).
 ///
 /// Ordering is over the raw 33 bytes for deterministic tie-breaks.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -52,8 +56,10 @@ impl Address {
     pub const VERSION_SCRIPT_V2: u8 = 0x02;
     /// Version 0x03: Stealth address (scan key || spend key, two Ed25519/Ristretto255 keys).
     pub const VERSION_STEALTH: u8 = 0x03;
+    /// Version 0x04: HTLC (hashed time-locked contract) template hash (RFC-004).
+    pub const VERSION_HTLC: u8 = 0x04;
     /// Maximum supported address version.
-    pub const VERSION_MAX: u8 = Self::VERSION_STEALTH;
+    pub const VERSION_MAX: u8 = Self::VERSION_HTLC;
 
     /// Construct a Version 0x00 (P2PK) address from raw 32-byte Ed25519 public key bytes.
     pub const fn p2pk(pubkey: [u8; 32]) -> Self {
@@ -134,6 +140,24 @@ impl Address {
         Self(bytes)
     }
 
+    /// Construct a Version 0x04 (HTLC) address from a 32-byte BLAKE3 template hash.
+    pub const fn htlc(script_hash: [u8; 32]) -> Self {
+        let mut bytes = [0u8; 33];
+        bytes[0] = Self::VERSION_HTLC;
+        let mut i = 0;
+        while i < 32 {
+            bytes[i + 1] = script_hash[i];
+            i += 1;
+        }
+        Self(bytes)
+    }
+
+    /// Construct a Version 0x04 (HTLC) address by computing the BLAKE3 digest of an HTLC template.
+    pub fn from_htlc_script(script: &[u8]) -> Self {
+        let hash = blake3::hash(script);
+        Self::htlc(*hash.as_bytes())
+    }
+
     /// Construct an address from canonical 33-byte versioned wire bytes.
     pub const fn from_versioned_bytes(bytes: [u8; 33]) -> Self {
         Self(bytes)
@@ -184,6 +208,10 @@ impl Address {
     /// Whether this is a Version 0x03 (Stealth) address.
     pub const fn is_stealth(&self) -> bool {
         self.0[0] == Self::VERSION_STEALTH
+    }
+    /// Whether this is a Version 0x04 (HTLC) address.
+    pub const fn is_htlc(&self) -> bool {
+        self.0[0] == Self::VERSION_HTLC
     }
 
     /// The canonical 33-byte versioned byte slice.
@@ -685,7 +713,7 @@ mod tests {
     #[test]
     fn unsupported_version_rejected() {
         let mut bytes = [0u8; 33];
-        bytes[0] = 0x04; // unsupported version (above VERSION_MAX)
+        bytes[0] = 0x05; // unsupported version (above VERSION_MAX)
         let hex_str = hex::encode(bytes);
         assert!(Address::parse(&hex_str).is_err());
     }
@@ -737,9 +765,36 @@ mod tests {
     }
 
     #[test]
-    fn version_max_is_stealth() {
-        assert_eq!(Address::VERSION_MAX, Address::VERSION_STEALTH);
-        assert_eq!(Address::VERSION_MAX, 0x03);
+    fn htlc_address_properties() {
+        let template_hash = [0xEEu8; 32];
+        let addr = Address::htlc(template_hash);
+        assert_eq!(addr.version(), Address::VERSION_HTLC);
+        assert!(addr.is_htlc());
+        assert!(!addr.is_p2pk());
+        assert!(!addr.is_p2sh());
+        assert!(!addr.is_script_v2());
+        assert!(!addr.is_stealth());
+        assert_eq!(addr.payload(), &template_hash);
+        assert_eq!(addr.as_bytes()[0], Address::VERSION_HTLC);
+        assert_eq!(&addr.as_bytes()[1..], &template_hash[..]);
+        // kvnc roundtrip
+        let shown = addr.to_kvnc();
+        assert_eq!(Address::parse(&shown).unwrap(), addr);
+        assert_eq!(Address::parse(&addr.to_hex()).unwrap(), addr);
+        // from_htlc_script computes BLAKE3 of the template bytes
+        let template = [0xABu8; 100];
+        let from_script = Address::from_htlc_script(&template);
+        assert_eq!(
+            from_script,
+            Address::htlc(*blake3::hash(&template).as_bytes())
+        );
+        assert!(from_script.is_htlc());
+    }
+
+    #[test]
+    fn version_max_is_htlc() {
+        assert_eq!(Address::VERSION_MAX, Address::VERSION_HTLC);
+        assert_eq!(Address::VERSION_MAX, 0x04);
     }
 
     #[test]
