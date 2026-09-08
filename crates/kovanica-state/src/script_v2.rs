@@ -11,7 +11,7 @@
 //! |--------|------|-----------|
 //! | `ED25519_VERIFY` | `0x01` | Pop `sig` (64B) + `pk` (32B); verify `sig` over the sighash against `pk`. Push 1 on success, fail on failure. |
 //! | `CHECKLOCKTIMEVERIFY` (CLTV) | `0x02` | Pop `v` (u32 LE). Fail if `tx.nLockTime < v`. Push nothing. |
-//! | `CHECKSEQUENCEVERIFY` (CSV) | `0x03` | Pop `v` (u32 LE). Fail if `tx.sequence < v`. Push nothing. |
+//! | `CHECKSEQUENCEVERIFY` (CSV) | `0x03` | Pop `v` (u32 LE). Fail if `tx.sequence < v`. Push nothing. Under RFC-005 (§3) the ledger additionally *enforces* a non-final declared `sequence` as a real BIP-112 relative lock (the input's UTXO must have aged `sequence` blocks since its creation height), so a script's CSV check rides on genuine age-gating rather than a mere declaration. `sequence = 0`, `0xFFFF_FFFF`, or a sequence with the BIP-68 disable-flag bit (`0x80000000`) is final at the ledger level — and trivially `>= v` here, so the script CSV never blocks a deliberately-final tx. |
 //! | `HASH_BLAKE3` | `0x04` | Pop `input` (any length). Push `BLAKE3(input)` (32 bytes). |
 //! | `EQUAL` | `0x05` | Pop `a` + `b` (same length). Push 1 if `a == b`, else 0. |
 //! | `AND` | `0x06` | Pop `a` + `b` (both must be 0 or 1). Push 1 if both non-zero, else 0. |
@@ -54,7 +54,10 @@
 //!   (pushed by the interpreter before execution begins), followed by the witness
 //!   elements after `witness[0]` (the script itself).
 //! - The enclosing transaction's `nLockTime` (u32) and `sequence` (u32) are
-//!   available to CLTV/CSV.
+//!   available to CLTV/CSV. The `sequence` field doubles as a real relative
+//!   lock when non-final: RFC-005's ledger rule delays the spend until
+//!   `block_height >= creation_height + sequence` (BIP-68/BIP-112), so the
+//!   script CSV opcode only ever sees the post-gate transaction.
 //! - Execution is **deterministic**: no HashMap iteration order, no wall-clock,
 //!   no unstable sorts. Only stack operations and the fixed opcode semantics.
 //! - **Step budget**: every opcode execution counts as one step. Exceeding
@@ -65,7 +68,8 @@
 //!
 //! ## Reference protocols
 //!
-//! - BIP-65 (CHECKLOCKTIMEVERIFY), BIP-112 (CHECKSEQUENCEVERIFY)
+//! - BIP-65 (CHECKLOCKTIMEVERIFY), BIP-68/BIP-112 (CHECKSEQUENCEVERIFY, with
+//!   RFC-005's real relative-locktime enforcement at the ledger layer)
 //! - Bitcoin script (stack-based Forth model, adapted to bounded subset)
 //! - Cardano Plutus (deterministic-script rationale), Algorand TEAL (bounded-step budget)
 //! - RFC-001 multisig (THRESHOLD semantics mirror M-of-N threshold verification)

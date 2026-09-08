@@ -20,7 +20,7 @@
 //! checkpoint <path> / load_checkpoint <path>  finality checkpoint persistence
 //! ```
 
-use kovanica_state::{Address, HtlcScript, KeyPair, OutPoint, TxId};
+use kovanica_state::{Address, HtlcScript, KeyPair, OutPoint, TxId, VaultScript};
 
 use crate::node::Node;
 
@@ -33,7 +33,10 @@ staking [vrf-pk-hex] | save <path> | load <path> | checkpoint <path> | load_chec
 htlc_create <from-seed> <amount> <recipient-pk-hex> <preimage-hash-hex> <timeout> | \
 htlc_redeem <from-seed> <outpoint-tx-hex> <outpoint-index> <script-hex> <preimage-hex> <to-addr> | \
 htlc_refund <from-seed> <outpoint-tx-hex> <outpoint-index> <script-hex> <to-addr> | \
-htlc_balance <script-hex>";
+htlc_balance <script-hex> | \
+vault_create <from-seed> <amount> <unlock-height> <csv> <owner-pk-hex> | \
+vault_release <from-seed> <outpoint-tx-hex> <outpoint-index> <script-hex> <to-addr> | \
+vault_balance <script-hex>";
 
 /// Run one command line against `node`, returning the response line. Never
 /// panics on bad input; malformed commands produce an `err ...` response.
@@ -217,6 +220,47 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
             Ok(node.balance_of_htlc(&script).to_string())
         }
 
+        "vault_create" => {
+            let [from, amount, unlock_height, csv, owner_pk_hex] = fixed::<5>(&args)?;
+            let kp = KeyPair::from_u64(u64_arg(from)?);
+            let mut owner_pk = [0u8; 32];
+            hex::decode_to_slice(owner_pk_hex, &mut owner_pk)
+                .map_err(|e| format!("bad owner-pk-hex: {e}"))?;
+            let info = node
+                .create_vault(
+                    &kp,
+                    u64_arg(amount)?,
+                    u32_arg(unlock_height)?,
+                    u32_arg(csv)?,
+                    owner_pk,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "{} {} {}",
+                info.tx_id,
+                hex::encode(info.script.bytes()),
+                info.address
+            ))
+        }
+
+        "vault_release" => {
+            let [from, outpoint_tx_hex, outpoint_index, script_hex, to_addr] = fixed::<5>(&args)?;
+            let kp = KeyPair::from_u64(u64_arg(from)?);
+            let outpoint = parse_outpoint(outpoint_tx_hex, outpoint_index)?;
+            let script = parse_vault_script(script_hex)?;
+            let to = Address::parse(to_addr).map_err(|e| e.to_string())?;
+            let tx_id = node
+                .release_vault(&kp, outpoint, &script, to)
+                .map_err(|e| e.to_string())?;
+            Ok(tx_id.to_string())
+        }
+
+        "vault_balance" => {
+            let [script_hex] = fixed::<1>(&args)?;
+            let script = parse_vault_script(script_hex)?;
+            Ok(node.balance_of_vault(&script).to_string())
+        }
+
         "len" => Ok(node.block_count().map_err(|e| e.to_string())?.to_string()),
 
         "save" => {
@@ -281,6 +325,12 @@ fn parse_outpoint(tx_hex: &str, index: &str) -> Result<OutPoint, String> {
 fn parse_htlc_script(script_hex: &str) -> Result<HtlcScript, String> {
     let bytes = hex::decode(script_hex).map_err(|e| format!("bad script-hex: {e}"))?;
     HtlcScript::parse(&bytes).map_err(|e| e.to_string())
+}
+
+/// Parse a 40-byte vault template from hex.
+fn parse_vault_script(script_hex: &str) -> Result<VaultScript, String> {
+    let bytes = hex::decode(script_hex).map_err(|e| format!("bad script-hex: {e}"))?;
+    VaultScript::parse(&bytes).map_err(|e| e.to_string())
 }
 
 /// A balance target is either an address (Base58, versioned/legacy hex) or an actor seed.

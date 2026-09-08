@@ -77,7 +77,7 @@ use crate::script_v2::ScriptV2;
 use crate::stake::{
     is_unbond_tag, parse_bond_tag, Freeze, StakeError, StakeState, UNBOND_MATURITY,
 };
-use crate::TxOutput;
+use crate::vault::VaultScript;
 
 /// Default blue-score threshold for RFC-001 multisig activation.
 pub const MULTISIG_ACTIVATION_SCORE: u64 = 0;
@@ -93,6 +93,9 @@ pub const SCRIPT_V2_ACTIVATION_SCORE: u64 = 0;
 
 /// Default blue-score threshold for RFC-004 HTLC activation.
 pub const HTLC_ACTIVATION_SCORE: u64 = 0;
+
+/// Default blue-score threshold for RFC-005 vault activation.
+pub const VAULT_ACTIVATION_SCORE: u64 = 0;
 
 /// Halving schedule for block subsidy.
 ///
@@ -193,7 +196,7 @@ impl Default for HybridConfig {
 use crate::tx::{
     decode_block_payload, encode_block_payload, DecodeError, OutPoint, Transaction, TxId,
 };
-use crate::utxo::UtxoSet;
+use crate::utxo::{UtxoEntry, UtxoSet};
 use crate::validation::TxStructureValidator;
 
 /// Why a transaction or block could not be applied.
@@ -310,6 +313,41 @@ pub enum LedgerError {
         tx: TxId,
         n_lock_time: u32,
         height: u64,
+    },
+
+    // Vault (RFC-005) Variants
+    /// Vault transaction submitted prior to consensus activation blue score
+    PreActivationVault {
+        tx: TxId,
+        blue_score: u64,
+        activation_score: u64,
+    },
+    /// A transaction input declares a non-final relative `sequence` (BIP-68/BIP-112
+    /// CSV) but the UTXO it spends has not yet aged `sequence` blocks — it was
+    /// created at `creation_height` and the spending block is `block_height`.
+    NonFinalRelativeSequence {
+        tx: TxId,
+        outpoint: OutPoint,
+        creation_height: u64,
+        sequence: u32,
+        block_height: u64,
+    },
+    /// A vault spend attempted before the template's absolute `unlock_height`
+    /// (CLTV-style) was reached.
+    VaultAbsoluteNotReached {
+        tx: TxId,
+        input: usize,
+        required: u32,
+        block_height: u64,
+    },
+    /// A vault spend attempted before the template's relative `csv` age had
+    /// elapsed (`block_height >= creation_height + csv`).
+    VaultRelativeNotReached {
+        tx: TxId,
+        input: usize,
+        required: u32,
+        creation_height: u64,
+        block_height: u64,
     },
 }
 
@@ -446,6 +484,43 @@ impl core::fmt::Display for LedgerError {
                 f,
                 "transaction {tx} is non-final: n_lock_time {n_lock_time} > block height {height}"
             ),
+            LedgerError::PreActivationVault {
+                tx,
+                blue_score,
+                activation_score,
+            } => write!(
+                f,
+                "vault tx {tx} rejected before activation: blue score {blue_score} <= activation {activation_score}"
+            ),
+            LedgerError::NonFinalRelativeSequence {
+                tx,
+                outpoint,
+                creation_height,
+                sequence,
+                block_height,
+            } => write!(
+                f,
+                "transaction {tx} is non-final: input {outpoint:?} (created at height {creation_height}) has relative sequence {sequence}, but block height {block_height} < {creation_height} + {sequence}"
+            ),
+            LedgerError::VaultAbsoluteNotReached {
+                tx,
+                input,
+                required,
+                block_height,
+            } => write!(
+                f,
+                "vault input {input} of {tx} locked: block height {block_height} < unlock height {required}"
+            ),
+            LedgerError::VaultRelativeNotReached {
+                tx,
+                input,
+                required,
+                creation_height,
+                block_height,
+            } => write!(
+                f,
+                "vault input {input} of {tx} locked: block height {block_height} < creation height {creation_height} + csv {required}"
+            ),
         }
     }
 }
@@ -497,6 +572,7 @@ pub fn apply_block(
         STEALTH_ACTIVATION_SCORE,
         SCRIPT_V2_ACTIVATION_SCORE,
         HTLC_ACTIVATION_SCORE,
+        VAULT_ACTIVATION_SCORE,
     )
 }
 
@@ -530,6 +606,7 @@ pub fn apply_block_with_stake(
         STEALTH_ACTIVATION_SCORE,
         SCRIPT_V2_ACTIVATION_SCORE,
         HTLC_ACTIVATION_SCORE,
+        VAULT_ACTIVATION_SCORE,
     )
 }
 
@@ -549,6 +626,7 @@ fn apply_block_inner(
     stealth_activation_score: u64,
     script_v2_activation_score: u64,
     htlc_activation_score: u64,
+    vault_activation_score: u64,
 ) -> Result<BlockSummary, LedgerError> {
     // Stage all changes on a copy; only commit if the whole block validates, so
     // a rejected block has no effect (atomicity).
@@ -576,6 +654,7 @@ fn apply_block_inner(
             stealth_activation_score,
             script_v2_activation_score,
             htlc_activation_score,
+            vault_activation_score,
         )?;
         total_fees = total_fees
             .checked_add(fee)
@@ -590,11 +669,13 @@ fn apply_block_inner(
             &mut staging,
             cb,
             allowed,
+            height,
             blue_score,
             multisig_activation_score,
             native_token_activation_score,
             stealth_activation_score,
             script_v2_activation_score,
+            htlc_activation_score,
         )?,
         None => 0,
     };
@@ -622,6 +703,7 @@ fn apply_regular(
     stealth_activation_score: u64,
     script_v2_activation_score: u64,
     htlc_activation_score: u64,
+    vault_activation_score: u64,
 ) -> Result<u64, LedgerError> {
     if tx.inputs().is_empty() || tx.outputs().is_empty() {
         return Err(LedgerError::EmptyTransaction(tx.id()));
@@ -707,6 +789,19 @@ fn apply_regular(
         }
     }
 
+    // RFC-005 vault pre-activation gating on outputs:
+    if blue_score <= vault_activation_score {
+        for output in tx.outputs() {
+            if output.owner.is_vault() {
+                return Err(LedgerError::PreActivationVault {
+                    tx: tx.id(),
+                    blue_score,
+                    activation_score: vault_activation_score,
+                });
+            }
+        }
+    }
+
     // Tag-driven stake roles. A tag that matches neither convention is an
     // ordinary transfer and only faces the frozen-input rule.
     let bond_pk = parse_bond_tag(tx.tag());
@@ -724,9 +819,12 @@ fn apply_regular(
         if !seen.insert(input.outpoint) {
             return Err(LedgerError::DuplicateInput(input.outpoint));
         }
-        let prev = staging
-            .get(&input.outpoint)
+        // Resolve the full UTXO entry: output + the linearized height at which
+        // it entered the set (RFC-005 §3.2 — the relative-locktime clock).
+        let prev_entry = staging
+            .get_entry(&input.outpoint)
             .ok_or(LedgerError::MissingInput(input.outpoint))?;
+        let prev = &prev_entry.output;
 
         // Pre-activation gating on spends:
         if blue_score <= multisig_activation_score
@@ -773,6 +871,41 @@ fn apply_regular(
                 blue_score,
                 activation_score: htlc_activation_score,
             });
+        }
+
+        // RFC-005 vault pre-activation gating on spends:
+        if blue_score <= vault_activation_score && prev.owner.is_vault() {
+            return Err(LedgerError::PreActivationVault {
+                tx: tx.id(),
+                blue_score,
+                activation_score: vault_activation_score,
+            });
+        }
+
+        // RFC-005 relative locktime (BIP-68/BIP-112 CSV): a transaction whose
+        // `sequence` is non-final delays this spend until the input's UTXO has
+        // aged that many blocks (measured from its *creation height*, not the
+        // current view). `sequence == 0`, `sequence == 0xFFFF_FFFF`, and the
+        // BIP-68 disable-flag bit (`0x80000000`) all mean "final". This is a
+        // ledger-level finality rule like the CLTV gate above — it applies from
+        // height zero because every pre-upgrade transaction has `sequence = 0`
+        // (immediately final) and a new transaction declaring a non-final
+        // sequence is a deliberate opt-in to relative locking (RFC-005 §3).
+        let seq = tx.sequence();
+        if seq != 0 && seq != u32::MAX && (seq & 0x8000_0000) == 0 {
+            let creation_height = prev_entry.creation_height;
+            // Overflow can never legitimately pass, and must not be treated as
+            // "reached" — pin it to u64::MAX so the spend stays locked.
+            let required = creation_height.saturating_add(u64::from(seq));
+            if height < required {
+                return Err(LedgerError::NonFinalRelativeSequence {
+                    tx: tx.id(),
+                    outpoint: input.outpoint,
+                    creation_height,
+                    sequence: seq,
+                    block_height: height,
+                });
+            }
         }
 
         // Branch on address version:
@@ -1001,6 +1134,74 @@ fn apply_regular(
                     });
                 }
             }
+        } else if prev.owner.is_vault() {
+            // Pay-to-Vault (RFC-005): witness[0] = template bytes; BLAKE3(template)
+            // must match the owner's script hash. Both time locks are required,
+            // then the owner signs the sighash — all four checks, no OR:
+            //  1. witness exactly [template, owner_sig]
+            //  2. template parse strict + hash match
+            //  3. absolute lock:  height >= unlock_height
+            //  4. relative lock:  height >= creation_height + csv
+            if input.witness.len() != 2 {
+                return Err(LedgerError::InvalidWitnessCount {
+                    tx: tx.id(),
+                    input: i,
+                    expected: 2,
+                    actual: input.witness.len(),
+                });
+            }
+            let template_bytes = &input.witness[0];
+            let script_hash = *blake3::hash(template_bytes).as_bytes();
+            if script_hash != *prev.owner.payload() {
+                return Err(LedgerError::ScriptHashMismatch {
+                    tx: tx.id(),
+                    input: i,
+                });
+            }
+            let script = VaultScript::parse(template_bytes).map_err(|e| {
+                LedgerError::InvalidRedeemScript {
+                    tx: tx.id(),
+                    input: i,
+                    reason: e.as_str(),
+                }
+            })?;
+            if height < u64::from(script.unlock_height()) {
+                return Err(LedgerError::VaultAbsoluteNotReached {
+                    tx: tx.id(),
+                    input: i,
+                    required: script.unlock_height(),
+                    block_height: height,
+                });
+            }
+            // Overflow must not be treated as "reached" — pin to u64::MAX.
+            let required = prev_entry
+                .creation_height
+                .saturating_add(u64::from(script.csv()));
+            if height < required {
+                return Err(LedgerError::VaultRelativeNotReached {
+                    tx: tx.id(),
+                    input: i,
+                    required: script.csv(),
+                    creation_height: prev_entry.creation_height,
+                    block_height: height,
+                });
+            }
+            let sig_bytes = &input.witness[1];
+            if sig_bytes.len() != 64 {
+                return Err(LedgerError::BadSignatureSize {
+                    tx: tx.id(),
+                    input: i,
+                    len: sig_bytes.len(),
+                });
+            }
+            let mut sig_arr = [0u8; 64];
+            sig_arr.copy_from_slice(sig_bytes);
+            if !verify_pk(script.owner_pk(), &sighash, &sig_arr) {
+                return Err(LedgerError::BadSignature {
+                    tx: tx.id(),
+                    input: i,
+                });
+            }
         } else if prev.owner.is_stealth() {
             // Stealth address (RFC-003): witness is exactly one 64-byte signature
             // over the sighash, verified against the output's one-time pubkey P.
@@ -1153,7 +1354,9 @@ fn apply_regular(
     for input in tx.inputs() {
         staging.remove(&input.outpoint);
     }
-    add_outputs(staging, txid, tx)?;
+    // New outputs are born at the applying block's height (RFC-005 §3.2) —
+    // this is the `creation_height` CSV measures relative age against.
+    add_outputs(staging, txid, tx, height)?;
 
     // Stake mutations come last and are infallible by now: every rule they
     // enforce was pre-checked against the same inputs above.
@@ -1178,11 +1381,13 @@ fn apply_coinbase(
     staging: &mut UtxoSet,
     cb: &Transaction,
     allowed: u64,
+    height: u64,
     blue_score: u64,
     activation_score: u64,
     _native_token_activation_score: u64,
     _stealth_activation_score: u64,
     _script_v2_activation_score: u64,
+    _htlc_activation_score: u64,
 ) -> Result<u64, LedgerError> {
     if blue_score <= activation_score {
         for output in cb.outputs() {
@@ -1216,16 +1421,24 @@ fn apply_coinbase(
             allowed,
         });
     }
-    add_outputs(staging, cb.id(), cb)?;
+    add_outputs(staging, cb.id(), cb, height)?;
     Ok(claimed_native)
 }
 
 /// Insert every output of `tx` into `staging`, keyed by `(txid, index)`,
 /// rejecting any outpoint that already exists.
-fn add_outputs(staging: &mut UtxoSet, txid: TxId, tx: &Transaction) -> Result<(), LedgerError> {
+fn add_outputs(
+    staging: &mut UtxoSet,
+    txid: TxId,
+    tx: &Transaction,
+    creation_height: u64,
+) -> Result<(), LedgerError> {
     for (i, output) in tx.outputs().iter().enumerate() {
         let outpoint = OutPoint::new(txid, i as u32);
-        if staging.insert(outpoint, *output).is_some() {
+        if staging
+            .insert_with_height(outpoint, *output, creation_height)
+            .is_some()
+        {
             return Err(LedgerError::OutputAlreadyExists(outpoint));
         }
     }
@@ -1255,25 +1468,40 @@ pub struct LedgerRun {
 /// the output; the later one is rejected with [`LedgerError::MissingInput`].
 pub fn apply_dag(dag: &Dag, subsidy: u64) -> LedgerRun {
     let mut run = LedgerRun::default();
+    // Chain heights (RFC-005 §3.2): the length of the selected-parent chain from
+    // genesis — the clock the CLTV/CSV finality rules and per-UTXO creation
+    // heights run on. This is NOT blue_score for a block with a mergeset (blue
+    // score also counts merged blue blocks); the incremental Ledger tracks chain
+    // heights in `self.heights`, so the batch path must agree with it.
+    let mut heights: HashMap<BlockId, u64> = HashMap::new();
     for id in dag.linearize() {
         let payload = dag
             .block(&id)
             .expect("linearized id is present in the DAG")
             .payload();
-        let blue_score = dag.ghostdag(&id).map_or(0, |g| g.blue_score);
+        let ghostdag = dag.ghostdag(&id);
+        let blue_score = ghostdag.map_or(0, |g| g.blue_score);
+        // linearize() places every block after its selected parent, so the
+        // parent's height is always known here.
+        let height = ghostdag
+            .and_then(|g| g.selected_parent)
+            .and_then(|sp| heights.get(&sp).copied())
+            .map_or(0, |h| h + 1);
+        heights.insert(id, height);
         match decode_block_payload(payload) {
             Ok(txs) => match apply_block_inner(
                 &mut run.utxo,
                 None,
                 &txs,
                 subsidy,
-                0,
+                height,
                 blue_score,
                 MULTISIG_ACTIVATION_SCORE,
                 NATIVE_TOKEN_ACTIVATION_SCORE,
                 STEALTH_ACTIVATION_SCORE,
                 SCRIPT_V2_ACTIVATION_SCORE,
                 HTLC_ACTIVATION_SCORE,
+                VAULT_ACTIVATION_SCORE,
             ) {
                 Ok(_) => run.accepted.push(id),
                 Err(e) => run.rejected.push((id, e)),
@@ -1429,8 +1657,8 @@ impl std::error::Error for LedgerInsertError {}
 /// the insert-then-remove order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct BlockDelta {
-    spent: Vec<(OutPoint, TxOutput)>,
-    created: Vec<(OutPoint, TxOutput)>,
+    spent: Vec<(OutPoint, UtxoEntry)>,
+    created: Vec<(OutPoint, UtxoEntry)>,
 }
 
 /// Net stake-registry change of one block, mirroring [`BlockDelta`]: `frozen`
@@ -1447,14 +1675,14 @@ struct StakeDelta {
 fn diff_utxo(pre: &UtxoSet, post: &UtxoSet) -> BlockDelta {
     let mut spent = Vec::new();
     let mut created = Vec::new();
-    for (op, out) in pre.iter() {
-        if post.get(op) != Some(out) {
-            spent.push((*op, *out));
+    for (op, entry) in pre.iter_entries() {
+        if post.get_entry(op) != Some(entry) {
+            spent.push((*op, *entry));
         }
     }
-    for (op, out) in post.iter() {
-        if pre.get(op) != Some(out) {
-            created.push((*op, *out));
+    for (op, entry) in post.iter_entries() {
+        if pre.get_entry(op) != Some(entry) {
+            created.push((*op, *entry));
         }
     }
     BlockDelta { spent, created }
@@ -1481,8 +1709,8 @@ fn diff_stake(pre: &StakeState, post: &StakeState) -> StakeDelta {
 /// The order matters — an outpoint created by one part of a composed delta and
 /// spent by a later part must end up spent.
 fn apply_delta(delta: &BlockDelta, state: &mut UtxoSet) {
-    for (op, out) in &delta.created {
-        state.insert(*op, *out);
+    for (op, entry) in &delta.created {
+        state.insert_entry(*op, *entry);
     }
     for (op, _) in &delta.spent {
         state.remove(op);
@@ -1654,6 +1882,8 @@ pub struct Ledger {
     script_v2_activation_score: u64,
     /// Blue score activation threshold for RFC-004 HTLC transactions.
     htlc_activation_score: u64,
+    /// Blue score activation threshold for RFC-005 vault transactions.
+    vault_activation_score: u64,
 }
 
 impl Ledger {
@@ -1703,6 +1933,7 @@ impl Ledger {
             stealth_activation_score: STEALTH_ACTIVATION_SCORE,
             script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
             htlc_activation_score: HTLC_ACTIVATION_SCORE,
+            vault_activation_score: VAULT_ACTIVATION_SCORE,
         })
     }
 
@@ -1754,6 +1985,16 @@ impl Ledger {
     /// The blue-score activation threshold for RFC-004 HTLC transactions.
     pub fn htlc_activation_score(&self) -> u64 {
         self.htlc_activation_score
+    }
+
+    /// Set the blue-score activation threshold for RFC-005 vault transactions.
+    pub fn set_vault_activation_score(&mut self, score: u64) {
+        self.vault_activation_score = score;
+    }
+
+    /// The blue-score activation threshold for RFC-005 vault transactions.
+    pub fn vault_activation_score(&self) -> u64 {
+        self.vault_activation_score
     }
 
     /// Like [`Ledger::new`], but with a finite finality depth: blocks more than
@@ -2222,6 +2463,7 @@ impl Ledger {
                     self.stealth_activation_score,
                     self.script_v2_activation_score,
                     self.htlc_activation_score,
+                    self.vault_activation_score,
                 );
             }
         }
@@ -2240,6 +2482,7 @@ impl Ledger {
             self.stealth_activation_score,
             self.script_v2_activation_score,
             self.htlc_activation_score,
+            self.vault_activation_score,
         )?;
 
         // Commit: add to the DAG (structural checks run here), then store the
@@ -2455,13 +2698,28 @@ impl Ledger {
         let mut state = self.tip_state.clone();
         for block in &order[tip_pos + 1..] {
             let height = self.heights.get(block).copied().unwrap_or(0);
+            let blue_score = self.dag.ghostdag(block).map_or(0, |g| g.blue_score);
             let payload = self
                 .dag
                 .block(block)
                 .expect("block is in the DAG")
                 .payload();
+            let mut stake = StakeState::new();
             if let Ok(txs) = decode_block_payload(payload) {
-                let _ = apply_block(&mut state, &txs, self.schedule.subsidy_at(height));
+                let _ = apply_block_inner(
+                    &mut state,
+                    Some(&mut stake),
+                    &txs,
+                    self.schedule.subsidy_at(height),
+                    height,
+                    blue_score,
+                    self.multisig_activation_score,
+                    self.native_token_activation_score,
+                    self.stealth_activation_score,
+                    self.script_v2_activation_score,
+                    self.htlc_activation_score,
+                    self.vault_activation_score,
+                );
             }
         }
         state
@@ -2684,7 +2942,8 @@ impl Ledger {
             return Err(LedgerCheckpointError::UnexpectedEof);
         }
         let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-        // Accept v3 (stake registry), v4 (asset_id in UTXO), and v5 (stealth ext)
+        // Accept v3 (stake registry), v4 (asset_id in UTXO), v5 (stealth ext),
+        // and v6 (per-entry creation height — RFC-005 CSV).
         if !(3..=CHECKPOINT_VERSION).contains(&version) {
             return Err(LedgerCheckpointError::UnsupportedVersion(version));
         }
@@ -2702,10 +2961,17 @@ impl Ledger {
         let checkpoint_height = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
         pos += 8;
 
-        // Decode checkpoint UTXO set
+        // Decode checkpoint UTXO set. Checkpoint v5 and earlier carry no per-entry
+        // creation heights — those UTXOs are unlocked immediately
+        // (creation_height = 0; csv only delays, never fast-forwards — the
+        // safe legacy default, RFC-005 §3.2/§8).
         let mut remaining = &bytes[pos..];
-        let checkpoint_state = UtxoSet::decode(&mut remaining)
-            .map_err(|_| LedgerCheckpointError::Payload(DecodeError::UnexpectedEof))?;
+        let checkpoint_state = if version <= 5 {
+            UtxoSet::decode_v5(&mut remaining)
+        } else {
+            UtxoSet::decode(&mut remaining)
+        }
+        .map_err(|_| LedgerCheckpointError::Payload(DecodeError::UnexpectedEof))?;
         pos = bytes.len() - remaining.len();
 
         // v3: length-prefixed stake registry blob.
@@ -2795,6 +3061,7 @@ impl Ledger {
             stealth_activation_score: STEALTH_ACTIVATION_SCORE,
             script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
             htlc_activation_score: HTLC_ACTIVATION_SCORE,
+            vault_activation_score: VAULT_ACTIVATION_SCORE,
         };
         ledger.deltas.insert(checkpoint_id, checkpoint_delta);
         ledger
@@ -3005,7 +3272,7 @@ const CHECKPOINT_MAGIC: [u8; 4] = *b"KVCP";
 /// optional asset_id to UTXO encoding; v5 adds the optional stealth extension
 /// (R + view_tag + P) to UTXO encoding so stealth outputs survive a checkpoint
 /// round-trip.
-const CHECKPOINT_VERSION: u16 = 5;
+const CHECKPOINT_VERSION: u16 = 6;
 
 /// Why a ledger checkpoint could not be encoded or decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]

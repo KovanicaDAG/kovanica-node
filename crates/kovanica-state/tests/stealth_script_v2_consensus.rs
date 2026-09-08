@@ -654,7 +654,17 @@ fn test_script_v2_csv_spend() {
 
     let (mut ledger, coin) = funded_ledger(script_addr, 1_000);
 
-    // sequence = 100 >= v = 50 → passes.
+    // RFC-005 made CSV *real*: `sequence` now also requires the output to have
+    // aged that many blocks since its creation (genesis height 0 here). Advance
+    // the chain 100 blocks so both the script (seq >= v) and the relative age
+    // (block_height >= creation_height + seq) are satisfied.
+    for _ in 0..100 {
+        ledger
+            .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[])
+            .unwrap();
+    }
+
+    // sequence = 100 >= v = 50 → script passes, and CSV is satisfied at height 101.
     let spend = build_script_v2_spend_with_lock(
         coin,
         script,
@@ -682,10 +692,13 @@ fn test_script_v2_csv_rejected() {
 
     let (mut ledger, coin) = funded_ledger(script_addr, 1_000);
 
-    // sequence = 50 < v = 100 → SequenceViolation → BadSignature.
+    // sequence = 50 < v = 100 → the *script* would reject (SequenceViolation →
+    // BadSignature), but with RFC-005 real CSV the ledger's relative-age rule
+    // fires first: the coin (created at height 0) has not yet aged 50 blocks, so
+    // the spend is non-final and the script never runs.
     let spend = build_script_v2_spend_with_lock(
         coin,
-        script,
+        script.clone(),
         vec![vec![1u8], 100u32.to_le_bytes().to_vec()],
         vec![TxOutput::native(900, bob.address())],
         b"csv-fail".to_vec(),
@@ -693,6 +706,28 @@ fn test_script_v2_csv_rejected() {
         50,
     );
 
+    let err = ledger
+        .insert(
+            vec![ledger.dag().selected_tip()],
+            1,
+            0,
+            0,
+            std::slice::from_ref(&spend),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        LedgerInsertError::State(LedgerError::NonFinalRelativeSequence { .. })
+    ));
+
+    // Once the relative age is reached (block height >= 50), CSV passes and the
+    // spend is handed to the script, which still rejects: declared sequence
+    // 50 < v 100 → SequenceViolation → BadSignature.
+    for _ in 0..50 {
+        ledger
+            .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[])
+            .unwrap();
+    }
     let err = ledger
         .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[spend])
         .unwrap_err();

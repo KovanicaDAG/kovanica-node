@@ -1,7 +1,9 @@
 //! The UTXO set: the ledger's state.
 //!
-//! A [`UtxoSet`] maps every currently-unspent [`OutPoint`] to the [`TxOutput`]
-//! it holds. Applying a transaction removes the outputs it spends and inserts
+//! A [`UtxoSet`] maps every currently-unspent [`OutPoint`] to a [`UtxoEntry`]:
+//! the [`TxOutput`] it holds plus the linearized block **height at which it was
+//! created** (RFC-005: relative locktime / CSV needs each input's confirming
+//! height). Applying a transaction removes the outputs it spends and inserts
 //! the ones it creates (see [`crate::ledger`]). Lookups are by key only, so the
 //! backing `HashMap`'s iteration order never affects a consensus-relevant
 //! result.
@@ -11,11 +13,32 @@ use std::collections::HashMap;
 use crate::keys::Address;
 use crate::tx::{AssetId, OutPoint, TxId, TxOutput};
 
+/// An unspent output together with the linearized block height at which it
+/// entered the set. `creation_height` is what relative locktime (BIP-68 /
+/// BIP-112 CSV, RFC-005) measures against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UtxoEntry {
+    /// The unspent output itself.
+    pub output: TxOutput,
+    /// Linearized block height of the block that created this output.
+    pub creation_height: u64,
+}
+
+impl UtxoEntry {
+    /// A legacy entry with no relative-lock age (`creation_height = 0`).
+    pub const fn new_legacy(output: TxOutput) -> Self {
+        Self {
+            output,
+            creation_height: 0,
+        }
+    }
+}
+
 /// The set of unspent transaction outputs — the full ledger state at a point in
 /// the linearized order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UtxoSet {
-    map: HashMap<OutPoint, TxOutput>,
+    map: HashMap<OutPoint, UtxoEntry>,
 }
 
 impl UtxoSet {
@@ -26,7 +49,17 @@ impl UtxoSet {
 
     /// Look up the output at `outpoint`, if unspent.
     pub fn get(&self, outpoint: &OutPoint) -> Option<&TxOutput> {
+        self.map.get(outpoint).map(|e| &e.output)
+    }
+
+    /// Look up the full entry (output + creation height) at `outpoint`.
+    pub fn get_entry(&self, outpoint: &OutPoint) -> Option<&UtxoEntry> {
         self.map.get(outpoint)
+    }
+
+    /// The creation height of the output at `outpoint`, if unspent.
+    pub fn creation_height(&self, outpoint: &OutPoint) -> Option<u64> {
+        self.map.get(outpoint).map(|e| e.creation_height)
     }
 
     /// Whether `outpoint` is currently unspent.
@@ -34,14 +67,44 @@ impl UtxoSet {
         self.map.contains_key(outpoint)
     }
 
-    /// Insert an output, returning any output previously stored at that outpoint.
+    /// Insert an output with `creation_height = 0` (legacy callers; consensus
+    /// paths use [`Self::insert_with_height`]).
+    ///
+    /// Returns the output previously stored at that outpoint, if any.
     pub fn insert(&mut self, outpoint: OutPoint, output: TxOutput) -> Option<TxOutput> {
-        self.map.insert(outpoint, output)
+        self.insert_with_height(outpoint, output, 0)
+    }
+
+    /// Insert an output remembering the block height that created it.
+    ///
+    /// Returns the output previously stored at that outpoint, if any.
+    pub fn insert_with_height(
+        &mut self,
+        outpoint: OutPoint,
+        output: TxOutput,
+        creation_height: u64,
+    ) -> Option<TxOutput> {
+        self.map
+            .insert(
+                outpoint,
+                UtxoEntry {
+                    output,
+                    creation_height,
+                },
+            )
+            .map(|old| old.output)
+    }
+
+    /// Insert a full entry (output + creation height).
+    ///
+    /// Returns the entry previously stored at that outpoint, if any.
+    pub fn insert_entry(&mut self, outpoint: OutPoint, entry: UtxoEntry) -> Option<UtxoEntry> {
+        self.map.insert(outpoint, entry)
     }
 
     /// Remove and return the output at `outpoint`, if present.
     pub fn remove(&mut self, outpoint: &OutPoint) -> Option<TxOutput> {
-        self.map.remove(outpoint)
+        self.map.remove(outpoint).map(|e| e.output)
     }
 
     /// Number of unspent outputs.
@@ -56,13 +119,19 @@ impl UtxoSet {
 
     /// Iterate over every unspent `(outpoint, output)`. Order is unspecified.
     pub fn iter(&self) -> impl Iterator<Item = (&OutPoint, &TxOutput)> {
+        self.map.iter().map(|(op, e)| (op, &e.output))
+    }
+
+    /// Iterate over every unspent `(outpoint, entry)` including the creation
+    /// height. Order is unspecified.
+    pub fn iter_entries(&self) -> impl Iterator<Item = (&OutPoint, &UtxoEntry)> {
         self.map.iter()
     }
 
     /// Total value of every unspent output. Widened to `u128` so summing many
     /// `u64` outputs cannot overflow.
     pub fn total_value(&self) -> u128 {
-        self.map.values().map(|o| u128::from(o.value)).sum()
+        self.map.values().map(|e| u128::from(e.output.value)).sum()
     }
 
     /// Spendable balance owned by `owner`: the sum of the unspent **native KVNC**
@@ -71,6 +140,7 @@ impl UtxoSet {
     pub fn balance(&self, owner: &Address) -> u128 {
         self.map
             .values()
+            .map(|e| &e.output)
             .filter(|o| &o.owner == owner && o.asset_id.is_none())
             .map(|o| u128::from(o.value))
             .sum()
@@ -81,6 +151,7 @@ impl UtxoSet {
     pub fn balance_of_asset(&self, owner: &Address, asset_id: Option<AssetId>) -> u128 {
         self.map
             .values()
+            .map(|e| &e.output)
             .filter(|o| &o.owner == owner && o.asset_id == asset_id)
             .map(|o| u128::from(o.value))
             .sum()
@@ -90,12 +161,16 @@ impl UtxoSet {
     /// self-contained byte encoding: count followed by (outpoint, output) pairs,
     /// sorted by outpoint for deterministic encoding.
     /// v4: includes optional asset_id (32 bytes) after owner.
+    /// v5: includes optional stealth extension (65 bytes) after the asset_id.
+    /// v6: includes per-entry `creation_height` (8 bytes LE) after the stealth
+    ///     flag — the RFC-005 relative-locktime age. Strictly extends v5.
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(self.map.len() as u64).to_le_bytes());
         let mut entries: Vec<_> = self.map.iter().collect();
         entries.sort_by_key(|(op, _)| *op);
-        for (op, output) in entries {
+        for (op, entry) in entries {
+            let output = &entry.output;
             buf.extend_from_slice(op.tx.as_bytes());
             buf.extend_from_slice(&op.index.to_le_bytes());
             buf.extend_from_slice(&output.value.to_le_bytes());
@@ -118,6 +193,8 @@ impl UtxoSet {
             } else {
                 buf.push(0);
             }
+            // v6: creation height of this output (8 bytes LE).
+            buf.extend_from_slice(&entry.creation_height.to_le_bytes());
         }
         buf
     }
@@ -127,19 +204,35 @@ impl UtxoSet {
         8 + self
             .map
             .values()
-            .map(|output| {
+            .map(|entry| {
+                let output = &entry.output;
                 let asset = if output.asset_id.is_some() { 1 + 32 } else { 1 };
                 let stealth = if output.stealth.is_some() { 1 + 65 } else { 1 };
-                32 + 4 + 8 + 33 + asset + stealth
+                32 + 4 + 8 + 33 + asset + stealth + 8
             })
             .sum::<usize>()
     }
 
-    /// Decode a UTXO set from a checkpoint encoding, advancing `bytes` past the
-    /// consumed data so the caller can continue parsing.
+    /// Decode a v6 UTXO set from a checkpoint encoding, advancing `bytes` past
+    /// the consumed data so the caller can continue parsing.
     /// v4: reads optional asset_id (32 bytes) after owner.
     /// v5: reads optional stealth extension (65 bytes) after the asset_id.
+    /// v6: reads per-entry `creation_height` (8 bytes) after the stealth flag.
     pub fn decode(bytes: &mut &[u8]) -> Result<Self, UtxoDecodeError> {
+        Self::decode_impl(bytes, true)
+    }
+
+    /// Decode a v5 (or older) checkpoint UTXO set: identical to [`Self::decode`]
+    /// except per-entry `creation_height` is absent and therefore defaults to 0.
+    ///
+    /// This is the safe legacy default — CSV only *delays* spends, never
+    /// fast-forwards them, so pre-upgrade outputs that report age 0 are simply
+    /// immediately final.
+    pub fn decode_v5(bytes: &mut &[u8]) -> Result<Self, UtxoDecodeError> {
+        Self::decode_impl(bytes, false)
+    }
+
+    fn decode_impl(bytes: &mut &[u8], with_creation_height: bool) -> Result<Self, UtxoDecodeError> {
         let mut reader = CheckpointReader::new(bytes);
         let count = reader.read_u64()? as usize;
         let mut map = HashMap::with_capacity(count);
@@ -165,13 +258,21 @@ impl UtxoSet {
             } else {
                 None
             };
+            let creation_height = if with_creation_height {
+                reader.read_u64()?
+            } else {
+                0
+            };
             map.insert(
                 OutPoint::new(tx, index),
-                TxOutput {
-                    value,
-                    asset_id,
-                    owner,
-                    stealth,
+                UtxoEntry {
+                    output: TxOutput {
+                        value,
+                        asset_id,
+                        owner,
+                        stealth,
+                    },
+                    creation_height,
                 },
             );
         }

@@ -20,7 +20,7 @@ use kovanica_state::{
     apply_block, decode_block_payload, encode_block_payload, verify, Address, AssetId,
     HalvingSchedule, HtlcScript, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError,
     LedgerStore, OutPoint, Sig, StakedVrf, StealthAddress, Transaction, TxId, TxInput, TxOutput,
-    UtxoSet, DEFAULT_HALVING_ERA,
+    UtxoSet, VaultScript, DEFAULT_HALVING_ERA,
 };
 
 use crate::mempool_v2::{MempoolConfig, MempoolV2};
@@ -100,6 +100,8 @@ pub enum NodeError {
     Multisig(&'static str),
     /// An HTLC template failed to construct (invalid key or duplicate keys).
     Htlc(&'static str),
+    /// A vault template failed to construct (invalid key, or both locks zero).
+    Vault(&'static str),
     /// Not enough valid partial signatures were supplied to reach the threshold.
     InsufficientMultisigSignatures { have: usize, need: u8 },
     /// A multisig operation expected a single input but the transaction has more.
@@ -138,6 +140,7 @@ impl core::fmt::Display for NodeError {
             }
             NodeError::Multisig(msg) => write!(f, "multisig error: {msg}"),
             NodeError::Htlc(msg) => write!(f, "htlc error: {msg}"),
+            NodeError::Vault(msg) => write!(f, "vault error: {msg}"),
             NodeError::InsufficientMultisigSignatures { have, need } => {
                 write!(f, "insufficient multisig signatures: have {have}, need {need}")
             }
@@ -190,6 +193,20 @@ pub struct HtlcInfo {
     /// Id of the funding transaction.
     pub tx_id: TxId,
     /// The funding transaction's output 0 — the HTLC output itself.
+    pub outpoint: OutPoint,
+}
+
+/// Information about a created vault output (RFC-005).
+#[derive(Clone, Debug)]
+pub struct VaultInfo {
+    /// The validated vault template (40 bytes: unlock height, CSV, owner pk).
+    pub script: VaultScript,
+    /// The Version 0x05 address the output is locked to
+    /// (`0x05 || BLAKE3(template)`).
+    pub address: Address,
+    /// Id of the funding transaction.
+    pub tx_id: TxId,
+    /// The funding transaction's output 0 — the vault output itself.
     pub outpoint: OutPoint,
 }
 
@@ -1542,6 +1559,94 @@ impl Node {
             tx.attach_signature(1, Sig::from_bytes(sig));
         }
         Ok(tx)
+    }
+
+    // ------------------------------------------------------------------
+    // Vault (RFC-005 time-lock) wallet helpers
+    // ------------------------------------------------------------------
+
+    /// Create a time-lock vault output on behalf of `kp`, funding the
+    /// Version 0x05 address of a template committing to `unlock_height`,
+    /// the relative-lock `csv`, and `owner_pk`. The funding transaction is
+    /// mined immediately as a new block on the current tips (the same flow
+    /// as [`Node::send_to_script_v2`]) — its output 0 is the vault output.
+    ///
+    /// The returned [`VaultInfo`] carries the validated template, the address,
+    /// and the funding outpoint — everything the owner needs to later verify
+    /// and release the value on-chain.
+    ///
+    /// Both locks are enforced by the ledger: the spend is rejected until the
+    /// chain height reaches `unlock_height` (absolute), and additionally
+    /// `block_height >= creation_height + csv` unless `csv` is 0 or final
+    /// (BIP-68-style relative lock, RFC-005 §3). At most one of
+    /// `unlock_height`/`csv` may be 0.
+    pub fn create_vault(
+        &mut self,
+        kp: &KeyPair,
+        amount: u64,
+        unlock_height: u32,
+        csv: u32,
+        owner_pk: [u8; 32],
+    ) -> Result<VaultInfo, NodeError> {
+        if amount == 0 {
+            return Err(NodeError::ZeroAmount);
+        }
+        let script = VaultScript::new(unlock_height, csv, owner_pk)
+            .map_err(|e| NodeError::Vault(e.as_str()))?;
+        let address = script.address();
+        let tx = self.build_transfer_with_asset(kp, amount, address, None)?;
+        let tx_id = tx.id();
+        let outpoint = OutPoint::new(tx_id, 0);
+        self.insert_tx_block(tx)?;
+        Ok(VaultInfo {
+            script,
+            address,
+            tx_id,
+            outpoint,
+        })
+    }
+
+    /// Release a vault output to `to` once its time locks have elapsed.
+    /// `kp` must be the **template owner** (the public key the vault was
+    /// created with); the witness is `[template, owner_sig]` (BIP-65/BIP-112
+    /// semantics enforced source-side by `VaultScript::spend_witness`).
+    ///
+    /// The ledger rejects the spend with `VaultAbsoluteNotReached` /
+    /// `VaultRelativeNotReached` until both conditions hold; this helper is a
+    /// convenience for the already-eligible release path.
+    pub fn release_vault(
+        &mut self,
+        kp: &KeyPair,
+        outpoint: OutPoint,
+        script: &VaultScript,
+        to: Address,
+    ) -> Result<TxId, NodeError> {
+        let fee = self.min_fee();
+        let state = self.ledger()?.ledger_state();
+        let vault_out = state.get(&outpoint).ok_or(NodeError::InsufficientFunds)?;
+        if vault_out.owner != script.address() {
+            return Err(NodeError::InsufficientFunds);
+        }
+        let value = vault_out
+            .value
+            .checked_sub(fee)
+            .ok_or(NodeError::InsufficientFunds)?;
+        let mut tx = Transaction::new(
+            vec![TxInput::new(outpoint, Vec::new())],
+            vec![TxOutput::native(value, to)],
+            Vec::new(),
+        );
+        let sighash = tx.sighash();
+        let sig = kp.sign(&sighash);
+        tx.inputs_mut()[0].witness = script.spend_witness(sig);
+        self.insert_tx_block(tx)
+    }
+
+    /// The spendable balance locked to a vault template's address in the
+    /// current full ledger state.
+    pub fn balance_of_vault(&self, script: &VaultScript) -> u64 {
+        let addr = script.address();
+        self.balance(&addr).unwrap_or(0) as u64
     }
 
     /// Insert a single signed transaction as a new block on the current tips
