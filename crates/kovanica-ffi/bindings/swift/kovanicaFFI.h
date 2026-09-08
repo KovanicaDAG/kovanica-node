@@ -268,9 +268,19 @@ RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_balance_of_address(uint64_t p
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_balance_of_asset(uint64_t ptr, RustBuffer address, RustBuffer asset_id_hex, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_SCRIPT
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_SCRIPT
+uint64_t uniffi_kovanica_ffi_fn_method_lightnode_balance_of_script(uint64_t ptr, RustBuffer script_hex, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_SEED
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_SEED
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_balance_of_seed(uint64_t ptr, uint64_t seed, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_STEALTH
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BALANCE_OF_STEALTH
+uint64_t uniffi_kovanica_ffi_fn_method_lightnode_balance_of_stealth(uint64_t ptr, RustBuffer stealth_address_hex, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_BLOCK_BY_ID
@@ -436,6 +446,16 @@ RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_send_from(uint64_t ptr, RustB
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_FROM_ASSET
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_FROM_ASSET
 RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_send_from_asset(uint64_t ptr, RustBuffer signing_secret_hex, uint64_t amount, RustBuffer to_address, RustBuffer asset_id_hex, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_TO_SCRIPT_V2
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_TO_SCRIPT_V2
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_send_to_script_v2(uint64_t ptr, RustBuffer signing_secret_hex, uint64_t amount, RustBuffer script_hex, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_TO_STEALTH
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SEND_TO_STEALTH
+RustBuffer uniffi_kovanica_ffi_fn_method_lightnode_send_to_stealth(uint64_t ptr, RustBuffer signing_secret_hex, uint64_t amount, RustBuffer stealth_address_hex, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_FN_METHOD_LIGHTNODE_SET_MINER_SEED
@@ -775,9 +795,21 @@ uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_SCRIPT
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_SCRIPT
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_script(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_SEED
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_SEED
 uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_STEALTH
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_BALANCE_OF_STEALTH
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_stealth(void
     
 );
 #endif
@@ -976,6 +1008,18 @@ uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_send_from(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_FROM_ASSET
 #define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_FROM_ASSET
 uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_send_from_asset(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_TO_SCRIPT_V2
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_TO_SCRIPT_V2
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_send_to_script_v2(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_TO_STEALTH
+#define UNIFFI_FFIDEF_UNIFFI_KOVANICA_FFI_CHECKSUM_METHOD_LIGHTNODE_SEND_TO_STEALTH
+uint16_t uniffi_kovanica_ffi_checksum_method_lightnode_send_to_stealth(void
     
 );
 #endif

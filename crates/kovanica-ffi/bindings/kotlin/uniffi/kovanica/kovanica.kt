@@ -677,7 +677,11 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset(
     ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_script(
+    ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed(
+    ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_stealth(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_block_by_id(
     ): Int
@@ -745,6 +749,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_send_from_asset(
     ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_send_to_script_v2(
+    ): Int
+    external fun uniffi_kovanica_ffi_checksum_method_lightnode_send_to_stealth(
+    ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_set_miner_seed(
     ): Int
     external fun uniffi_kovanica_ffi_checksum_method_lightnode_set_validator_seed(
@@ -801,8 +809,12 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_asset(`ptr`: Long,`address`: RustBuffer.ByValue,`assetIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_script(`ptr`: Long,`scriptHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_seed(`ptr`: Long,`seed`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_balance_of_stealth(`ptr`: Long,`stealthAddressHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_kovanica_ffi_fn_method_lightnode_block_by_id(`ptr`: Long,`idHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_block_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -868,6 +880,10 @@ internal object UniffiLib {
     external fun uniffi_kovanica_ffi_fn_method_lightnode_send_from(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`amount`: Long,`toAddress`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_send_from_asset(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`amount`: Long,`toAddress`: RustBuffer.ByValue,`assetIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_send_to_script_v2(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`amount`: Long,`scriptHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_kovanica_ffi_fn_method_lightnode_send_to_stealth(`ptr`: Long,`signingSecretHex`: RustBuffer.ByValue,`amount`: Long,`stealthAddressHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_kovanica_ffi_fn_method_lightnode_set_miner_seed(`ptr`: Long,`seed`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1020,7 +1036,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset() != 41422) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_script() != 46559) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed() != 2697) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_stealth() != 17890) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_block_by_id() != 61413) {
@@ -1120,6 +1142,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_send_from_asset() != 15040) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_send_to_script_v2() != 10937) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_send_to_stealth() != 19173) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_kovanica_ffi_checksum_method_lightnode_set_miner_seed() != 15947) {
@@ -1645,10 +1673,21 @@ public interface LightNodeInterface {
     fun `balanceOfAsset`(`address`: kotlin.String, `assetIdHex`: kotlin.String?): kotlin.String
     
     /**
+     * Spendable balance of a **script v2** address (the BLAKE3 digest of
+     * `script_hex`) in atoms.
+     */
+    fun `balanceOfScript`(`scriptHex`: kotlin.String): kotlin.ULong
+    
+    /**
      * Spendable balance of actor `seed` in atoms, as a decimal string
      * (balances are u128; strings avoid FFI integer truncation).
      */
     fun `balanceOfSeed`(`seed`: kotlin.ULong): kotlin.String
+    
+    /**
+     * Spendable balance of a **stealth address** (130-hex, version 0x03) in atoms.
+     */
+    fun `balanceOfStealth`(`stealthAddressHex`: kotlin.String): kotlin.ULong
     
     /**
      * Summary of one block by lowercase-hex id.
@@ -1865,6 +1904,24 @@ public interface LightNodeInterface {
      * `asset_id_hex` is the 32-byte asset id as lowercase hex; `None` = native KVNC.
      */
     fun `sendFromAsset`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `toAddress`: kotlin.String, `assetIdHex`: kotlin.String?): SendReceipt
+    
+    /**
+     * Send `amount` to a **script v2** address (the BLAKE3 digest of `script_hex`)
+     * using an imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase
+     * hex). The script is hashed into a `v0x02` address; the script itself is
+     * revealed at spend time (see RFC-003 / 3B).
+     */
+    fun `sendToScriptV2`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `scriptHex`: kotlin.String): kotlin.String
+    
+    /**
+     * Send `amount` to a **stealth address** (130-hex, version 0x03) using an
+     * imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase hex).
+     *
+     * The one-time output is derived deterministically by the node (see
+     * [`Node::send_to_stealth`]); production wallets should prefer supplying
+     * their own random `r` for unlinkability.
+     */
+    fun `sendToStealth`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `stealthAddressHex`: kotlin.String): kotlin.String
     
     /**
      * Receive the per-block subsidy coinbase on produced blocks under this
@@ -2115,6 +2172,25 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
 
     
     /**
+     * Spendable balance of a **script v2** address (the BLAKE3 digest of
+     * `script_hex`) in atoms.
+     */
+    @Throws(LightNodeException::class)override fun `balanceOfScript`(`scriptHex`: kotlin.String): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_balance_of_script(
+        it,
+        
+        FfiConverterString.lower(`scriptHex`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Spendable balance of actor `seed` in atoms, as a decimal string
      * (balances are u128; strings avoid FFI integer truncation).
      */
@@ -2126,6 +2202,24 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
         it,
         
         FfiConverterULong.lower(`seed`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Spendable balance of a **stealth address** (130-hex, version 0x03) in atoms.
+     */
+    @Throws(LightNodeException::class)override fun `balanceOfStealth`(`stealthAddressHex`: kotlin.String): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_balance_of_stealth(
+        it,
+        
+        FfiConverterString.lower(`stealthAddressHex`),_status)
 }
     }
     )
@@ -2776,6 +2870,54 @@ open class LightNode: Disposable, AutoCloseable, LightNodeInterface
         FfiConverterULong.lower(`amount`),
         FfiConverterString.lower(`toAddress`),
         FfiConverterOptionalString.lower(`assetIdHex`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Send `amount` to a **script v2** address (the BLAKE3 digest of `script_hex`)
+     * using an imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase
+     * hex). The script is hashed into a `v0x02` address; the script itself is
+     * revealed at spend time (see RFC-003 / 3B).
+     */
+    @Throws(LightNodeException::class)override fun `sendToScriptV2`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `scriptHex`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_send_to_script_v2(
+        it,
+        
+        FfiConverterString.lower(`signingSecretHex`),
+        FfiConverterULong.lower(`amount`),
+        FfiConverterString.lower(`scriptHex`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Send `amount` to a **stealth address** (130-hex, version 0x03) using an
+     * imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase hex).
+     *
+     * The one-time output is derived deterministically by the node (see
+     * [`Node::send_to_stealth`]); production wallets should prefer supplying
+     * their own random `r` for unlinkability.
+     */
+    @Throws(LightNodeException::class)override fun `sendToStealth`(`signingSecretHex`: kotlin.String, `amount`: kotlin.ULong, `stealthAddressHex`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(LightNodeException) { _status ->
+    UniffiLib.uniffi_kovanica_ffi_fn_method_lightnode_send_to_stealth(
+        it,
+        
+        FfiConverterString.lower(`signingSecretHex`),
+        FfiConverterULong.lower(`amount`),
+        FfiConverterString.lower(`stealthAddressHex`),_status)
 }
     }
     )

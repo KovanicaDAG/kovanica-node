@@ -18,7 +18,7 @@ use std::sync::{Mutex, MutexGuard};
 use kovanica_dag::BlockId;
 use kovanica_node::{net, Node};
 use kovanica_state::stake::bond_tag;
-use kovanica_state::{KeyPair, OutPoint, Sig, Transaction, TxOutput};
+use kovanica_state::{KeyPair, OutPoint, Sig, StealthAddress, Transaction, TxOutput};
 
 /// Why a [`LightNode`] operation failed.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -647,6 +647,57 @@ impl LightNode {
             block_id_hex: sent.block.to_hex(),
             tx_id_hex: hex::encode(sent.tx.as_bytes()),
         })
+    }
+
+    /// Send `amount` to a **script v2** address (the BLAKE3 digest of `script_hex`)
+    /// using an imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase
+    /// hex). The script is hashed into a `v0x02` address; the script itself is
+    /// revealed at spend time (see RFC-003 / 3B).
+    pub fn send_to_script_v2(
+        &self,
+        signing_secret_hex: String,
+        amount: u64,
+        script_hex: String,
+    ) -> Result<String, LightNodeError> {
+        let kp = keypair_from_secret(&signing_secret_hex)?;
+        let script = decode_hex(&script_hex, "script")?;
+        let mut node = self.lock();
+        let tx_id = node.send_to_script_v2(&kp, amount, &script)?;
+        Ok(hex::encode(tx_id.as_bytes()))
+    }
+
+    /// Send `amount` to a **stealth address** (130-hex, version 0x03) using an
+    /// imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase hex).
+    ///
+    /// The one-time output is derived deterministically by the node (see
+    /// [`Node::send_to_stealth`]); production wallets should prefer supplying
+    /// their own random `r` for unlinkability.
+    pub fn send_to_stealth(
+        &self,
+        signing_secret_hex: String,
+        amount: u64,
+        stealth_address_hex: String,
+    ) -> Result<String, LightNodeError> {
+        let kp = keypair_from_secret(&signing_secret_hex)?;
+        let to = StealthAddress::parse(&stealth_address_hex)
+            .map_err(|e| invalid(format!("bad stealth address: {e}")))?;
+        let mut node = self.lock();
+        let tx_id = node.send_to_stealth(&kp, amount, &to)?;
+        Ok(hex::encode(tx_id.as_bytes()))
+    }
+
+    /// Spendable balance of a **script v2** address (the BLAKE3 digest of
+    /// `script_hex`) in atoms.
+    pub fn balance_of_script(&self, script_hex: String) -> Result<u64, LightNodeError> {
+        let script = decode_hex(&script_hex, "script")?;
+        Ok(self.lock().balance_of_script(&script))
+    }
+
+    /// Spendable balance of a **stealth address** (130-hex, version 0x03) in atoms.
+    pub fn balance_of_stealth(&self, stealth_address_hex: String) -> Result<u64, LightNodeError> {
+        let to = StealthAddress::parse(&stealth_address_hex)
+            .map_err(|e| invalid(format!("bad stealth address: {e}")))?;
+        Ok(self.lock().balance_of_stealth(&to))
     }
 
     // ------------------------------------------------------------------

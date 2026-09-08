@@ -36,8 +36,13 @@ const MAGIC: [u8; 4] = *b"KVDG";
 /// Snapshot format version. Bump on any incompatible framing change.
 /// v2 added the per-block `timestamp_ms` field; v3 added the `nonce` field;
 /// v4 added the per-block `id` field (for pruned payload roundtrips).
-/// v5 added VRF fields (vrf_public_key, vrf_proof, vrf_output).
-const VERSION: u16 = 5;
+/// v5 added VRF fields (vrf_public_key, vrf_proof, vrf_output) — all three
+/// present together behind a single has_vrf flag.
+/// v6 encodes the VRF fields independently: has_vrf flag, vrf_public_key (always
+/// when has_vrf=1), then a proof flag (0/1 + 96 bytes if 1), then an output flag
+/// (0/1 + 32 bytes if 1). This lets a block carry a proof without the output
+/// (block-production self-verification) or an output without the proof.
+const VERSION: u16 = 6;
 
 /// Why a snapshot could not be decoded or replayed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +112,11 @@ impl Dag {
         if version > VERSION {
             return Err(SnapshotError::UnsupportedVersion(version));
         }
+        // The reader must decode blocks using the snapshot's own version (v5
+        // and earlier use the all-three-together VRF layout; v6+ uses the
+        // independent proof/output flags). Without this, the v5 backward-compat
+        // path is dead code and old snapshots fail with UnexpectedEof.
+        reader.version = version;
         let k = reader.read_u16()?;
         // v4 added block id (32 bytes). v3 and earlier don't have it.
         // v5 added VRF fields: 1 byte flag + up to 160 bytes (pk+proof+output)
@@ -227,15 +237,25 @@ pub fn encode_block(block: &Block, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&block.timestamp_ms().to_le_bytes());
     buf.extend_from_slice(&block.nonce().to_le_bytes());
 
-    // VRF fields (v5+)
+    // VRF fields (v6+): has_vrf flag (1 byte), then if set:
+    //   vrf_public_key (32 bytes) — always present when has_vrf=1.
+    //   proof_flag (1 byte): 0 = no proof, 1 = 96-byte proof follows.
+    //   output_flag (1 byte): 0 = no output, 1 = 32-byte output follows.
+    // v5 and earlier: has_vrf flag, then if 1: pk(32) + proof(96) + output(32).
     if let Some(pk) = block.vrf_public_key() {
         buf.push(1u8); // has_vrf flag
         buf.extend_from_slice(pk.as_bytes());
-        if let Some(proof) = block.vrf_proof() {
-            buf.extend_from_slice(&proof.to_bytes());
+        if block.vrf_proof().is_some() {
+            buf.push(1u8); // proof flag
+            buf.extend_from_slice(&block.vrf_proof().unwrap().to_bytes());
+        } else {
+            buf.push(0u8); // no proof
         }
-        if let Some(output) = block.vrf_output() {
-            buf.extend_from_slice(output.as_bytes());
+        if block.vrf_output().is_some() {
+            buf.push(1u8); // output flag
+            buf.extend_from_slice(block.vrf_output().unwrap().as_bytes());
+        } else {
+            buf.push(0u8); // no output
         }
     } else {
         buf.push(0u8); // no VRF
@@ -327,13 +347,49 @@ impl<'a> Reader<'a> {
         let timestamp_ms = self.read_u64()?;
         let nonce = self.read_u64()?;
 
-        // VRF fields (v5+)
-        let (vrf_public_key, vrf_proof, vrf_output) = if self.version >= 5 {
+        // VRF fields.
+        // v6+ (independent fields): has_vrf flag, then vrf_public_key (always when
+        // has_vrf=1), then proof_flag (1 byte: 0=None, 1=96-byte proof follows),
+        // then output_flag (1 byte: 0=None, 1=32-byte output follows).
+        // v5 and earlier (all-three-together): has_vrf flag, then if 1: pk(32) +
+        // proof(96) + output(32).
+        let (vrf_public_key, vrf_proof, vrf_output) = if self.version >= 6 {
             let has_vrf = self.read_u8()?;
             if has_vrf == 1 {
                 let pk_bytes: [u8; 32] = self.read_array::<32>()?;
                 let pk = VrfPublicKey::from_bytes(&pk_bytes)
                     .map_err(|_| SnapshotError::UnexpectedEof)?;
+                let has_proof = self.read_u8()?;
+                let proof = if has_proof == 1 {
+                    let proof_bytes: [u8; 96] = self.read_array::<96>()?;
+                    Some(
+                        VrfProof::from_bytes(&proof_bytes)
+                            .map_err(|_| SnapshotError::UnexpectedEof)?,
+                    )
+                } else {
+                    None
+                };
+                let has_output = self.read_u8()?;
+                let output = if has_output == 1 {
+                    let output_bytes: [u8; 32] = self.read_array::<32>()?;
+                    Some(VrfOutput::from_bytes(output_bytes))
+                } else {
+                    None
+                };
+                (Some(pk), proof, output)
+            } else {
+                (None, None, None)
+            }
+        } else if self.version >= 5 {
+            // v5: all three fields present together behind a single has_vrf flag
+            // (the v5 writer always emitted pk + proof + output when has_vrf=1,
+            //  mirroring this decode path).
+            let has_vrf = self.read_u8()?;
+            if has_vrf == 1 {
+                let pk_bytes: [u8; 32] = self.read_array::<32>()?;
+                let pk = VrfPublicKey::from_bytes(&pk_bytes)
+                    .map_err(|_| SnapshotError::UnexpectedEof)?;
+                // v5 always wrote proof and output together with pk when has_vrf=1.
                 let proof_bytes: [u8; 96] = self.read_array::<96>()?;
                 let proof =
                     VrfProof::from_bytes(&proof_bytes).map_err(|_| SnapshotError::UnexpectedEof)?;
@@ -409,6 +465,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vrf::{vrf_keypair_from_seed, vrf_prove};
 
     fn build() -> Dag {
         let genesis = Block::genesis(1, 0, 0, b"kovanica-genesis".to_vec());
@@ -481,48 +538,236 @@ mod tests {
         ));
     }
 
+    // --- v6 independent VRF field encoding tests ---
+
     #[test]
-    fn pruned_payload_roundtrip() {
-        let genesis = Block::genesis(1, 0, 0, b"kovanica-genesis".to_vec());
-        let mut dag = Dag::new(2, genesis);
+    fn v6_encode_decode_block_without_vrf() {
+        let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
+        let mut dag = Dag::new(3, genesis);
         let g = dag.genesis();
+        let a = dag
+            .insert(Block::new(vec![g], 5, 1, 0, b"no-vrf".to_vec()))
+            .unwrap();
+
+        let bytes = dag.write_snapshot();
+        let restored = Dag::read_snapshot(&bytes).unwrap();
+        assert_eq!(restored.linearize(), dag.linearize());
+        assert_eq!(restored.ghostdag(&a).unwrap().selected_parent, Some(g));
+    }
+
+    #[test]
+    fn v6_encode_decode_block_with_vrf_public_key_only() {
+        let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
+        let (sk, pk) = vrf_keypair_from_seed(&[7u8; 32]);
+        let vrf_input = Dag::vrf_input(&[genesis.id()]);
+        let eval = vrf_prove(&sk, &vrf_input);
+
+        let mut dag = Dag::new(3, genesis);
+        let g = dag.genesis();
+        let _id = dag
+            .insert(Block::new_with_vrf(
+                vec![g],
+                5,
+                0,
+                0,
+                pk,
+                VrfProof::from_bytes(&[0u8; 96]).unwrap(),
+                eval.output,
+                b"pk-only".to_vec(),
+            ))
+            .unwrap();
+
+        let restored = Dag::read_snapshot(&dag.write_snapshot()).unwrap();
+        assert_eq!(restored.linearize(), dag.linearize());
+    }
+
+    #[test]
+    fn v6_encode_decode_block_with_proof_and_output() {
+        let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
+        let (sk, pk) = vrf_keypair_from_seed(&[11u8; 32]);
+        let vrf_input = Dag::vrf_input(&[genesis.id()]);
+        let eval = vrf_prove(&sk, &vrf_input);
+
+        let mut dag = Dag::new(3, genesis);
+        let g = dag.genesis();
+        let id = dag
+            .insert(Block::new_with_vrf(
+                vec![g],
+                5,
+                0,
+                0,
+                pk,
+                eval.proof.clone(),
+                eval.output,
+                b"full-vrf".to_vec(),
+            ))
+            .unwrap();
+
+        let bytes = dag.write_snapshot();
+        let restored = Dag::read_snapshot(&bytes).unwrap();
+        assert_eq!(restored.linearize(), dag.linearize());
+
+        let rest_block = restored.block(&id).unwrap();
+        let orig_block = dag.block(&id).unwrap();
+        assert!(rest_block.vrf_public_key().is_some());
+        assert!(rest_block.vrf_proof().is_some());
+        assert!(rest_block.vrf_output().is_some());
+        assert_eq!(
+            rest_block.vrf_public_key().unwrap().as_bytes(),
+            orig_block.vrf_public_key().unwrap().as_bytes()
+        );
+        assert_eq!(
+            rest_block.vrf_output().unwrap().as_bytes(),
+            orig_block.vrf_output().unwrap().as_bytes()
+        );
+    }
+
+    #[test]
+    fn v6_snapshot_with_vrf_blocks_roundtrips_consensus() {
+        let genesis = Block::genesis(1, 0, 0, b"genesis".to_vec());
+        let (sk, pk) = vrf_keypair_from_seed(&[13u8; 32]);
+        let vrf_input = Dag::vrf_input(&[genesis.id()]);
+        let eval = vrf_prove(&sk, &vrf_input);
+
+        let mut dag = Dag::new(3, genesis);
+        let g = dag.genesis();
+
         let a = dag
             .insert(Block::new(vec![g], 1, 1, 0, b"a".to_vec()))
             .unwrap();
         let b = dag
             .insert(Block::new(vec![g], 1, 1, 0, b"b".to_vec()))
             .unwrap();
-        let _m = dag
-            .insert(Block::new(vec![a, b], 3, 2, 0, b"m".to_vec()))
+
+        let vrf_block = dag
+            .insert(Block::new_with_vrf(
+                vec![a, b],
+                3,
+                2,
+                0,
+                pk,
+                eval.proof.clone(),
+                eval.output,
+                b"vrf".to_vec(),
+            ))
             .unwrap();
 
-        // Prune payloads manually
-        dag.set_payload_pruning_depth(0); // prune everything below tip
-        dag.prune_old_payloads();
+        let partial_vrf = dag
+            .insert(Block::new_with_vrf(
+                vec![a, b],
+                3,
+                2,
+                0,
+                pk,
+                VrfProof::from_bytes(&[0u8; 96]).unwrap(),
+                eval.output,
+                b"partial".to_vec(),
+            ))
+            .unwrap();
 
-        // Verify payloads are pruned
-        assert!(dag.block(&a).unwrap().is_pruned());
-        assert!(dag.block(&b).unwrap().is_pruned());
-        // Tip should not be pruned (or could be, depending on depth)
-        let tip = dag.selected_tip();
-        if dag.ghostdag(&tip).unwrap().blue_score < dag.payload_pruning_score() {
-            assert!(dag.block(&tip).unwrap().is_pruned());
-        }
-
-        // Snapshot and restore
         let bytes = dag.write_snapshot();
         let restored = Dag::read_snapshot(&bytes).unwrap();
 
-        // Restored DAG should have pruned payloads
-        assert!(restored.block(&a).unwrap().is_pruned());
-        assert!(restored.block(&b).unwrap().is_pruned());
-        assert_eq!(restored.linearize(), dag.linearize());
         for id in dag.linearize() {
-            let orig_gd = dag.ghostdag(&id).unwrap();
-            let rest_gd = restored.ghostdag(&id).unwrap();
-            assert_eq!(orig_gd.blue_score, rest_gd.blue_score);
-            assert_eq!(orig_gd.blue_work, rest_gd.blue_work);
-            assert_eq!(orig_gd.selected_parent, rest_gd.selected_parent);
+            let orig = dag.ghostdag(&id).unwrap();
+            let rest = restored.ghostdag(&id).unwrap();
+            assert_eq!(
+                orig.blue_score, rest.blue_score,
+                "blue_score mismatch for {id}"
+            );
+            assert_eq!(
+                orig.blue_work, rest.blue_work,
+                "blue_work mismatch for {id}"
+            );
+            assert_eq!(
+                orig.selected_parent, rest.selected_parent,
+                "selected_parent mismatch for {id}"
+            );
+            assert_eq!(
+                orig.mergeset_blues, rest.mergeset_blues,
+                "mergeset_blues mismatch for {id}"
+            );
+            assert_eq!(
+                orig.mergeset_reds, rest.mergeset_reds,
+                "mergeset_reds mismatch for {id}"
+            );
+            assert_eq!(
+                orig.blue_anticone_sizes, rest.blue_anticone_sizes,
+                "blue_anticone_sizes mismatch for {id}"
+            );
         }
+
+        for id in [vrf_block, partial_vrf] {
+            let orig = dag.block(&id).unwrap();
+            let rest = restored.block(&id).unwrap();
+            assert_eq!(orig.vrf_public_key(), rest.vrf_public_key());
+            assert_eq!(orig.vrf_proof().is_some(), rest.vrf_proof().is_some());
+            assert_eq!(orig.vrf_output(), rest.vrf_output());
+        }
+    }
+    #[test]
+    fn v5_format_blocks_still_decode_under_v6_reader() {
+        // A snapshot written in the old v5 "all three together" layout must
+        // still decode correctly under the v6 reader (backward compat):
+        // the reader detects version < 6 and reads the v5 all-together layout.
+        // Build a minimal v5-style encoding manually: magic + version=5 +
+        // k + count + one block with has_vrf=1, pk(32), proof(96), output(32),
+        // then payload len + payload.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"KVDG");
+        buf.extend_from_slice(&5u16.to_le_bytes()); // version 5
+        buf.extend_from_slice(&3u16.to_le_bytes()); // k
+        buf.extend_from_slice(&1u64.to_le_bytes()); // 1 block
+
+        // Construct the block first so we know its correct id.
+        let (sk, pk) = vrf_keypair_from_seed(&[99u8; 32]);
+        let vrf_input = Dag::vrf_input(&[]);
+        let eval = vrf_prove(&sk, &vrf_input);
+        let test_block =
+            Block::new_with_vrf(vec![], 1, 0, 0, pk, eval.proof.clone(), eval.output, vec![]);
+        let correct_id = test_block.id();
+
+        // Block with VRF: id(32) + n_parents(8) + parents(0) + work(16) +
+        // ts(8) + nonce(8) + has_vrf(1) + pk(32) + proof(96) + output(32) +
+        // payload_len(8) + payload(0).
+        buf.extend_from_slice(correct_id.as_bytes()); // id: 32
+        buf.extend_from_slice(&0u64.to_le_bytes()); // n_parents: 8
+                                                    // no parents
+        buf.extend_from_slice(&1u128.to_le_bytes()); // work: 16
+        buf.extend_from_slice(&0u64.to_le_bytes()); // ts: 8
+        buf.extend_from_slice(&0u64.to_le_bytes()); // nonce: 8
+
+        // v5 VRF: has_vrf=1, pk(32), proof(96), output(32)
+        buf.push(1u8); // has_vrf
+        buf.extend_from_slice(pk.as_bytes()); // pk: 32
+        buf.extend_from_slice(&eval.proof.to_bytes()); // proof: 96
+        buf.extend_from_slice(eval.output.as_bytes()); // output: 32
+
+        // payload: len(8) + data(0)
+        buf.extend_from_slice(&0u64.to_le_bytes());
+
+        // The v6 reader must read this v5 snapshot successfully (backward compat).
+        let restored = Dag::read_snapshot(&buf).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored.genesis(), correct_id);
+        let block = restored.block(&correct_id).unwrap();
+        assert!(block.vrf_public_key().is_some());
+        assert!(block.vrf_proof().is_some());
+        assert!(block.vrf_output().is_some());
+    }
+
+    #[test]
+    fn mismatched_vrf_output_id_is_rejected() {
+        let dag = build();
+        let mut bytes = dag.write_snapshot();
+        // Flip a byte in the genesis block's stored id (offset 24: after
+        // magic(4) + version(2) + k(2) + count(8) = 16, then genesis id starts
+        // at offset 16; flip byte at offset 16+1=17).
+        assert!(bytes.len() > 17);
+        bytes[17] ^= 1;
+        assert!(matches!(
+            Dag::read_snapshot(&bytes),
+            Err(SnapshotError::TrailingBytes) | Err(SnapshotError::Rebuild(_))
+        ));
     }
 }

@@ -12,9 +12,12 @@ kovanica-dag = { path = "../kovanica-dag" }
 blake3.workspace = true
 hex.workspace = true
 ed25519-dalek.workspace = true
+curve25519-dalek.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"
+blake3.workspace = true
+ed25519-dalek.workspace = true
 
 
 [[bench]]

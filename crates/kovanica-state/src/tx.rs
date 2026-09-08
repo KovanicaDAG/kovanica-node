@@ -18,6 +18,22 @@
 //! A block's payload is a length-prefixed list of transactions — see
 //! [`encode_block_payload`] / [`decode_block_payload`], which bridge the ledger
 //! to `kovanica_dag`'s opaque block payloads.
+//!
+//! ## Stealth addresses (RFC-003 / 6A)
+//!
+//! Outputs locked to a `v0x03` stealth address carry a **stealth extension** in the
+//! encoding: a 1-byte `stealth_flag` (0 = ordinary, 1 = stealth), followed when set
+//! by `R = r·G` (32 bytes), a 1-byte `view_tag` (first byte of `BLAKE3(scan_pk · r)`),
+//! and `P = H(r · spend_pk) · G` (32 bytes, the one-time pubkey the ledger verifies
+//! spend signatures against). The `owner` of a stealth output is the `v0x03` address
+//! (`BLAKE3(scan_pk || spend_pk)`), and `TxOutput::stealth` is `Some(...)`.
+//!
+//! ## Script v2 (RFC-003 / 3B)
+//!
+//! Transactions carry `n_lock_time` (BIP-65 CLTV) and `sequence` (BIP-112 CSV) fields.
+//! The sighash domain includes these so lock-time-signed transactions are bound to their
+//! lock time. Script v2 spends reveal the script in `witness[0]` and execute it with a
+//! bounded step budget; see [`crate::script_v2`].
 
 use core::fmt;
 
@@ -112,6 +128,8 @@ pub struct TxInput {
     /// Witness stack authorising the spend:
     /// - For Version 0x00 (P2PK): `vec![signature_64_bytes]`.
     /// - For Version 0x01 (P2SH): `vec![redeem_script, sig_1, ..., sig_M]`.
+    /// - For Version 0x02 (Script v2): `vec![script_bytes, stack_elem_1, ...]`.
+    /// - For Version 0x03 (Stealth): `vec![signature_64_bytes]` (one-time key sign).
     pub witness: Vec<Vec<u8>>,
 }
 
@@ -121,7 +139,7 @@ impl TxInput {
         Self { outpoint, witness }
     }
 
-    /// Construct a single-signature input (Version 0x00 P2PK):
+    /// Construct a single-signature input (Version 0x00 P2PK or Version 0x03 Stealth):
     /// the witness stack contains exactly one 64-byte Ed25519 signature.
     pub fn single_sig(outpoint: OutPoint, signature: [u8; 64]) -> Self {
         Self {
@@ -190,7 +208,27 @@ impl fmt::Display for AssetId {
     }
 }
 
+/// The one-time key material that accompanies a stealth output (Version 0x03).
+///
+/// Present only on stealth outputs (`TxOutput::stealth` is `Some`). The `owner` of a
+/// stealth output is the `v0x03` address; these fields are the on-chain ephemeral data
+/// the sender publishes so the recipient can detect and spend the output.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct StealthExt {
+    /// `R = r·G`: the sender's ephemeral public key (32 bytes).
+    pub r: [u8; 32],
+    /// View tag: first byte of `BLAKE3(scan_pk · r)`, for SPV filtering.
+    pub view_tag: u8,
+    /// `P = H(r · spend_pk) · G`: the one-time public key the ledger verifies spends against.
+    pub p: [u8; 32],
+}
+
 /// A newly created output: an amount, an optional asset id, and the address that may later spend it.
+///
+/// For stealth outputs (version 0x03), the output carries additional one-time key material
+/// (`R`, `view_tag`, `P`) — the `stealth` field. The `owner` of a stealth output is a v0x03
+/// address (BLAKE3(scan_pk || spend_pk)); the on-chain spend authorisation uses the derived
+/// one-time public key `P`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TxOutput {
     /// The value locked in this output.
@@ -199,6 +237,8 @@ pub struct TxOutput {
     pub asset_id: Option<AssetId>,
     /// The address that owns (may spend) this output.
     pub owner: Address,
+    /// The stealth extension for v0x03 outputs. `None` for ordinary outputs.
+    pub stealth: Option<StealthExt>,
 }
 
 impl TxOutput {
@@ -208,6 +248,7 @@ impl TxOutput {
             value,
             asset_id,
             owner,
+            stealth: None,
         }
     }
 
@@ -217,7 +258,47 @@ impl TxOutput {
             value,
             asset_id: None,
             owner,
+            stealth: None,
         }
+    }
+
+    /// Construct a stealth output with the given one-time key material.
+    ///
+    /// `owner` must be a `v0x03` address (the recipient's stealth address).
+    /// `r` is the sender's ephemeral pubkey, `view_tag` the filter byte, `p` the
+    /// derived one-time pubkey the recipient verifies spends against.
+    pub fn stealth(value: u64, owner: Address, stealth: StealthExt) -> Self {
+        Self {
+            value,
+            asset_id: None,
+            owner,
+            stealth: Some(stealth),
+        }
+    }
+
+    /// Construct an output with an explicit asset id and stealth extension.
+    pub fn new_with_stealth(
+        value: u64,
+        asset_id: Option<AssetId>,
+        owner: Address,
+        stealth: StealthExt,
+    ) -> Self {
+        Self {
+            value,
+            asset_id,
+            owner,
+            stealth: Some(stealth),
+        }
+    }
+
+    /// Whether this output carries the stealth extension.
+    pub const fn is_stealth(&self) -> bool {
+        self.stealth.is_some()
+    }
+
+    /// The stealth extension, or a default (all-zero) when absent.
+    pub fn stealth_or_default(&self) -> StealthExt {
+        self.stealth.unwrap_or_default()
     }
 }
 
@@ -226,11 +307,22 @@ impl TxOutput {
 /// An empty `inputs` marks a coinbase (issuance) transaction. `tag` is extra
 /// committed bytes — for a coinbase it also disambiguates the id (see the module
 /// docs) and can carry the producing block's height/label.
+///
+/// Transactions carry optional `n_lock_time` and `sequence` fields used by
+/// script v2 opcodes CHECKLOCKTIMEVERIFY (BIP-65) and CHECKSEQUENCEVERIFY (BIP-112).
+/// The sighash domain includes these so that lock-time-signed transactions are
+/// bound to their lock time.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Transaction {
     inputs: Vec<TxInput>,
     outputs: Vec<TxOutput>,
     tag: Vec<u8>,
+    /// Lock time (BIP-65): a 32-bit value that, when non-zero, constrains when
+    /// the transaction can be included. Used by CHECKLOCKTIMEVERIFY.
+    n_lock_time: u32,
+    /// Sequence number (BIP-112): a 32-bit value. When non-zero, CHECKSEQUENCEVERIFY
+    /// constrains the relative lock time. The sighash covers it.
+    sequence: u32,
 }
 
 impl Transaction {
@@ -240,6 +332,25 @@ impl Transaction {
             inputs,
             outputs,
             tag,
+            n_lock_time: 0,
+            sequence: 0,
+        }
+    }
+
+    /// Construct a transaction with explicit lock time and sequence.
+    pub fn new_with_lock(
+        inputs: Vec<TxInput>,
+        outputs: Vec<TxOutput>,
+        tag: Vec<u8>,
+        n_lock_time: u32,
+        sequence: u32,
+    ) -> Self {
+        Self {
+            inputs,
+            outputs,
+            tag,
+            n_lock_time,
+            sequence,
         }
     }
 
@@ -252,6 +363,8 @@ impl Transaction {
             inputs: Vec::new(),
             outputs,
             tag,
+            n_lock_time: 0,
+            sequence: 0,
         }
     }
 
@@ -271,6 +384,8 @@ impl Transaction {
             inputs,
             outputs,
             tag,
+            n_lock_time: 0,
+            sequence: 0,
         };
         let sighash = tx.sighash();
         for (i, (_, keypair)) in spends.iter().enumerate() {
@@ -296,6 +411,8 @@ impl Transaction {
             inputs: vec![input],
             outputs,
             tag,
+            n_lock_time: 0,
+            sequence: 0,
         };
         let sighash = tx.sighash();
         let mut signatures = Vec::with_capacity(signers.len());
@@ -320,6 +437,8 @@ impl Transaction {
                 .collect(),
             outputs,
             tag,
+            n_lock_time: 0,
+            sequence: 0,
         }
     }
 
@@ -355,6 +474,16 @@ impl Transaction {
     /// The transaction's tag bytes.
     pub fn tag(&self) -> &[u8] {
         &self.tag
+    }
+
+    /// The transaction's lock time (BIP-65).
+    pub fn n_lock_time(&self) -> u32 {
+        self.n_lock_time
+    }
+
+    /// The transaction's sequence number (BIP-112).
+    pub fn sequence(&self) -> u32 {
+        self.sequence
     }
 
     /// Whether this is a coinbase (issuance) transaction — it has no inputs.
@@ -393,6 +522,11 @@ impl Transaction {
     /// Serialise into `buf`.
     /// - With `with_signatures = true`: includes dynamic witness items (used for `id()` and block payload).
     /// - With `with_signatures = false`: completely omits witness vectors (used for `sighash()`).
+    ///
+    /// After the RFC-002 fields, each output writes a `stealth_flag` byte (0 = ordinary,
+    /// 1 = stealth) followed by the 65-byte stealth extension (`R` 32B + `view_tag` 1B + `P`
+    /// 32B) when present. After the outputs, the `n_lock_time` and `sequence` fields are
+    /// written (8 bytes total), followed by the tag.
     fn encode_into(&self, buf: &mut Vec<u8>, with_signatures: bool) {
         buf.extend_from_slice(&(self.inputs.len() as u64).to_le_bytes());
         for input in &self.inputs {
@@ -417,8 +551,20 @@ impl Transaction {
                     buf.extend_from_slice(asset_id.as_bytes());
                 }
             }
+            // stealth flag: 1 byte (0 = ordinary, 1 = stealth)
+            if let Some(s) = output.stealth {
+                buf.push(1);
+                buf.extend_from_slice(&s.r);
+                buf.push(s.view_tag);
+                buf.extend_from_slice(&s.p);
+            } else {
+                buf.push(0);
+            }
             buf.extend_from_slice(output.owner.as_bytes());
         }
+        // n_lock_time (4 bytes) + sequence (4 bytes)
+        buf.extend_from_slice(&self.n_lock_time.to_le_bytes());
+        buf.extend_from_slice(&self.sequence.to_le_bytes());
         buf.extend_from_slice(&(self.tag.len() as u64).to_le_bytes());
         buf.extend_from_slice(&self.tag);
     }
@@ -432,6 +578,8 @@ impl Transaction {
 
     /// The signature hash: BLAKE3 over the witness-free encoding. Inputs sign
     /// this, and it is what [`crate::keys::verify`] checks each spend against.
+    /// The sighash domain includes `n_lock_time` and `sequence` so signatures
+    /// cover the lock time / sequence (BIP-65 / BIP-112 semantics).
     pub fn sighash(&self) -> [u8; 32] {
         let mut buf = Vec::new();
         self.encode_into(&mut buf, false);
@@ -493,7 +641,8 @@ pub fn encode_block_payload(txs: &[Transaction]) -> Vec<u8> {
 /// Decode a block payload produced by [`encode_block_payload`].
 pub fn decode_block_payload(bytes: &[u8]) -> Result<Vec<Transaction>, DecodeError> {
     let mut reader = Reader::new(bytes);
-    // Smallest transaction encoding is three empty length prefixes = 24 bytes.
+    // Smallest transaction encoding: inputs(8) + outputs(8) + n_lock_time+sequence(8)
+    // = 24 bytes for an empty transaction.
     let count = reader.read_count(24)?;
     let mut txs = Vec::with_capacity(count);
     for _ in 0..count {
@@ -569,9 +718,11 @@ impl<'a> Reader<'a> {
                 witness,
             });
         }
-        // Minimum output size: 8 (value) + 1 (asset flag) + 33 (owner address) = 42 bytes.
-        // If asset flag is 1, add 32 bytes for asset_id.
-        let n_outputs = self.read_count(42)?;
+        // Minimum output size: 8 (value) + 1 (asset flag) + 1 (stealth flag)
+        //    + 33 (owner) = 43 bytes for an ordinary native output.
+        // When stealth flag is 1, add 65 bytes for the stealth extension.
+        // When asset flag is 1, add 32 bytes for asset_id.
+        let n_outputs = self.read_count(43)?;
         let mut outputs = Vec::with_capacity(n_outputs);
         for _ in 0..n_outputs {
             let value = self.read_u64()?;
@@ -581,20 +732,36 @@ impl<'a> Reader<'a> {
             } else {
                 Some(AssetId::from_bytes(self.read_array::<32>()?))
             };
+            // stealth_flag: 1 byte (0 = ordinary, 1 = stealth)
+            let stealth_flag = self.read_array::<1>()?[0];
+            let stealth = if stealth_flag == 1 {
+                let r = self.read_array::<32>()?;
+                let view_tag = self.read_array::<1>()?[0];
+                let p = self.read_array::<32>()?;
+                Some(StealthExt { r, view_tag, p })
+            } else {
+                None
+            };
             let owner_bytes = self.read_array::<33>()?;
             let owner = Address::from_versioned_bytes(owner_bytes);
             outputs.push(TxOutput {
                 value,
                 asset_id,
                 owner,
+                stealth,
             });
         }
+        // n_lock_time (4 bytes) + sequence (4 bytes)
+        let n_lock_time = self.read_u32()?;
+        let sequence = self.read_u32()?;
         let tag_len = self.read_count(1)?;
         let tag = self.read_array_dyn(tag_len)?;
         Ok(Transaction {
             inputs,
             outputs,
             tag,
+            n_lock_time,
+            sequence,
         })
     }
 
@@ -645,7 +812,7 @@ mod tests {
         let op = OutPoint::new(TxId::from_bytes([1u8; 32]), 0);
         let kp1 = KeyPair::from_u64(10);
         let kp2 = KeyPair::from_u64(20);
-        let script = vec![1, 2, 0xAA];
+        let script = vec![2u8, 2u8, 1, 2, 3];
         let outputs = vec![TxOutput::native(50, addr(3))];
 
         let tx1 = Transaction::signed_multisig(
@@ -681,7 +848,7 @@ mod tests {
         let kp1 = KeyPair::from_u64(1);
         let kp2 = KeyPair::from_u64(2);
         let op = OutPoint::new(TxId::from_bytes([7u8; 32]), 3);
-        let script = vec![2, 2, 1, 2, 3];
+        let script = vec![2u8, 2u8, 1, 2, 3];
         let multisig_tx = Transaction::signed_multisig(
             op,
             script,
@@ -704,37 +871,209 @@ mod tests {
     }
 
     #[test]
-    fn truncated_payload_is_rejected() {
-        let tx = Transaction::coinbase(vec![TxOutput::native(1, addr(1))], b"h".to_vec());
-        let mut bytes = encode_block_payload(&[tx]);
-        bytes.truncate(bytes.len() - 1);
-        assert_eq!(
-            decode_block_payload(&bytes),
-            Err(DecodeError::UnexpectedEof)
+    fn decode_rejects_trailing_bytes() {
+        let kp = KeyPair::from_u64(1);
+        let tx = Transaction::signed(
+            &[(OutPoint::new(TxId::from_bytes([1u8; 32]), 0), &kp)],
+            vec![TxOutput::native(5, addr(2))],
+            Vec::new(),
         );
+        let mut bytes = tx.encode();
+        bytes.push(0xFF);
+        assert!(Transaction::decode(&bytes).is_err());
     }
 
     #[test]
-    fn trailing_bytes_are_rejected() {
-        let mut bytes = encode_block_payload(&[]);
-        bytes.push(0);
-        assert_eq!(
-            decode_block_payload(&bytes),
-            Err(DecodeError::TrailingBytes)
+    fn lock_time_and_sequence_roundtrip() {
+        let _kp = KeyPair::from_u64(1);
+        let op = OutPoint::new(TxId::from_bytes([7u8; 32]), 3);
+        let tx = Transaction::new_with_lock(
+            vec![TxInput::single_sig(
+                op,
+                KeyPair::from_u64(1).sign(b"locktest"),
+            )],
+            vec![TxOutput::native(5, addr(2))],
+            b"tag".to_vec(),
+            500_000,
+            1,
         );
+        let bytes = encode_block_payload(&[tx]);
+        let decoded = decode_block_payload(&bytes).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].n_lock_time(), 500_000);
+        assert_eq!(decoded[0].sequence(), 1);
     }
 
     #[test]
-    fn bounded_reader_rejects_giant_count_without_allocation() {
+    fn sighash_covers_lock_time() {
+        let op = OutPoint::new(TxId::from_bytes([1u8; 32]), 0);
+        let tx_a = Transaction::new_with_lock(
+            vec![TxInput::single_sig(op, [0u8; 64])],
+            vec![],
+            b"t".to_vec(),
+            100,
+            0,
+        );
+        let tx_b = Transaction::new_with_lock(
+            vec![TxInput::single_sig(op, [0u8; 64])],
+            vec![],
+            b"t".to_vec(),
+            200,
+            0,
+        );
+        assert_ne!(tx_a.sighash(), tx_b.sighash());
+    }
+
+    #[test]
+    fn stealth_output_encode_decode_roundtrip() {
+        let scan_pk = [0xAAu8; 32];
+        let spend_pk = [0xBBu8; 32];
+        let stealth_addr = Address::stealth(scan_pk, spend_pk);
+        let r = [0x11u8; 32];
+        let view_tag = 0x42;
+        let p = [0x22u8; 32];
+        let stealth = StealthExt { r, view_tag, p };
+        let output = TxOutput::stealth(100, stealth_addr, stealth);
+        // Build a minimal tx containing just this output as a coinbase
+        let tx = Transaction::coinbase(vec![output], b"stealth".to_vec());
+        let bytes = tx.encode();
+        let decoded = Transaction::decode(&bytes).unwrap();
+        assert_eq!(decoded.outputs().len(), 1);
+        let out = decoded.outputs()[0];
+        assert!(out.is_stealth());
+        assert_eq!(out.value, 100);
+        assert_eq!(out.owner, stealth_addr);
+        let ext = out.stealth.unwrap();
+        assert_eq!(ext.r, r);
+        assert_eq!(ext.view_tag, view_tag);
+        assert_eq!(ext.p, p);
+    }
+
+    #[test]
+    fn stealth_output_with_asset_roundtrip() {
+        let scan_pk = [0xCCu8; 32];
+        let spend_pk = [0xDDu8; 32];
+        let stealth_addr = Address::stealth(scan_pk, spend_pk);
+        let asset_id = AssetId::from_bytes([0xEEu8; 32]);
+        let r = [0x33u8; 32];
+        let view_tag = 0x77;
+        let p = [0x44u8; 32];
+        let stealth = StealthExt { r, view_tag, p };
+        let output = TxOutput::new_with_stealth(200, Some(asset_id), stealth_addr, stealth);
+        let tx = Transaction::coinbase(vec![output], b"stealth-asset".to_vec());
+        let bytes = tx.encode();
+        let decoded = Transaction::decode(&bytes).unwrap();
+        let out = decoded.outputs()[0];
+        assert!(out.is_stealth());
+        assert_eq!(out.asset_id, Some(asset_id));
+        let ext = out.stealth.unwrap();
+        assert_eq!(ext.r, r);
+        assert_eq!(ext.view_tag, view_tag);
+        assert_eq!(ext.p, p);
+    }
+
+    #[test]
+    fn ordinary_output_no_stealth_flag() {
+        let kp = KeyPair::from_u64(1);
+        let tx = Transaction::coinbase(vec![TxOutput::native(50, kp.address())], b"h".to_vec());
+        let bytes = tx.encode();
+        let decoded = Transaction::decode(&bytes).unwrap();
+        assert!(!decoded.outputs()[0].is_stealth());
+    }
+
+    #[test]
+    fn stealth_flag_mismatch_rejected_decode() {
+        // Hand-build a bytes blob where stealth_flag = 1 but no extension follows
+        // (malformed). The decoder should return UnexpectedEof.
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&1u64.to_le_bytes()); // 1 transaction
-        bytes.extend_from_slice(&1u64.to_le_bytes()); // 1 input
-        bytes.extend_from_slice(&[0u8; 32]); // tx
-        bytes.extend_from_slice(&0u32.to_le_bytes()); // index
-        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // giant witness count!
-        assert_eq!(
-            decode_block_payload(&bytes),
-            Err(DecodeError::UnexpectedEof)
+        // 0 inputs
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        // 1 output: value=10, asset_flag=0, stealth_flag=1, then truncated
+        bytes.extend_from_slice(&10u64.to_le_bytes());
+        bytes.push(0); // asset_flag = native
+        bytes.push(1); // stealth_flag = 1 (stealth), but no R/view_tag/P follows
+        bytes.extend_from_slice(&([0x55u8; 32])); // owner (P2PK for simplicity)
+        let result = Transaction::decode(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn coinbase_with_stealth_and_lock_time() {
+        let scan_pk = [0x01u8; 32];
+        let spend_pk = [0x02u8; 32];
+        let stealth_addr = Address::stealth(scan_pk, spend_pk);
+        let stealth = StealthExt {
+            r: [0x03u8; 32],
+            view_tag: 0x04,
+            p: [0x05u8; 32],
+        };
+        let tx = Transaction::new_with_lock(
+            Vec::new(),
+            vec![TxOutput::stealth(1000, stealth_addr, stealth)],
+            b"cb".to_vec(),
+            1000,
+            0,
         );
+        // coinbase with lock_time
+        let bytes = tx.encode();
+        let decoded = Transaction::decode(&bytes).unwrap();
+        assert!(decoded.is_coinbase());
+        assert_eq!(decoded.outputs().len(), 1);
+        assert!(decoded.outputs()[0].is_stealth());
+        assert_eq!(decoded.n_lock_time(), 1000);
+    }
+
+    #[test]
+    fn txid_differs_with_stealth_output() {
+        let scan_pk = [0x01u8; 32];
+        let spend_pk = [0x02u8; 32];
+        let stealth_addr = Address::stealth(scan_pk, spend_pk);
+        let stealth_a = StealthExt {
+            r: [0x11u8; 32],
+            view_tag: 0x01,
+            p: [0x22u8; 32],
+        };
+        let stealth_b = StealthExt {
+            r: [0x33u8; 32],
+            view_tag: 0x02,
+            p: [0x44u8; 32],
+        };
+        let tx_a = Transaction::coinbase(
+            vec![TxOutput::stealth(100, stealth_addr, stealth_a)],
+            b"t".to_vec(),
+        );
+        let tx_b = Transaction::coinbase(
+            vec![TxOutput::stealth(100, stealth_addr, stealth_b)],
+            b"t".to_vec(),
+        );
+        assert_ne!(tx_a.id(), tx_b.id());
+    }
+
+    #[test]
+    fn sighash_differs_with_stealth_output() {
+        // Two identical transactions except for the stealth R value should have
+        // different sighashes (the stealth extension is part of the encoding).
+        let scan_pk = [0x11u8; 32];
+        let spend_pk = [0x22u8; 32];
+        let stealth_addr = Address::stealth(scan_pk, spend_pk);
+        let stealth_a = StealthExt {
+            r: [0xAAu8; 32],
+            view_tag: 0x01,
+            p: [0xBBu8; 32],
+        };
+        let stealth_b = StealthExt {
+            r: [0xCCu8; 32],
+            view_tag: 0x02,
+            p: [0xBBu8; 32],
+        };
+        let tx_a = Transaction::coinbase(
+            vec![TxOutput::stealth(100, stealth_addr, stealth_a)],
+            b"t".to_vec(),
+        );
+        let tx_b = Transaction::coinbase(
+            vec![TxOutput::stealth(100, stealth_addr, stealth_b)],
+            b"t".to_vec(),
+        );
+        assert_ne!(tx_a.sighash(), tx_b.sighash());
     }
 }

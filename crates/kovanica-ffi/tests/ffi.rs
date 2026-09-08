@@ -450,3 +450,37 @@ fn bond_and_unbond_from_secret_spend_wallet_funds() {
     // The remaining 200 atoms were returned as an unfrozen change output.
     assert_eq!(node.total_stake().unwrap(), 0);
 }
+
+#[test]
+fn send_to_script_v2_and_stealth_over_ffi() {
+    let node = fresh();
+
+    // The deterministic founder actor (seed 1) is funded by genesis (1000).
+    // Its Ed25519 secret is the little-endian encoding of 1 padded to 32 bytes.
+    let founder_secret = "0100000000000000000000000000000000000000000000000000000000000000";
+
+    // Script v2: send 200 to a script, then check the balance.
+    let script_hex = "0102030405";
+    let tx_id = node
+        .send_to_script_v2(founder_secret.into(), 200, script_hex.into())
+        .unwrap();
+    assert_eq!(hex::decode(&tx_id).unwrap().len(), 32);
+    assert_eq!(node.balance_of_script(script_hex.into()).unwrap(), 200);
+
+    // Stealth: build a stealth address from scan key (seed 2) + spend key (seed 3).
+    let scan_pk = *kovanica_node::Node::address(2).payload();
+    let spend_pk = *kovanica_node::Node::address(3).payload();
+    let stealth = kovanica_state::StealthAddress::new(scan_pk, spend_pk);
+    let stealth_hex = stealth.to_hex();
+    assert_eq!(stealth_hex.len(), 130);
+
+    // Send 300 to the stealth address, then check the balance.
+    let tx_id = node
+        .send_to_stealth(founder_secret.into(), 300, stealth_hex.clone())
+        .unwrap();
+    assert_eq!(hex::decode(&tx_id).unwrap().len(), 32);
+    assert_eq!(node.balance_of_stealth(stealth_hex).unwrap(), 300);
+
+    // Sender's remaining balance: 1000 - 200 - 300 - 2 fees = 498.
+    assert_eq!(node.balance_of_seed(1).unwrap(), "498");
+}

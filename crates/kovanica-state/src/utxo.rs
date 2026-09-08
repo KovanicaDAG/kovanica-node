@@ -107,18 +107,38 @@ impl UtxoSet {
             } else {
                 buf.push(0);
             }
+            // stealth flag: 0 = ordinary, 1 = stealth + 65-byte extension
+            // (R 32B + view_tag 1B + P 32B), mirroring the canonical TxOutput
+            // encoding in tx.rs.
+            if let Some(stealth) = output.stealth {
+                buf.push(1);
+                buf.extend_from_slice(&stealth.r);
+                buf.push(stealth.view_tag);
+                buf.extend_from_slice(&stealth.p);
+            } else {
+                buf.push(0);
+            }
         }
         buf
     }
 
     /// Returns the length of the encoded UTXO set (for skipping during decode).
     pub fn encoded_len(&self) -> usize {
-        8 + self.map.len() * (32 + 4 + 8 + 33 + 1 + 32)
+        8 + self
+            .map
+            .values()
+            .map(|output| {
+                let asset = if output.asset_id.is_some() { 1 + 32 } else { 1 };
+                let stealth = if output.stealth.is_some() { 1 + 65 } else { 1 };
+                32 + 4 + 8 + 33 + asset + stealth
+            })
+            .sum::<usize>()
     }
 
     /// Decode a UTXO set from a checkpoint encoding, advancing `bytes` past the
     /// consumed data so the caller can continue parsing.
     /// v4: reads optional asset_id (32 bytes) after owner.
+    /// v5: reads optional stealth extension (65 bytes) after the asset_id.
     pub fn decode(bytes: &mut &[u8]) -> Result<Self, UtxoDecodeError> {
         let mut reader = CheckpointReader::new(bytes);
         let count = reader.read_u64()? as usize;
@@ -135,9 +155,24 @@ impl UtxoSet {
             } else {
                 None
             };
+            // stealth flag: 0 = ordinary, 1 = stealth + 65-byte extension
+            let stealth_flag = reader.read_u8()?;
+            let stealth = if stealth_flag == 1 {
+                let r = reader.read_array::<32>()?;
+                let view_tag = reader.read_u8()?;
+                let p = reader.read_array::<32>()?;
+                Some(crate::tx::StealthExt { r, view_tag, p })
+            } else {
+                None
+            };
             map.insert(
                 OutPoint::new(tx, index),
-                TxOutput::new(value, asset_id, owner),
+                TxOutput {
+                    value,
+                    asset_id,
+                    owner,
+                    stealth,
+                },
             );
         }
         *bytes = &bytes[reader.pos..];

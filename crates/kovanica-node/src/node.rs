@@ -19,7 +19,8 @@ use kovanica_state::stake::{Freeze, UNBOND_MATURITY, UNBOND_PREFIX};
 use kovanica_state::{
     apply_block, decode_block_payload, encode_block_payload, verify, Address, AssetId,
     HalvingSchedule, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore,
-    OutPoint, Sig, StakedVrf, Transaction, TxId, TxOutput, UtxoSet, DEFAULT_HALVING_ERA,
+    OutPoint, Sig, StakedVrf, StealthAddress, Transaction, TxId, TxOutput, UtxoSet,
+    DEFAULT_HALVING_ERA,
 };
 
 use crate::mempool_v2::{MempoolConfig, MempoolV2};
@@ -413,6 +414,9 @@ pub struct Node {
     multisig_scripts: std::collections::HashMap<Address, Vec<u8>>,
     /// Manually banned peers (IP address or NodeId hex), with optional expiry tick.
     banned_peers: crate::p2p_hardening::P2pHardening,
+    /// Per-node counter for deterministic stealth-send ephemeral secrets. See
+    /// [`Node::send_to_stealth`] — production should use a random `r` instead.
+    stealth_counter: std::sync::atomic::AtomicU64,
 }
 
 /// Blocks per subsidy-halving era. Issuance is `cap >> (height / HALVING_ERA)`.
@@ -436,6 +440,7 @@ impl Default for Node {
             banned_peers: crate::p2p_hardening::P2pHardening::new(
                 crate::p2p_hardening::P2pHardeningConfig::default(),
             ),
+            stealth_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -462,6 +467,7 @@ impl Node {
             banned_peers: crate::p2p_hardening::P2pHardening::new(
                 crate::p2p_hardening::P2pHardeningConfig::default(),
             ),
+            stealth_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1010,6 +1016,61 @@ impl Node {
         Ok(tx)
     }
 
+    /// Build a signed transfer from an explicit keypair to a **custom target
+    /// output** (e.g. a stealth output), with change back to `kp`.
+    ///
+    /// Coin selection is identical to [`Self::prepare_transfer_asset`] (native
+    /// KVNC, largest-first accumulation to cover `amount + fee`), but the
+    /// recipient output is supplied by the caller rather than derived from an
+    /// address — this is what lets a stealth send attach the derived one-time
+    /// key material (`StealthExt`) to the output.
+    fn build_transfer_with_outputs(
+        &self,
+        kp: &KeyPair,
+        amount: u64,
+        target_output: TxOutput,
+    ) -> Result<Transaction, NodeError> {
+        if amount == 0 {
+            return Err(NodeError::ZeroAmount);
+        }
+        let fee = self.min_fee();
+        let need = amount
+            .checked_add(fee)
+            .ok_or(NodeError::InsufficientFunds)?;
+        let state = self.ledger()?.ledger_state();
+        let mut owned: Vec<(OutPoint, u64)> = state
+            .iter()
+            .filter(|(_, out)| out.owner == kp.address() && out.asset_id.is_none())
+            .map(|(op, out)| (*op, out.value))
+            .collect();
+        owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut selected: Vec<(OutPoint, u64)> = Vec::new();
+        let mut total: u64 = 0;
+        for (op, value) in owned {
+            selected.push((op, value));
+            total = total.saturating_add(value);
+            if total >= need {
+                break;
+            }
+        }
+        if total < need {
+            return Err(NodeError::InsufficientFunds);
+        }
+        let mut outputs = vec![target_output];
+        let change = total - need;
+        if change > 0 {
+            outputs.push(TxOutput::native(change, kp.address()));
+        }
+        let outpoints: Vec<OutPoint> = selected.iter().map(|(op, _)| *op).collect();
+        let mut tx = Transaction::unsigned(&outpoints, outputs, Vec::new());
+        let sighash = tx.sighash();
+        let sig = Sig::from_bytes(kp.sign(&sighash));
+        for i in 0..tx.inputs().len() {
+            tx.attach_signature(i, sig);
+        }
+        Ok(tx)
+    }
+
     /// Select covering UTXOs for `from` and build an **unsigned** transfer.
     /// One output is enough when it covers `amount + fee`; otherwise UTXOs are
     /// accumulated (largest first) until they do. The wallet signs `sighash`
@@ -1181,6 +1242,106 @@ impl Node {
         asset_id: Option<kovanica_state::AssetId>,
     ) -> Result<Sent, NodeError> {
         self.send_to_asset(from_seed, amount, Self::address(to_seed), asset_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Script v2 (RFC-003 / 3B) & stealth (RFC-003 / 6A) wallet helpers
+    // ------------------------------------------------------------------
+
+    /// Send `amount` from an explicit keypair to a **script v2** address
+    /// (`Address::from_script_v2(script)`) **immediately**, as a new block
+    /// built on the current tips. Fee in native KVNC, change back to `kp`.
+    ///
+    /// The script is hashed (BLAKE3) into a `v0x02` address; the script itself
+    /// is revealed at spend time (see `crate::script_v2`). This mirrors the
+    /// native-token `send_with_asset` pattern with `asset_id = None`.
+    pub fn send_to_script_v2(
+        &mut self,
+        kp: &KeyPair,
+        amount: u64,
+        script: &[u8],
+    ) -> Result<TxId, NodeError> {
+        let to = Address::from_script_v2(script);
+        let tx = self.build_transfer_with(kp, amount, to)?;
+        let tx_id = tx.id();
+        let parents = self.ledger()?.dag().tips();
+        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
+        let dag = self.ledger()?.dag();
+        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
+        let block = ledger
+            .insert(parents, work, timestamp, nonce, &[tx])
+            .map_err(NodeError::Insert)?;
+        self.note_inserted(block);
+        self.evict_mempool();
+        Ok(tx_id)
+    }
+
+    /// Send `amount` from an explicit keypair to a **stealth address**
+    /// (`StealthAddress`) **immediately**, as a new block built on the current
+    /// tips. Fee in native KVNC, change back to `kp`.
+    ///
+    /// The one-time output is derived via `to.derive_output(&r_secret)`, where
+    /// `r_secret` is generated **deterministically** from the sender's seed,
+    /// the amount, and a per-send counter:
+    /// `BLAKE3(kp.seed() || amount_le || counter)`. This keeps sends
+    /// reproducible in tests and tooling. **Production must use a random `r`**
+    /// (a fresh 32-byte value per send) so that distinct payments to the same
+    /// stealth address are unlinkable — a deterministic `r` would let an
+    /// observer correlate outputs. The counter is a node-local atomic that
+    /// increments on every stealth send, so repeated sends with the same
+    /// amount still yield distinct one-time keys.
+    pub fn send_to_stealth(
+        &mut self,
+        kp: &KeyPair,
+        amount: u64,
+        to: &StealthAddress,
+    ) -> Result<TxId, NodeError> {
+        if amount == 0 {
+            return Err(NodeError::ZeroAmount);
+        }
+        // Deterministic ephemeral secret: seed || amount_le || counter. See the
+        // doc comment above — production callers should supply a random r.
+        let counter = self
+            .stealth_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut r_input = Vec::with_capacity(32 + 8 + 8);
+        r_input.extend_from_slice(&kp.seed());
+        r_input.extend_from_slice(&amount.to_le_bytes());
+        r_input.extend_from_slice(&counter.to_le_bytes());
+        let r_secret: [u8; 32] = *blake3::hash(&r_input).as_bytes();
+
+        let ext = to.derive_output(&r_secret).map_err(NodeError::Multisig)?;
+        let output = TxOutput::stealth(amount, to.address(), ext);
+        let tx = self.build_transfer_with_outputs(kp, amount, output)?;
+        let tx_id = tx.id();
+        let parents = self.ledger()?.dag().tips();
+        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
+        let dag = self.ledger()?.dag();
+        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
+        let block = ledger
+            .insert(parents, work, timestamp, nonce, &[tx])
+            .map_err(NodeError::Insert)?;
+        self.note_inserted(block);
+        self.evict_mempool();
+        Ok(tx_id)
+    }
+
+    /// The spendable balance of a **script v2** address
+    /// (`Address::from_script_v2(script)`) in the current full ledger state.
+    pub fn balance_of_script(&self, script: &[u8]) -> u64 {
+        let addr = Address::from_script_v2(script);
+        self.balance(&addr).unwrap_or(0) as u64
+    }
+
+    /// The spendable balance of a **stealth** address (`StealthAddress`) in the
+    /// current full ledger state.
+    pub fn balance_of_stealth(&self, to: &StealthAddress) -> u64 {
+        let addr = to.address();
+        self.balance(&addr).unwrap_or(0) as u64
     }
 
     // ------------------------------------------------------------------
@@ -2315,6 +2476,7 @@ impl Node {
             banned_peers: crate::p2p_hardening::P2pHardening::new(
                 crate::p2p_hardening::P2pHardeningConfig::default(),
             ),
+            stealth_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -2336,6 +2498,7 @@ impl Node {
             banned_peers: crate::p2p_hardening::P2pHardening::new(
                 crate::p2p_hardening::P2pHardeningConfig::default(),
             ),
+            stealth_counter: std::sync::atomic::AtomicU64::new(0),
         })
     }
 

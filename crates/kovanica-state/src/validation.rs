@@ -78,6 +78,16 @@ pub enum BlockValidationError {
     },
     /// A transaction's output values overflow `u64` when summed.
     ValueOverflow { tx_index: usize },
+    /// A v0x03 (stealth) output is missing its stealth extension.
+    BadStealthOutput {
+        tx_index: usize,
+        output_index: usize,
+    },
+    /// A stealth extension is present on an output whose owner is not v0x03.
+    BadStealthMismatch {
+        tx_index: usize,
+        output_index: usize,
+    },
     /// A transaction exceeds the maximum allowed size.
     TxTooLarge { tx_index: usize, size: usize },
     /// Block payload exceeds the maximum allowed size.
@@ -120,6 +130,18 @@ impl fmt::Display for BlockValidationError {
                     f,
                     "block has {count} transactions, limit is {MAX_TXS_PER_BLOCK}"
                 )
+            }
+            BlockValidationError::BadStealthOutput {
+                tx_index,
+                output_index,
+            } => {
+                write!(f, "tx {tx_index} output {output_index} is a v0x03 stealth output missing its stealth extension")
+            }
+            BlockValidationError::BadStealthMismatch {
+                tx_index,
+                output_index,
+            } => {
+                write!(f, "tx {tx_index} output {output_index} has a stealth extension but its owner is not a v0x03 address")
             }
         }
     }
@@ -188,6 +210,21 @@ fn validate_tx_structure(index: usize, tx: &Transaction) -> Result<(), BlockVali
         sum = sum
             .checked_add(output.value)
             .ok_or(BlockValidationError::ValueOverflow { tx_index: index })?;
+
+        // RFC-003 stealth structural checks (v0x03 outputs).
+        if output.owner.is_stealth() {
+            if output.stealth.is_none() {
+                return Err(BlockValidationError::BadStealthOutput {
+                    tx_index: index,
+                    output_index: j,
+                });
+            }
+        } else if output.stealth.is_some() {
+            return Err(BlockValidationError::BadStealthMismatch {
+                tx_index: index,
+                output_index: j,
+            });
+        }
     }
 
     Ok(())

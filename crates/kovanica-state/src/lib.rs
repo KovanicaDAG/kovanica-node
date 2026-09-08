@@ -72,6 +72,7 @@
 pub mod keys;
 pub mod ledger;
 pub mod multisig;
+pub mod script_v2;
 pub mod spv;
 pub mod stake;
 pub mod store;
@@ -79,7 +80,7 @@ pub mod tx;
 pub mod utxo;
 pub mod validation;
 
-pub use keys::{verify, Address, KeyPair};
+pub use keys::{verify, verify_pk, Address, KeyPair, StealthAddress};
 pub use ledger::{
     apply_block, apply_dag, BlockSummary, HalvingSchedule, HybridConfig, Ledger,
     LedgerCheckpointError, LedgerError, LedgerInsertError, LedgerRun, LedgerSnapshotError,
@@ -91,8 +92,8 @@ pub use spv::{
 };
 pub use store::{LedgerStore, StoreError};
 pub use tx::{
-    decode_block_payload, encode_block_payload, AssetId, DecodeError, OutPoint, Sig, Transaction,
-    TxId, TxInput, TxOutput,
+    decode_block_payload, encode_block_payload, AssetId, DecodeError, OutPoint, Sig, StealthExt,
+    Transaction, TxId, TxInput, TxOutput,
 };
 pub use utxo::UtxoSet;
 pub use validation::{

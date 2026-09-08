@@ -116,6 +116,18 @@ pub struct Block {
     /// VRF output: 32 bytes of verifiable randomness derived from the proof.
     /// Used for leader eligibility (e.g., `output < threshold` means eligible)
     /// and as a randomness beacon.
+    ///
+    /// In the snapshot/log wire format (version 6+), the three VRF fields are
+    /// encoded **independently**: `has_vrf` flag, then `vrf_public_key` (always
+    /// present when `has_vrf = 1`), then a **proof flag** (1 byte: 0 = absent,
+    /// 1 = 96-byte proof follows), then an **output flag** (1 byte: 0 = absent,
+    /// 1 = 32-byte output follows). This lets a block carry a proof without
+    /// committing the output (self-verification / block production without
+    /// publishing the draw) and vice-versa. Snapshot version **6** is required to
+    /// read this independent-field encoding; version 5 and earlier use the older
+    /// "all three present together" encoding and are decoded unchanged — a v6
+    /// writer never produces a v5 wire form, and a v5 reader rejects v6 snapshots
+    /// as `UnsupportedVersion`.
     vrf_output: Option<VrfOutput>,
     /// Opaque application payload; not interpreted by consensus.
     /// `None` indicates the payload has been pruned.
@@ -315,6 +327,13 @@ impl Block {
 
     /// Compute the BLAKE3 id from the block's current fields.
     /// Used at creation time and when nonce changes (mining).
+    ///
+    /// The VRF fields are hashed **independently** (matching the v6+ snapshot
+    /// wire format): `has_vrf` flag, then if set `vrf_public_key`, then a
+    /// `proof` flag (present only when `vrf_proof` is Some), then an `output`
+    /// flag (present only when `vrf_output` is Some). This ensures that a block
+    /// with a proof but no output hashes identically to its v6 wire encoding
+    /// (proof_flag=1, output_flag=0).
     fn compute_id(&self) -> BlockId {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&(self.parents.len() as u64).to_le_bytes());
@@ -324,18 +343,22 @@ impl Block {
         hasher.update(&self.work.to_le_bytes());
         hasher.update(&self.timestamp_ms.to_le_bytes());
         hasher.update(&self.nonce.to_le_bytes());
-        // VRF fields (included in id for blocks that have them)
+        // VRF fields (included in id for blocks that have them), hashed
+        // independently to match the v6 wire encoding.
+        let has_vrf = self.vrf_public_key.is_some();
+        hasher.update(&[if has_vrf { 1u8 } else { 0u8 }]);
         if let Some(pk) = &self.vrf_public_key {
-            hasher.update(&[1u8]); // has_vrf flag
             hasher.update(pk.as_bytes());
-        } else {
-            hasher.update(&[0u8]);
-        }
-        if let Some(proof) = &self.vrf_proof {
-            hasher.update(&proof.to_bytes());
-        }
-        if let Some(output) = &self.vrf_output {
-            hasher.update(output.as_bytes());
+            let has_proof = self.vrf_proof.is_some();
+            hasher.update(&[if has_proof { 1u8 } else { 0u8 }]);
+            if has_proof {
+                hasher.update(&self.vrf_proof.as_ref().unwrap().to_bytes());
+            }
+            let has_output = self.vrf_output.is_some();
+            hasher.update(&[if has_output { 1u8 } else { 0u8 }]);
+            if has_output {
+                hasher.update(self.vrf_output.as_ref().unwrap().as_bytes());
+            }
         }
         let payload = self.payload.as_deref().unwrap_or(&[]);
         hasher.update(&(payload.len() as u64).to_le_bytes());
@@ -377,13 +400,26 @@ impl Block {
     /// `kovanica_dag::encode_block`), used for skipping during checkpoint decode.
     pub fn encoded_len(&self) -> usize {
         // id (32) + parents.len() (8) + each parent (32) + work (16) + timestamp (8) + nonce (8) +
-        // vrf_has_flag (1) + [vrf_pk (32) + vrf_proof (96) + vrf_output (32)] if has_vrf + payload.len (8) + payload
-        let mut len = 32 + 8 + self.parents.len() * 32 + 16 + 8 + 8 + 1;
-        if self.vrf_public_key.is_some() {
-            len += 32 + 96 + 32; // pk + proof + output
-        }
-        len += 8 + self.payload.as_deref().unwrap_or(&[]).len();
-        len
+        // has_vrf flag (1) + [vrf_pk (32) + proof_flag (1) + [proof (96) if present] +
+        //                      output_flag (1) + [output (32) if present]] if has_vrf +
+        // payload.len (8) + payload
+        let vrf_len: usize = if self.vrf_public_key.is_some() {
+            32 + 1
+                + if self.vrf_proof.is_some() { 96 } else { 0 }
+                + 1
+                + if self.vrf_output.is_some() { 32 } else { 0 }
+        } else {
+            0
+        };
+        32 + 8
+            + (self.parents.len() * 32)
+            + 16
+            + 8
+            + 8
+            + 1
+            + vrf_len
+            + 8
+            + self.payload.as_deref().unwrap_or(&[]).len()
     }
 }
 
@@ -434,7 +470,7 @@ mod tests {
     fn pruned_block_has_empty_payload() {
         let b = Block::new_pruned(vec![], 1, 0, 0, BlockId([0; 32]));
         assert!(b.is_pruned());
-        assert_eq!(b.payload(), &[]);
+        assert_eq!(b.payload(), b"");
         assert_eq!(b.payload().len(), 0);
     }
 
@@ -455,6 +491,6 @@ mod tests {
         assert!(!b.is_pruned());
         b.prune_payload();
         assert!(b.is_pruned());
-        assert_eq!(b.payload(), &[]);
+        assert_eq!(b.payload(), b"");
     }
 }

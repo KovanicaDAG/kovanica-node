@@ -646,10 +646,21 @@ public protocol LightNodeProtocol: AnyObject, Sendable {
     func balanceOfAsset(address: String, assetIdHex: String?) throws  -> String
     
     /**
+     * Spendable balance of a **script v2** address (the BLAKE3 digest of
+     * `script_hex`) in atoms.
+     */
+    func balanceOfScript(scriptHex: String) throws  -> UInt64
+    
+    /**
      * Spendable balance of actor `seed` in atoms, as a decimal string
      * (balances are u128; strings avoid FFI integer truncation).
      */
     func balanceOfSeed(seed: UInt64) throws  -> String
+    
+    /**
+     * Spendable balance of a **stealth address** (130-hex, version 0x03) in atoms.
+     */
+    func balanceOfStealth(stealthAddressHex: String) throws  -> UInt64
     
     /**
      * Summary of one block by lowercase-hex id.
@@ -868,6 +879,24 @@ public protocol LightNodeProtocol: AnyObject, Sendable {
     func sendFromAsset(signingSecretHex: String, amount: UInt64, toAddress: String, assetIdHex: String?) throws  -> SendReceipt
     
     /**
+     * Send `amount` to a **script v2** address (the BLAKE3 digest of `script_hex`)
+     * using an imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase
+     * hex). The script is hashed into a `v0x02` address; the script itself is
+     * revealed at spend time (see RFC-003 / 3B).
+     */
+    func sendToScriptV2(signingSecretHex: String, amount: UInt64, scriptHex: String) throws  -> String
+    
+    /**
+     * Send `amount` to a **stealth address** (130-hex, version 0x03) using an
+     * imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase hex).
+     *
+     * The one-time output is derived deterministically by the node (see
+     * [`Node::send_to_stealth`]); production wallets should prefer supplying
+     * their own random `r` for unlinkability.
+     */
+    func sendToStealth(signingSecretHex: String, amount: UInt64, stealthAddressHex: String) throws  -> String
+    
+    /**
      * Receive the per-block subsidy coinbase on produced blocks under this
      * actor seed.
      */
@@ -1055,6 +1084,20 @@ open func balanceOfAsset(address: String, assetIdHex: String?)throws  -> String 
 }
     
     /**
+     * Spendable balance of a **script v2** address (the BLAKE3 digest of
+     * `script_hex`) in atoms.
+     */
+open func balanceOfScript(scriptHex: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_balance_of_script(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(scriptHex),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Spendable balance of actor `seed` in atoms, as a decimal string
      * (balances are u128; strings avoid FFI integer truncation).
      */
@@ -1064,6 +1107,19 @@ open func balanceOfSeed(seed: UInt64)throws  -> String  {
     uniffi_kovanica_ffi_fn_method_lightnode_balance_of_seed(
             self.uniffiCloneHandle(),
         FfiConverterUInt64.lower(seed),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Spendable balance of a **stealth address** (130-hex, version 0x03) in atoms.
+     */
+open func balanceOfStealth(stealthAddressHex: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_balance_of_stealth(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(stealthAddressHex),uniffiCallStatus
     )
 })
 }
@@ -1553,6 +1609,44 @@ open func sendFromAsset(signingSecretHex: String, amount: UInt64, toAddress: Str
         FfiConverterUInt64.lower(amount),
         FfiConverterString.lower(toAddress),
         FfiConverterOptionString.lower(assetIdHex),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Send `amount` to a **script v2** address (the BLAKE3 digest of `script_hex`)
+     * using an imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase
+     * hex). The script is hashed into a `v0x02` address; the script itself is
+     * revealed at spend time (see RFC-003 / 3B).
+     */
+open func sendToScriptV2(signingSecretHex: String, amount: UInt64, scriptHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_send_to_script_v2(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(signingSecretHex),
+        FfiConverterUInt64.lower(amount),
+        FfiConverterString.lower(scriptHex),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Send `amount` to a **stealth address** (130-hex, version 0x03) using an
+     * imported 32-byte Ed25519 secret (hex). Returns the tx id (lowercase hex).
+     *
+     * The one-time output is derived deterministically by the node (see
+     * [`Node::send_to_stealth`]); production wallets should prefer supplying
+     * their own random `r` for unlinkability.
+     */
+open func sendToStealth(signingSecretHex: String, amount: UInt64, stealthAddressHex: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeLightNodeError_lift) {
+        uniffiCallStatus in
+    uniffi_kovanica_ffi_fn_method_lightnode_send_to_stealth(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(signingSecretHex),
+        FfiConverterUInt64.lower(amount),
+        FfiConverterString.lower(stealthAddressHex),uniffiCallStatus
     )
 })
 }
@@ -2895,7 +2989,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_asset() != 41422) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_script() != 46559) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_seed() != 2697) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_balance_of_stealth() != 17890) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_block_by_id() != 61413) {
@@ -2995,6 +3095,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_send_from_asset() != 15040) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_send_to_script_v2() != 10937) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_kovanica_ffi_checksum_method_lightnode_send_to_stealth() != 19173) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_kovanica_ffi_checksum_method_lightnode_set_miner_seed() != 15947) {

@@ -70,8 +70,9 @@ use kovanica_dag::{
     decode_snapshot, Block, BlockId, BlockPreview, Dag, DagError, KParam, Retarget, SnapshotError,
 };
 
-use crate::keys::{verify, Address};
+use crate::keys::{verify, verify_pk, Address};
 use crate::multisig::{verify_threshold_signatures, MultisigScript};
+use crate::script_v2::ScriptV2;
 use crate::stake::{
     is_unbond_tag, parse_bond_tag, Freeze, StakeError, StakeState, UNBOND_MATURITY,
 };
@@ -82,6 +83,12 @@ pub const MULTISIG_ACTIVATION_SCORE: u64 = 0;
 
 /// Default blue-score threshold for RFC-002 native token activation.
 pub const NATIVE_TOKEN_ACTIVATION_SCORE: u64 = 0;
+
+/// Default blue-score threshold for RFC-003 stealth address activation.
+pub const STEALTH_ACTIVATION_SCORE: u64 = 0;
+
+/// Default blue-score threshold for RFC-003 script v2 activation.
+pub const SCRIPT_V2_ACTIVATION_SCORE: u64 = 0;
 
 /// Halving schedule for block subsidy.
 ///
@@ -264,6 +271,18 @@ pub enum LedgerError {
         blue_score: u64,
         activation_score: u64,
     },
+    /// Stealth address transaction submitted prior to consensus activation blue score
+    PreActivationStealth {
+        tx: TxId,
+        blue_score: u64,
+        activation_score: u64,
+    },
+    /// Script v2 transaction submitted prior to consensus activation blue score
+    PreActivationScriptV2 {
+        tx: TxId,
+        blue_score: u64,
+        activation_score: u64,
+    },
 }
 
 impl core::fmt::Display for LedgerError {
@@ -354,6 +373,22 @@ impl core::fmt::Display for LedgerError {
                 f,
                 "native token tx {tx} rejected before activation: blue score {blue_score} <= activation {activation_score}"
             ),
+            LedgerError::PreActivationStealth {
+                tx,
+                blue_score,
+                activation_score,
+            } => write!(
+                f,
+                "stealth tx {tx} rejected before activation: blue score {blue_score} <= activation {activation_score}"
+            ),
+            LedgerError::PreActivationScriptV2 {
+                tx,
+                blue_score,
+                activation_score,
+            } => write!(
+                f,
+                "script v2 tx {tx} rejected before activation: blue score {blue_score} <= activation {activation_score}"
+            ),
         }
     }
 }
@@ -402,6 +437,8 @@ pub fn apply_block(
         u64::MAX,
         MULTISIG_ACTIVATION_SCORE,
         NATIVE_TOKEN_ACTIVATION_SCORE,
+        STEALTH_ACTIVATION_SCORE,
+        SCRIPT_V2_ACTIVATION_SCORE,
     )
 }
 
@@ -432,6 +469,8 @@ pub fn apply_block_with_stake(
         u64::MAX,
         MULTISIG_ACTIVATION_SCORE,
         NATIVE_TOKEN_ACTIVATION_SCORE,
+        STEALTH_ACTIVATION_SCORE,
+        SCRIPT_V2_ACTIVATION_SCORE,
     )
 }
 
@@ -448,6 +487,8 @@ fn apply_block_inner(
     blue_score: u64,
     multisig_activation_score: u64,
     native_token_activation_score: u64,
+    stealth_activation_score: u64,
+    script_v2_activation_score: u64,
 ) -> Result<BlockSummary, LedgerError> {
     // Stage all changes on a copy; only commit if the whole block validates, so
     // a rejected block has no effect (atomicity).
@@ -472,6 +513,8 @@ fn apply_block_inner(
             blue_score,
             multisig_activation_score,
             native_token_activation_score,
+            stealth_activation_score,
+            script_v2_activation_score,
         )?;
         total_fees = total_fees
             .checked_add(fee)
@@ -489,6 +532,8 @@ fn apply_block_inner(
             blue_score,
             multisig_activation_score,
             native_token_activation_score,
+            stealth_activation_score,
+            script_v2_activation_score,
         )?,
         None => 0,
     };
@@ -504,6 +549,7 @@ fn apply_block_inner(
 ///
 /// When `stake` is present the transaction must also satisfy the registry
 /// rules (see [`apply_block_with_stake`]); bond/unbond transactions update it.
+#[allow(clippy::too_many_arguments)] // consensus-critical; argument count is intentional
 fn apply_regular(
     staging: &mut UtxoSet,
     tx: &Transaction,
@@ -512,6 +558,8 @@ fn apply_regular(
     blue_score: u64,
     multisig_activation_score: u64,
     native_token_activation_score: u64,
+    stealth_activation_score: u64,
+    script_v2_activation_score: u64,
 ) -> Result<u64, LedgerError> {
     if tx.inputs().is_empty() || tx.outputs().is_empty() {
         return Err(LedgerError::EmptyTransaction(tx.id()));
@@ -538,6 +586,32 @@ fn apply_regular(
                     tx: tx.id(),
                     blue_score,
                     activation_score: native_token_activation_score,
+                });
+            }
+        }
+    }
+
+    // RFC-003 stealth pre-activation gating on outputs:
+    if blue_score <= stealth_activation_score {
+        for output in tx.outputs() {
+            if output.owner.is_stealth() {
+                return Err(LedgerError::PreActivationStealth {
+                    tx: tx.id(),
+                    blue_score,
+                    activation_score: stealth_activation_score,
+                });
+            }
+        }
+    }
+
+    // RFC-003 script v2 pre-activation gating on outputs:
+    if blue_score <= script_v2_activation_score {
+        for output in tx.outputs() {
+            if output.owner.is_script_v2() {
+                return Err(LedgerError::PreActivationScriptV2 {
+                    tx: tx.id(),
+                    blue_score,
+                    activation_score: script_v2_activation_score,
                 });
             }
         }
@@ -581,6 +655,24 @@ fn apply_regular(
                 tx: tx.id(),
                 blue_score,
                 activation_score: native_token_activation_score,
+            });
+        }
+
+        // RFC-003 stealth pre-activation gating on spends:
+        if blue_score <= stealth_activation_score && prev.owner.is_stealth() {
+            return Err(LedgerError::PreActivationStealth {
+                tx: tx.id(),
+                blue_score,
+                activation_score: stealth_activation_score,
+            });
+        }
+
+        // RFC-003 script v2 pre-activation gating on spends:
+        if blue_score <= script_v2_activation_score && prev.owner.is_script_v2() {
+            return Err(LedgerError::PreActivationScriptV2 {
+                tx: tx.id(),
+                blue_score,
+                activation_score: script_v2_activation_score,
             });
         }
 
@@ -672,6 +764,74 @@ fn apply_regular(
                     }
                 }
             })?;
+        } else if prev.owner.is_script_v2() {
+            // Pay-to-Script-V2 (RFC-003): witness[0] = script bytes; BLAKE3(script)
+            // must match the owner's script hash; the script then executes against
+            // the remaining witness elements with lock-time/sequence context.
+            if input.witness.is_empty() {
+                return Err(LedgerError::InvalidWitnessCount {
+                    tx: tx.id(),
+                    input: i,
+                    expected: 1,
+                    actual: 0,
+                });
+            }
+            let script_bytes = &input.witness[0];
+            let script_hash = *blake3::hash(script_bytes).as_bytes();
+            if script_hash != *prev.owner.payload() {
+                return Err(LedgerError::ScriptHashMismatch {
+                    tx: tx.id(),
+                    input: i,
+                });
+            }
+            let script =
+                ScriptV2::new(script_bytes).map_err(|_| LedgerError::InvalidRedeemScript {
+                    tx: tx.id(),
+                    input: i,
+                    reason: "script v2 parse failed",
+                })?;
+            let ok = script
+                .execute(
+                    &sighash,
+                    &input.witness[1..],
+                    tx.n_lock_time(),
+                    tx.sequence(),
+                )
+                .map_err(|_| LedgerError::BadSignature {
+                    tx: tx.id(),
+                    input: i,
+                })?;
+            if !ok {
+                return Err(LedgerError::BadSignature {
+                    tx: tx.id(),
+                    input: i,
+                });
+            }
+        } else if prev.owner.is_stealth() {
+            // Stealth address (RFC-003): witness is exactly one 64-byte signature
+            // over the sighash, verified against the output's one-time pubkey P.
+            if input.witness.len() != 1 {
+                return Err(LedgerError::InvalidWitnessCount {
+                    tx: tx.id(),
+                    input: i,
+                    expected: 1,
+                    actual: input.witness.len(),
+                });
+            }
+            let sig_bytes: [u8; 64] = input.witness[0].as_slice().try_into().map_err(|_| {
+                LedgerError::BadSignatureSize {
+                    tx: tx.id(),
+                    input: i,
+                    len: input.witness[0].len(),
+                }
+            })?;
+            let stealth = prev.stealth_or_default();
+            if !verify_pk(&stealth.p, &sighash, &sig_bytes) {
+                return Err(LedgerError::BadSignature {
+                    tx: tx.id(),
+                    input: i,
+                });
+            }
         } else {
             return Err(LedgerError::BadSignature {
                 tx: tx.id(),
@@ -819,6 +979,7 @@ fn apply_regular(
 }
 
 /// Validate and apply a coinbase transaction, returning the value minted.
+#[allow(clippy::too_many_arguments)] // consensus-critical; argument count is intentional
 fn apply_coinbase(
     staging: &mut UtxoSet,
     cb: &Transaction,
@@ -826,6 +987,8 @@ fn apply_coinbase(
     blue_score: u64,
     activation_score: u64,
     _native_token_activation_score: u64,
+    _stealth_activation_score: u64,
+    _script_v2_activation_score: u64,
 ) -> Result<u64, LedgerError> {
     if blue_score <= activation_score {
         for output in cb.outputs() {
@@ -914,6 +1077,8 @@ pub fn apply_dag(dag: &Dag, subsidy: u64) -> LedgerRun {
                 blue_score,
                 MULTISIG_ACTIVATION_SCORE,
                 NATIVE_TOKEN_ACTIVATION_SCORE,
+                STEALTH_ACTIVATION_SCORE,
+                SCRIPT_V2_ACTIVATION_SCORE,
             ) {
                 Ok(_) => run.accepted.push(id),
                 Err(e) => run.rejected.push((id, e)),
@@ -1288,6 +1453,10 @@ pub struct Ledger {
     multisig_activation_score: u64,
     /// Blue score activation threshold for native token transactions.
     native_token_activation_score: u64,
+    /// Blue score activation threshold for RFC-003 stealth address transactions.
+    stealth_activation_score: u64,
+    /// Blue score activation threshold for RFC-003 script v2 transactions.
+    script_v2_activation_score: u64,
 }
 
 impl Ledger {
@@ -1334,6 +1503,8 @@ impl Ledger {
             heights,
             multisig_activation_score: MULTISIG_ACTIVATION_SCORE,
             native_token_activation_score: NATIVE_TOKEN_ACTIVATION_SCORE,
+            stealth_activation_score: STEALTH_ACTIVATION_SCORE,
+            script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
         })
     }
 
@@ -1355,6 +1526,26 @@ impl Ledger {
     /// The blue-score activation threshold for native token transactions.
     pub fn native_token_activation_score(&self) -> u64 {
         self.native_token_activation_score
+    }
+
+    /// Set the blue-score activation threshold for RFC-003 stealth address transactions.
+    pub fn set_stealth_activation_score(&mut self, score: u64) {
+        self.stealth_activation_score = score;
+    }
+
+    /// The blue-score activation threshold for RFC-003 stealth address transactions.
+    pub fn stealth_activation_score(&self) -> u64 {
+        self.stealth_activation_score
+    }
+
+    /// Set the blue-score activation threshold for RFC-003 script v2 transactions.
+    pub fn set_script_v2_activation_score(&mut self, score: u64) {
+        self.script_v2_activation_score = score;
+    }
+
+    /// The blue-score activation threshold for RFC-003 script v2 transactions.
+    pub fn script_v2_activation_score(&self) -> u64 {
+        self.script_v2_activation_score
     }
 
     /// Like [`Ledger::new`], but with a finite finality depth: blocks more than
@@ -1820,6 +2011,8 @@ impl Ledger {
                     merged_blue_score,
                     self.multisig_activation_score,
                     self.native_token_activation_score,
+                    self.stealth_activation_score,
+                    self.script_v2_activation_score,
                 );
             }
         }
@@ -1835,6 +2028,8 @@ impl Ledger {
             block_blue_score,
             self.multisig_activation_score,
             self.native_token_activation_score,
+            self.stealth_activation_score,
+            self.script_v2_activation_score,
         )?;
 
         // Commit: add to the DAG (structural checks run here), then store the
@@ -2279,7 +2474,7 @@ impl Ledger {
             return Err(LedgerCheckpointError::UnexpectedEof);
         }
         let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-        // Accept v3 (stake registry) and v4 (asset_id in UTXO)
+        // Accept v3 (stake registry), v4 (asset_id in UTXO), and v5 (stealth ext)
         if !(3..=CHECKPOINT_VERSION).contains(&version) {
             return Err(LedgerCheckpointError::UnsupportedVersion(version));
         }
@@ -2387,6 +2582,8 @@ impl Ledger {
             heights: HashMap::new(),
             multisig_activation_score: MULTISIG_ACTIVATION_SCORE,
             native_token_activation_score: NATIVE_TOKEN_ACTIVATION_SCORE,
+            stealth_activation_score: STEALTH_ACTIVATION_SCORE,
+            script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
         };
         ledger.deltas.insert(checkpoint_id, checkpoint_delta);
         ledger
@@ -2466,18 +2663,34 @@ fn decode_checkpoint_block(bytes: &[u8]) -> Result<(Block, usize), LedgerCheckpo
     let timestamp_ms = reader.read_u64()?;
     let nonce = reader.read_u64()?;
 
-    // VRF fields (v5+)
+    // VRF fields (v6+ independent encoding, matching kovanica_dag::encode_block):
+    // has_vrf flag, then if set: vrf_public_key (32B, always present), then a
+    // proof_flag (1B: 0 = absent, 1 = 96-byte proof follows), then an output_flag
+    // (1B: 0 = absent, 1 = 32-byte output follows). A block may carry a proof
+    // without an output and vice-versa.
     let has_vrf = reader.read_u8()?;
     let (vrf_public_key, vrf_proof, vrf_output) = if has_vrf == 1 {
         let pk_bytes: [u8; 32] = reader.read_array::<32>()?;
         let pk = kovanica_dag::VrfPublicKey::from_bytes(&pk_bytes)
             .map_err(|_| LedgerCheckpointError::UnexpectedEof)?;
-        let proof_bytes: [u8; 96] = reader.read_array::<96>()?;
-        let proof = kovanica_dag::VrfProof::from_bytes(&proof_bytes)
-            .map_err(|_| LedgerCheckpointError::UnexpectedEof)?;
-        let output_bytes: [u8; 32] = reader.read_array::<32>()?;
-        let output = kovanica_dag::VrfOutput::from_bytes(output_bytes);
-        (Some(pk), Some(proof), Some(output))
+        let has_proof = reader.read_u8()?;
+        let proof = if has_proof == 1 {
+            let proof_bytes: [u8; 96] = reader.read_array::<96>()?;
+            Some(
+                kovanica_dag::VrfProof::from_bytes(&proof_bytes)
+                    .map_err(|_| LedgerCheckpointError::UnexpectedEof)?,
+            )
+        } else {
+            None
+        };
+        let has_output = reader.read_u8()?;
+        let output = if has_output == 1 {
+            let output_bytes: [u8; 32] = reader.read_array::<32>()?;
+            Some(kovanica_dag::VrfOutput::from_bytes(output_bytes))
+        } else {
+            None
+        };
+        (Some(pk), proof, output)
     } else {
         (None, None, None)
     };
@@ -2502,6 +2715,8 @@ fn decode_checkpoint_block(bytes: &[u8]) -> Result<(Block, usize), LedgerCheckpo
     }
     let payload = reader.read_bytes(payload_len)?;
     let block = if let Some(pk) = vrf_public_key {
+        // Non-pruned blocks carry all three VRF fields (matching the snapshot
+        // reader's v6 handling); the pruned path above accepts partial fields.
         Block::new_with_vrf(
             parents,
             work,
@@ -2576,8 +2791,10 @@ impl<'a> CheckpointReader<'a> {
 const CHECKPOINT_MAGIC: [u8; 4] = *b"KVCP";
 /// Checkpoint format version. v2 adds checkpoint block height; v3 adds the
 /// length-prefixed stake registry of the checkpoint block's view; v4 adds
-/// optional asset_id to UTXO encoding.
-const CHECKPOINT_VERSION: u16 = 4;
+/// optional asset_id to UTXO encoding; v5 adds the optional stealth extension
+/// (R + view_tag + P) to UTXO encoding so stealth outputs survive a checkpoint
+/// round-trip.
+const CHECKPOINT_VERSION: u16 = 5;
 
 /// Why a ledger checkpoint could not be encoded or decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
