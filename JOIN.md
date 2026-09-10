@@ -1,4 +1,4 @@
-# Join kovanica-testnet-1
+# Join kovanica-testnet
 
 Public seed: **`seed.kovanica.online:9000`** (TCP only, grey-cloud DNS).  
 HTTP explorer: https://explorer.kovanica.online  

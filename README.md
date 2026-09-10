@@ -8,7 +8,7 @@ GHOSTDAG BlockDAG + UTXO ledger (Ed25519). Native token **KVNC** (8 decimals).
 | --- | --- |
 | Explorer | https://explorer.kovanica.online |
 | Wallet | https://wallet.kovanica.online |
-| Network | `kovanica-testnet-1` |
+| Network | `kovanica-testnet` |
 | P2P | TCP **9000** only (no libp2p) |
 | Bootstrap | `seed.kovanica.online:9000` |
 
