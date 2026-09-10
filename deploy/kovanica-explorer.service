@@ -1,0 +1,19 @@
+[Unit]
+Description=KovanicaDAG node (HTTP explorer)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/kovanica-node
+ExecStart=/opt/kovanica-node/target/release/kovanica-node explorer 127.0.0.1:8080
+Restart=on-failure
+RestartSec=2
+Environment=KOVANICA_POW=1
+Environment=KOVANICA_MINE=0
+Environment=KOVANICA_FAUCET=0
+Environment=KOVANICA_ALLOW_RESET=0
+Environment=KOVANICA_OPERATOR=0
+Environment=KOVANICA_LISTEN=0.0.0.0:9000
+
+[Install]
+WantedBy=multi-user.target

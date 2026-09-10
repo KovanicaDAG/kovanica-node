@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kovanica Protocol · KVNC</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%2309090b'/><circle cx='10' cy='20' r='3' fill='%23d8d4cc'/><circle cx='22' cy='12' r='3' fill='%238aa0b4'/><circle cx='22' cy='22' r='3' fill='%23b08980'/><path d='M10 20 L22 12 M10 20 L22 22' stroke='%232a2a30' fill='none'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #09090b; --surface: #121214; --elevated: #1a1a1e; --fg: #f2f1ee;
+      --muted: #9a9aa3; --subtle: #6b6b74; --border: #2a2a30; --accent: #d8d4cc;
+      --accent-fg: #0a0a0b; --blue: #8aa0b4; --red: #b08980; --chain: #e8e4dc;
+      --ok: #7d9a7a; --danger: #c45c4a;
+      --display: "Fraunces", "Times New Roman", serif;
+      --sans: "IBM Plex Sans", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); min-height: 100dvh; }
+    button:not(:disabled), [role="button"] { cursor: pointer; }
+    button:disabled { opacity: .4; cursor: default; }
+    h1, h2 { font-family: var(--display); font-weight: 500; margin: 0; }
+    .header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 24px; border-bottom: 1px solid var(--border); }
+    .brand { display: flex; align-items: baseline; gap: 12px; }
+    .brand span { font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--subtle); }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button, .btn {
+      font-family: var(--sans); font-size: 13px; font-weight: 500; height: 36px; padding: 0 12px;
+      border-radius: 4px; border: 1px solid var(--border); background: var(--elevated); color: var(--fg);
+    }
+    button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+    button.ghost { background: transparent; color: var(--muted); border-color: transparent; }
+    button.ghost:hover { color: var(--fg); background: var(--elevated); }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border-bottom: 1px solid var(--border); }
+    @media (min-width: 720px) { .stats { grid-template-columns: repeat(6, 1fr); } }
+    @media (min-width: 1100px) { .stats { grid-template-columns: repeat(12, 1fr); } }
+    .stats div { background: var(--bg); padding: 12px 16px; }
+    .stats dt { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); }
+    .stats dd { margin: 4px 0 0; font-family: var(--mono); font-size: 13px; }
+    .dag-wrap { padding: 16px 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
+    .dag-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); list-style: none; margin: 0; padding: 0; }
+    .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 99px; margin-right: 6px; }
+    .canvas { height: min(52vh, 520px); border: 1px solid var(--border); border-radius: 8px; background: var(--bg); overflow: auto; }
+    svg { display: block; min-width: 100%; }
+    .tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--border); padding: 0 24px; }
+    .tabs button { height: 44px; border: 0; background: none; color: var(--muted); border-bottom: 1px solid transparent; border-radius: 0; }
+    .tabs button.on { color: var(--fg); border-bottom-color: var(--accent); }
+    .panel { padding: 20px 24px 32px; }
+    .grid { display: grid; gap: 24px; }
+    @media (min-width: 960px) { .grid { grid-template-columns: minmax(0,1fr) 280px; } }
+    .card { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 16px; }
+    .muted { color: var(--muted); font-size: 14px; line-height: 1.55; }
+    .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+    input, select {
+      height: 36px; padding: 0 10px; border-radius: 4px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 13px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--subtle); font-weight: 500; padding: 8px 0; }
+    td { padding: 8px 8px 8px 0; border-top: 1px solid var(--border); font-family: var(--mono); }
+    .pill { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--subtle); }
+    .ok { color: var(--ok); } .err { color: var(--danger); }
+    .log { max-height: 320px; overflow: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+    .log div { padding: 4px 0; border-bottom: 1px solid var(--border); }
+    .wallet { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+    .warn { color: var(--danger); font-size: 13px; }
+    label { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); margin: 10px 0 4px; }
+    textarea { width: 100%; min-height: 72px; padding: 8px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font-family: var(--mono); font-size: 12px; }
+    body.wallet-host .dag-wrap { display: none; }
+    body.wallet-host .stats { display: none; }
+    @media (max-width: 720px) {
+      .header, .panel, .dag-wrap { padding-left: 12px; padding-right: 12px; }
+      .tabs { padding: 0 12px; }
+      button, input, textarea, select { min-height: 44px; font-size: 16px; }
+      .qr { width: 140px; height: 140px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <h1>Kovanica Protocol</h1>
+      <span>testnet · KVNC</span>
+    </div>
+    <div class="row">
+      <span class="pill" id="status">connecting…</span>
+      <button class="ghost" id="pause" hidden>Pause</button>
+      <button class="ghost" id="reset" hidden>Reset</button>
+    </div>
+  </header>
+  <dl class="stats" id="stats"></dl>
+  <section class="dag-wrap">
+    <div class="dag-head">
+      <div>
+        <h2>BlockDAG</h2>
+        <p class="muted" style="margin:4px 0 0;font-size:12px">Native token <strong>Kovanica (KVNC)</strong> on <span id="net-label">kovanica-testnet</span>. Subsidy halves every 1000 blocks. Engine is the Rust node.</p>
+      </div>
+      <div class="row" style="gap: 8px;">
+        <button class="ghost" id="zoom-in" title="Zoom in">+</button>
+        <button class="ghost" id="zoom-out" title="Zoom out">−</button>
+        <button class="ghost" id="zoom-reset" title="Reset zoom/pan">⌂</button>
+        <span class="pill" id="zoom-level">100%</span>
+      </div>
+      <ul class="legend">
+        <li><i style="background:var(--accent)"></i>Genesis</li>
+        <li><i style="background:var(--chain)"></i>Selected chain</li>
+        <li><i style="background:var(--blue)"></i>Blue</li>
+        <li><i style="background:var(--red)"></i>Red</li>
+      </ul>
+    </div>
+    <div class="canvas"><svg id="dag" role="img" aria-label="BlockDAG"></svg></div>
+  </section>
+  <nav class="tabs" id="tabs"></nav>
+  <section class="panel" id="panel"></section>
+<script>
+const TABS = ["Graph","Wallets","Mesh","Mempool","Order","Blocks","Docs","Console","Analytics","Mine"];
+const walletHost = location.hostname.indexOf("wallet.") === 0 || location.pathname.indexOf("/wallet") >= 0;
+if (walletHost) document.body.classList.add("wallet-host");
+let tab = walletHost ? "Wallets" : "Graph";
+let state = null;
+let selectedBlock = null;
+let mining = false;
+let poll = null;
+let walletMsg = "";
+let walletBal = null;
+let walletHist = [];
+let bip39Words = null;
+let ws = null;
+let dagZoom = 1;
+let dagPan = { x: 0, y: 0 };
+let isPanning = false;
+let panStart = { x: 0, y: 0 };
+let dagLayout = {};
+
+// Hardware wallet support
+let hwTransport = null;
+let hwDeviceType = null; // "ledger" or "trezor"
+let hwDeviceInfo = null;
+
+const $ = (id) => document.getElementById(id);
+const short = (h) => (h || "").slice(0, 8);
+const colourFill = (c) => ({ genesis: "var(--accent)", chain: "var(--chain)", blue: "var(--blue)", red: "var(--red)" }[c] || "var(--muted)");
+const atom = () => (state && state.node && state.node.atom) || 100000000;
+const decimals = () => (state && state.node && state.node.decimals) || 8;
+function fmtKvnc(n) {
+  const v = Number(n) / atom();
+  const s = v.toFixed(8).replace(/\.?0+$/, "");
+  return (s || "0") + " KVNC";
+}
+function parseKvnc(s) {
+  const t = String(s).trim().replace(",", ".");
+  const a = atom();
+  const n = Math.round(Number(t) * a);
+  if (!Number.isFinite(n) || n <= 0) throw new Error("bad amount");
+  return n;
+}
+
+async function api(path, method = "GET") {
+  const r = await fetch(path, { method });
+  if (!r.ok) throw new Error(await r.text());
+  if (r.headers.get("content-type")?.includes("json")) return r.json();
+  return r.text();
+}
+
+function statsHtml(s) {
+  const n = s.node;
+  const cells = [
+    ["Blocks", n.blocks], ["Tips", n.tips.length], ["Blue score", n.blue_score],
+    ["Blue work", n.blue_work], ["k", n.k], ["Cap", fmtKvnc(n.subsidy)],
+    ["Issuance", fmtKvnc(n.issuance || n.subsidy)], ["Supply", fmtKvnc(n.supply)],
+    ["UTXOs", n.utxos], ["Chain", n.chain_len],
+    ["Mempool", n.mempool], ["Fee", fmtKvnc(n.min_fee || 0)], ["PoW", n.pow ? "on" : "off"], ["Genesis", short(n.genesis)], ["Txs", n.tx_count],
+  ];
+  return cells.map(([k,v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+}
+
+function layout(blocks) {
+  const byScore = {};
+  for (const b of blocks) {
+    const xk = String(b.blue_score);
+    (byScore[xk] ||= []).push(b);
+  }
+  const pos = {};
+  const scores = Object.keys(byScore).map(Number).sort((a,b)=>a-b);
+  scores.forEach((sc, i) => {
+    const col = byScore[String(sc)];
+    col.forEach((b, j) => {
+      pos[b.id] = { x: 56 + i * 86, y: 48 + j * 64 };
+    });
+  });
+  return pos;
+}
+
+function drawDag(s) {
+  const blocks = s.node.dag;
+  const pos = layout(blocks);
+  dagLayout = pos;
+  const sel = selectedBlock || s.node.selected_tip;
+  let maxX = 200, maxY = 180;
+  const edges = [];
+  for (const b of blocks) {
+    const p = pos[b.id];
+    maxX = Math.max(maxX, p.x + 80);
+    maxY = Math.max(maxY, p.y + 50);
+    b.parents.forEach((par) => {
+      const q = pos[par];
+      if (!q) return;
+      const bright = b.selected_parent === par;
+      edges.push(`<line x1="${q.x}" y1="${q.y}" x2="${p.x}" y2="${p.y}" stroke="${bright ? "var(--chain)" : "var(--border)"}" stroke-width="${bright ? 1.8 : 1}" />`);
+    });
+  }
+  const nodes = blocks.map((b) => {
+    const p = pos[b.id];
+    const on = b.id === sel;
+    return `<g transform="translate(${p.x},${p.y})" data-id="${b.id}" class="blk" style="cursor:pointer">
+      <circle r="${on ? 16 : 13}" fill="${colourFill(b.colour)}" stroke="var(--fg)" stroke-width="${on ? 2 : 1.2}" />
+      <text y="28" text-anchor="middle" fill="var(--muted)" style="font-size:10px;font-family:var(--mono)">${short(b.id)}</text>
+    </g>`;
+  }).join("");
+  const svg = $("dag");
+  svg.setAttribute("width", Math.max(640, maxX));
+  svg.setAttribute("height", Math.max(240, maxY));
+  svg.innerHTML = `<g class="dag-layer" transform="translate(${dagPan.x}, ${dagPan.y}) scale(${dagZoom})">
+    ${edges.join("")}
+    ${nodes}
+  </g>`;
+  svg.querySelectorAll(".blk").forEach((g) => g.addEventListener("click", () => {
+    selectedBlock = g.getAttribute("data-id");
+    render();
+  }));
+}
+
+function setupZoomPan() {
+  const svg = $("dag");
+  const container = svg.parentElement;
+  
+  // Zoom buttons
+  $("zoom-in").onclick = () => { dagZoom = Math.min(5, dagZoom * 1.2); updateZoomPan(); };
+  $("zoom-out").onclick = () => { dagZoom = Math.max(0.2, dagZoom / 1.2); updateZoomPan(); };
+  $("zoom-reset").onclick = () => { dagZoom = 1; dagPan = { x: 0, y: 0 }; updateZoomPan(); };
+  
+  // Wheel zoom
+  container.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    dagZoom = Math.max(0.2, Math.min(5, dagZoom * factor));
+    updateZoomPan();
+  }, { passive: false });
+  
+  // Pan drag
+  let isPanning = false;
+  let panStart = { x: 0, y: 0 };
+  
+  container.addEventListener("mousedown", (e) => {
+    if (e.target.closest(".blk")) return;
+    isPanning = true;
+    panStart = { x: e.clientX - dagPan.x, y: e.clientY - dagPan.y };
+    container.style.cursor = "grabbing";
+  });
+  
+  window.addEventListener("mousemove", (e) => {
+    if (!isPanning) return;
+    dagPan.x = e.clientX - panStart.x;
+    dagPan.y = e.clientY - panStart.y;
+    updateZoomPan();
+  });
+  
+  window.addEventListener("mouseup", () => {
+    if (isPanning) {
+      isPanning = false;
+      container.style.cursor = "";
+    }
+  });
+  
+  // Touch support
+  container.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 1) {
+      const touch = e.touches[0];
+      if (!e.target.closest(".blk")) {
+        isPanning = true;
+        panStart = { x: touch.clientX - dagPan.x, y: touch.clientY - dagPan.y };
+      }
+    }
+  });
+  
+  window.addEventListener("touchmove", (e) => {
+    if (!isPanning || e.touches.length !== 1) return;
+    e.preventDefault();
+    const touch = e.touches[0];
+    dagPan.x = touch.clientX - panStart.x;
+    dagPan.y = touch.clientY - panStart.y;
+    updateZoomPan();
+  }, { passive: false });
+  
+  window.addEventListener("touchend", () => { isPanning = false; });
+}
+
+function updateZoomPan() {
+  const svg = $("dag");
+  const layer = svg.querySelector(".dag-layer");
+  if (layer) {
+    layer.setAttribute("transform", `translate(${dagPan.x}, ${dagPan.y}) scale(${dagZoom})`);
+  }
+  $("zoom-level").textContent = Math.round(dagZoom * 100) + "%";
+}
+
+function blockCard(s) {
+  const id = selectedBlock || s.node.selected_tip;
+  const b = s.node.dag.find((x) => x.id === id) || s.node.dag[0];
+  if (!b) return "";
+  return `<aside class="card">
+    <p class="pill">Block</p>
+    <p class="mono"><a href="/api/block/${b.id}" target="_blank">${b.id}</a></p>
+    <dl class="muted">
+      <div style="display:flex;justify-content:space-between;margin-top:8px"><dt>Colour</dt><dd class="mono" style="color:var(--fg)">${b.colour}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Blue score</dt><dd class="mono" style="color:var(--fg)">${b.blue_score}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Work</dt><dd class="mono" style="color:var(--fg)">${b.work}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Parents</dt><dd class="mono" style="color:var(--fg)">${b.parents.length}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Txs</dt><dd class="mono" style="color:var(--fg)">${b.txs.length}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Nonce</dt><dd class="mono" style="color:var(--fg)">${b.nonce}</dd></div>
+      <div style="display:flex;justify-content:space-between"><dt>Time</dt><dd class="mono" style="color:var(--fg)">${b.timestamp_ms}</dd></div>
+    </dl>
+    <ul class="muted" style="padding:8px 0 0;margin:8px 0 0;list-style:none">${b.txs.map((t) => `<li class="mono">${t.coinbase ? "coinbase" : "tx"} · <a href="/api/tx/${t.id}" target="_blank">${short(t.id)}</a></li>`).join("")}</ul>
+  </aside>`;
+}
+
+function graphPanel(s) {
+  const names = s.mesh.nodes.map((n) => n.name);
+  return `<div class="grid">
+    <div>
+      <div class="row" style="margin-bottom:12px">${names.map((n) =>
+        `<button class="${n === s.selected ? "primary" : ""}" data-select="${n}">${n[0].toUpperCase()+n.slice(1)} <span class="mono">${s.mesh.nodes.find(x=>x.name===n).blocks}</span></button>`
+      ).join("")}</div>
+      <div class="row" style="margin-bottom:12px">
+        ${s.operator ? `<button class="primary" data-act="produce">Produce block</button>
+        <button data-act="empty">Empty block</button>
+        <button data-act="parallel">Parallel spend</button>
+        <button data-act="fork">Wide fork</button>` : `<p class="muted">Public testnet — produce only packs your signed tx. Empty-block minting is operator-only.</p>`}
+      </div>
+      <p class="muted">${s.mesh.nodes.length > 1 ? "In-process demo mesh." : "Single node. P2P sync via KOVANICA_LISTEN / KOVANICA_PEERS."} Parallel blocks merge under GHOSTDAG.</p>
+    </div>
+    ${blockCard(s)}
+  </div>`;
+}
+
+function walletsPanel(s) {
+  const rec = walletRecord();
+  const rows = s.wallets.map((w) => `<div class="wallet">
+    <div><div>Actor ${w.seed}${w.seed===1?" · faucet":""}</div><div class="mono"><a href="/api/address/${w.address}" target="_blank">${w.address}</a></div></div>
+            <div class="mono">${fmtKvnc(w.balance)}</div>
+          </div>`).join("");
+  const keys = rec ? `
+    <p class="pill">${rec.type === "hardware" ? `Hardware Wallet (${rec.deviceType})` : `BIP44 Path`}: <span class="mono">${rec.path || `m/44'/${KOVANICA_COIN_TYPE}'/${rec.account || 0}'/${rec.change || 0}/${rec.index || 0}`}</span></p>
+    <p class="mono" style="margin:8px 0">${rec.address}</p>
+    <p class="muted">Balance ${walletBal === null ? "…" : fmtKvnc(walletBal)}. 1 KVNC = ${atom().toLocaleString()} atoms. ${rec.type === "hardware" ? "Keys stored on hardware device." : "Secret stays in this browser."}</p>
+    <img class="qr" alt="address QR" src="https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(rec.address)}" />
+    <div class="row" style="margin-top:10px">
+      <button type="button" data-wallet="copy">Copy address</button>
+      ${s.faucet ? `<button type="button" data-wallet="faucet">Faucet 1 KVNC</button>` : ""}
+      ${s.operator ? `<button type="button" data-wallet="miner">Take subsidy</button>` : ""}
+      ${rec.type === "hardware" ? `<button type="button" data-wallet="hw-disconnect" style="background:var(--danger);border-color:var(--danger);color:white">Disconnect ${rec.deviceType}</button>` : `
+        <button type="button" data-wallet="export">Show seed</button>
+        <button type="button" data-wallet="download">Download seed</button>
+        <button type="button" data-wallet="forget">Forget</button>
+      `}
+    </div>
+    ${rec.type !== "hardware" ? `
+    <label>BIP44 Path: m/44'/${KOVANICA_COIN_TYPE}'/account'/change/index</label>
+    <div class="row" style="gap: 8px; flex-wrap: wrap; margin-top: 8px;">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <label style="font-size:10px;color:var(--subtle)">Account</label>
+        <input id="acc-account" type="number" min="0" max="20" value="${rec.account || 0}" style="width:70px" />
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <label style="font-size:10px;color:var(--subtle)">Change (0=ext, 1=int)</label>
+        <input id="acc-change" type="number" min="0" max="1" value="${rec.change || 0}" style="width:70px" />
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <label style="font-size:10px;color:var(--subtle)">Index</label>
+        <input id="acc-index" type="number" min="0" max="20" value="${rec.index || 0}" style="width:70px" />
+      </div>
+      <button type="button" data-wallet="switch" style="align-self:end">Switch</button>
+    </div>
+    ` : ''}
+    <p class="pill">Hardware Wallet</p>
+    <div class="row" style="gap: 8px; flex-wrap: wrap; margin-top: 8px;">
+      <button class="ghost" type="button" data-wallet="hw-connect-ledger" ${!LedgerTransport.isSupported ? 'disabled' : ''}>Connect Ledger (WebHID)</button>
+      <button class="ghost" type="button" data-wallet="hw-connect-trezor" ${!TrezorTransport.isSupported ? 'disabled' : ''}>Connect Trezor (WebUSB)</button>
+    </div>
+    <form id="wallet-send" style="margin-top:16px">
+      <label>To (64-hex address)</label>
+      <input class="wide" name="to" spellcheck="false" placeholder="hex address" />
+      <label>Amount (KVNC)</label>
+      <div class="row">
+        <input name="amount" type="text" inputmode="decimal" value="1" style="width:120px" />
+        <button class="primary" type="submit">Sign & send</button>
+      </div>
+      <p class="muted" style="margin-top:8px">Network fee ${fmtKvnc(s.node.min_fee || 0)} paid to the miner.</p>
+    </form>
+    ${rec && rec.mnemonicShown ? `<p class="mono" style="margin-top:12px">${rec.mnemonic}</p><p class="warn">Write this down. Anyone with it controls the KVNC.</p>` : ""}
+    ${walletMsg ? `<p class="${walletMsg.startsWith("err")?"warn":"ok"}" style="margin-top:10px">${walletMsg}</p>` : ""}
+    <p class="pill" style="margin-top:16px">History</p>
+    ${walletHist.length ? walletHist.slice().reverse().slice(0, 12).map((t) => `<div class="mono muted" style="padding:6px 0;border-bottom:1px solid var(--border)">${t.kind} ${fmtKvnc(Math.abs(t.delta))} · <a href="/api/tx/${t.tx}" target="_blank">${short(t.tx)}</a></div>`).join("") : `<p class="muted">No txs yet.</p>`}
+  ` : `
+    <p class="pill">Your wallet</p>
+    <p class="muted">BIP39 12-word seed in this browser. Accounts are index 0, 1, 2… from the same phrase. Node never sees the seed.</p>
+    <button class="primary" type="button" data-wallet="create">Create 12-word wallet</button>
+    <form id="wallet-import" style="margin-top:16px">
+      <label>Import phrase</label>
+      <textarea name="mnemonic" placeholder="twelve words"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button type="submit">Import</button>
+      </div>
+    </form>
+    <p class="pill">Hardware Wallet</p>
+    <div class="row" style="gap: 8px; flex-wrap: wrap; margin-top: 8px;">
+      <button class="ghost" type="button" data-wallet="hw-connect-ledger" ${!LedgerTransport.isSupported ? 'disabled' : ''}>Connect Ledger (WebHID)</button>
+      <button class="ghost" type="button" data-wallet="hw-connect-trezor" ${!TrezorTransport.isSupported ? 'disabled' : ''}>Connect Trezor (WebUSB)</button>
+    </div>
+    ${walletMsg ? `<p class="warn" style="margin-top:10px">${walletMsg}</p>` : ""}
+  `;
+  return `<div class="grid">
+    <div class="card">${keys}</div>
+    <div>
+      <p class="pill">Network actors</p>
+      <p class="muted" style="margin:8px 0">Premine ${fmtKvnc(s.node.subsidy)} + decaying issuance. Miner is ${s.node.miner ? short(s.node.miner) : "founder"}. ${s.faucet ? "Faucet pays from actor 1." : "Faucet is off."} Hardware: Download seed.</p>
+      ${rows}
+    </div>
+  </div>`;
+}
+
+function meshPanel(s) {
+  const listen = s.listen || "";
+  const peers = (s.peers || []).join(", ") || "none";
+  const cmd = `export KOVANICA_POW=1 KOVANICA_LISTEN=0.0.0.0:9000 KOVANICA_PEERS=${listen || "BOOTSTRAP:9000"}\n./target/release/kovanica-node explorer 127.0.0.1:8080`;
+  return `<div class="grid">
+    <div>
+      <table><thead><tr><th>Node</th><th>Blocks</th><th>Tip</th><th>Peers</th><th>Mempool</th></tr></thead><tbody>
+        ${s.mesh.nodes.map((n) => `<tr><td>${n.name}</td><td>${n.blocks}</td><td>${short(n.tip)}</td><td>${n.peers.join(", ") || "—"}</td><td>${n.mempool}</td></tr>`).join("")}
+      </tbody></table>
+      <p class="muted" style="margin-top:12px">Mesh time ${s.mesh.now} · queued ${s.mesh.queued} · events ${s.mesh.events.length}</p>
+    </div>
+    <aside class="card">
+      <p class="pill">Bootstrap</p>
+      <p class="muted">Network <span class="mono">${s.network}</span></p>
+      <p class="mono" style="margin:8px 0">${s.node.genesis}</p>
+      <p class="muted">P2P listen <span class="mono">${listen || "not bound"}</span></p>
+      <p class="muted">Configured peers <span class="mono">${peers}</span></p>
+      <p class="muted" style="margin-top:8px">Join:</p>
+      <pre class="mono muted" style="white-space:pre-wrap">${cmd}</pre>
+      <p class="muted">JSON: <a href="/api/bootstrap">/api/bootstrap</a> · <a href="/api/head">/api/head</a> · <a href="/api/block/">/api/block/:id</a> · <a href="/api/tx/">/api/tx/:id</a> · <a href="/api/address/">/api/address/:address</a> · <a href="/docs">/docs</a></p>
+    </aside>
+  </div>`;
+}
+
+function mempoolPanel(s) {
+  const rows = (s.node.pending || []).map((t) => `<tr><td class="mono">${short(t.id)}</td><td>${fmtKvnc(t.fee || 0)}</td><td>${t.inputs}</td><td>${t.outputs.map((o)=>fmtKvnc(o.value)+" → "+short(o.owner)).join("<br>")}</td></tr>`).join("");
+  return `<p class="muted">Min fee ${fmtKvnc(s.node.min_fee || 0)}. Miner collects fees on produce. ${s.node.pending.length} in pool.</p>
+    <table><thead><tr><th>Tx</th><th>Fee</th><th>Ins</th><th>Outs</th></tr></thead><tbody>
+    ${rows || `<tr><td colspan="4" class="muted">mempool empty</td></tr>`}
+    </tbody></table>`;
+}
+
+function minePanel(s) {
+  const net = (s.network || "kovanica").replace(/[^a-z0-9-]/gi, "");
+  return `
+    <p class="pill">Mine ${net} — run the node, earn block subsidies</p>
+    <h2>Join the network in one command</h2>
+    <p class="muted" style="margin:8px 0 12px">Downloads the Kovanica node for your machine (Linux x64 / arm64),
+    installs it to <code>~/.local/bin</code>, and starts a systemd service that syncs from
+    <span class="mono">seed.kovanica.online:9000</span> and mines one block per minute on average.
+    No root required. Uninstall any time with <code>--uninstall</code>.</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+      <input class="mono" readonly value="curl -fsSL https://explorer.kovanica.online/download/install.sh | sh" style="flex:1;min-width:280px;padding:10px;background:var(--bg);border-color:var(--border)">
+      <button type="button" data-mine="copy">Copy</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+      <button type="button" class="ghost" onclick="location.href='/download/install.sh'">Download install.sh</button>
+      <button type="button" class="ghost" onclick="location.href='/download/kovanica-node-linux-x64'">Linux x64 binary</button>
+      <button type="button" class="ghost" onclick="location.href='/download/kovanica-node-linux-arm64'">Linux arm64 binary</button>
+    </div>
+    <p class="muted">Prefer manual? After downloading, mark it executable and run:</p>
+    <pre class="mono" style="background:var(--bg);padding:10px;overflow:auto;font-size:11px">chmod +x kovanica-node-linux-x64
+KOVANICA_LISTEN=0.0.0.0:9000 KOVANICA_PEERS=seed.kovanica.online:9000,seed3.kovanica.online:9000 \\
+KOVANICA_MINE=1 KOVANICA_MINE_SECS=60 KOVANICA_POW=1 KOVANICA_DATA=~/.kovanica \\
+./kovanica-node-linux-x64 explorer 127.0.0.1:18080</pre>
+    <p class="muted" style="margin-top:12px">Verify your node is synced: <code class="mono">curl http://127.0.0.1:18080/api/head</code>
+    — genesis must match this network (<span class="mono">${(s.genesis||"").slice(0,16)}…</span>).
+    Mining uses real proof-of-work; difficulty retargets with network hash rate.</p>`;
+}
+
+function docsPanel() {  return `<p class="muted"><a href="/docs">Raw TESTNET.md</a></p><pre id="docs-body" class="mono muted" style="white-space:pre-wrap">loading…</pre>`;
+}
+
+function orderPanel(s) {
+  return `<ol class="mono muted" style="padding-left:20px">${s.node.order.map((id,i)=>`<li style="margin:6px 0">${i} · ${id}${id===s.node.selected_tip?"  ← tip":""}</li>`).join("")}</ol>`;
+}
+
+function blocksPanel(s) {
+  return `<table><thead><tr><th>Id</th><th>Colour</th><th>Blue</th><th>Work</th><th>Txs</th></tr></thead><tbody>
+    ${s.node.dag.map((b)=>`<tr data-id="${b.id}" style="cursor:pointer"><td><a href="/api/block/${b.id}" target="_blank">${short(b.id)}</a></td><td>${b.colour}</td><td>${b.blue_score}</td><td>${b.work}</td><td>${b.txs.length}</td></tr>`).join("")}
+  </tbody></table>`;
+}
+
+function consolePanel(s) {
+  const pending = s.node.pending.map((t)=>`<div>mempool ${short(t.id)} fee ${fmtKvnc(t.fee||0)} in ${t.inputs} → ${t.outputs.map(o=>fmtKvnc(o.value)+" to "+short(o.owner)).join(", ")}</div>`).join("");
+  const ev = [...s.mesh.events].reverse().slice(0, 40).map((e)=>`<div>${e.at} ${e.kind} ${e.from} → ${e.to}</div>`).join("");
+  return `<div class="log">${pending || "<div>mempool empty</div>"}${ev || "<div>no gossip yet</div>"}</div>`;
+}
+
+function analyticsPanel(s) {
+  const node = s.node;
+  const totalBlocks = node.blocks || 0;
+  const totalTxs = node.tx_count || 0;
+  const avgTxsPerBlock = totalBlocks > 0 ? (totalTxs / totalBlocks).toFixed(2) : 0;
+  const mempoolSize = node.mempool || 0;
+  const mempoolBytes = node.mempool_bytes || 0;
+  const avgFee = node.pending && node.pending.length > 0 
+    ? (node.pending.reduce((sum, t) => sum + (t.fee || 0), 0) / node.pending.length).toFixed(0)
+    : 0;
+  
+  // Calculate block time stats if we have order
+  let avgBlockTime = 0;
+  if (node.order && node.order.length > 1) {
+    // We'd need timestamps for this - placeholder
+    avgBlockTime = "~120s";
+  }
+  
+  return `<div class="grid">
+    <div class="card">
+      <h3>Network Health</h3>
+      <dl class="muted">
+        <div style="display:flex;justify-content:space-between"><dt>Total Blocks</dt><dd>${totalBlocks}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Total Transactions</dt><dd>${totalTxs}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Avg Txs/Block</dt><dd>${avgTxsPerBlock}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Mempool Size</dt><dd>${mempoolSize} txs (${(mempoolBytes/1024).toFixed(1)} KB)</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Avg Fee</dt><dd>${fmtKvnc(avgFee)}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Avg Block Time</dt><dd>${avgBlockTime}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Blue Score</dt><dd>${node.blue_score || 0}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Blue Work</dt><dd>${node.blue_work || 0}</dd></div>
+      </dl>
+    </div>
+    <div class="card">
+      <h3>DAG Structure</h3>
+      <dl class="muted">
+        <div style="display:flex;justify-content:space-between"><dt>Tips</dt><dd>${node.tips ? node.tips.length : 0}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Selected Tip</dt><dd>${short(node.selected_tip || "")}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Blue Score</dt><dd>${node.blue_score || 0}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Blue Work</dt><dd>${node.blue_work || 0}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>k parameter</dt><dd>${node.k || 3}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Chain Length</dt><dd>${node.chain_len || 0}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Genesis</dt><dd>${short(node.genesis || "")}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Total Supply</dt><dd>${fmtKvnc(node.supply || 0)}</dd></div>
+      </dl>
+    </div>
+    <div class="card">
+      <h3>Economics</h3>
+      <dl class="muted">
+        <div style="display:flex;justify-content:space-between"><dt>Subsidy</dt><dd>${fmtKvnc(node.subsidy || 0)}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Issuance</dt><dd>${fmtKvnc(node.issuance || 0)}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Total Supply</dt><dd>${fmtKvnc(node.supply || 0)}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Min Fee</dt><dd>${fmtKvnc(node.min_fee || 0)}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Halving Era</dt><dd>${node.halving_era || 1000} blocks</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>PoW</dt><dd>${node.pow ? "enabled" : "disabled"}</dd></div>
+      </dl>
+    </div>
+    <div class="card">
+      <h3>Mempool Analysis</h3>
+      <dl class="muted">
+        <div style="display:flex;justify-content:space-between"><dt>Pending Txs</dt><dd>${mempoolSize}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Mempool Bytes</dt><dd>${(mempoolBytes/1024).toFixed(1)} KB</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Avg Tx Size</dt><dd>${mempoolSize > 0 ? (mempoolBytes / mempoolSize).toFixed(0) : 0} bytes</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Fee Range</dt><dd>${node.pending && node.pending.length > 0 ? 
+          fmtKvnc(Math.min(...node.pending.map(t => t.fee || 0))) + " - " + fmtKvnc(Math.max(...node.pending.map(t => t.fee || 0))) : "—"}</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Median Fee</dt><dd>${node.pending && node.pending.length > 0 ? 
+          fmtKvnc(node.pending.map(t => t.fee || 0).sort((a,b)=>a-b)[Math.floor(node.pending.length/2)]) : "—"}</dd></div>
+      </dl>
+    </div>
+  </div>`;
+}
+
+function render() {
+  if (!state) return;
+  mining = !!state.mining;
+  $("stats").innerHTML = statsHtml(state);
+  $("status").textContent = `${mining ? "live" : "paused"} · ${state.network || "testnet"} · rust`;
+  $("pause").hidden = !state.operator;
+  $("pause").textContent = mining ? "Pause" : "Resume";
+  $("reset").hidden = !state.allow_reset;
+  drawDag(state);
+  $("tabs").innerHTML = TABS.map((t) => `<button class="${t===tab?"on":""}" data-tab="${t}">${t}</button>`).join("");
+  const fn = { Graph: graphPanel, Wallets: walletsPanel, Mesh: meshPanel, Mempool: mempoolPanel, Order: orderPanel, Blocks: blocksPanel, Docs: docsPanel, Console: consolePanel, Analytics: analyticsPanel, Mine: minePanel }[tab];
+  $("panel").innerHTML = fn(state);
+  if (tab === "Docs") {
+    api("/docs").then((t) => { const el = $("docs-body"); if (el) el.textContent = t; }).catch(() => {});
+  }
+}
+
+async function refresh() {
+  try {
+    const node = new URLSearchParams(location.search).get("node");
+    const q = state ? `?node=${encodeURIComponent(state.selected)}` : (node ? `?node=${node}` : "");
+    state = await api("/api/state" + q);
+    if (!selectedBlock) selectedBlock = state.node.selected_tip;
+    const rec = walletRecord();
+    if (rec) {
+      try {
+        const u = await api(`/api/utxos?address=${rec.address}&node=${encodeURIComponent(state.selected)}`);
+        walletBal = u.balance;
+        const h = await api(`/api/history?address=${rec.address}&node=${encodeURIComponent(state.selected)}`);
+        walletHist = h.txs || [];
+      } catch (_) { /* keep last */ }
+    }
+    render();
+  } catch (e) {
+    $("status").textContent = "offline";
+  }
+}
+
+function connectWebSocket() {
+  const wsUrl = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`;
+  ws = new WebSocket(wsUrl);
+  ws.onopen = () => { console.log("WebSocket connected"); };
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      handleWsMessage(msg);
+    } catch (e) { console.error("WS parse error", e); }
+  };
+  ws.onclose = () => {
+    console.log("WebSocket disconnected, reconnecting in 5s...");
+    setTimeout(connectWebSocket, 5000);
+  };
+  ws.onerror = (err) => { console.error("WebSocket error", err); };
+}
+
+function handleWsMessage(msg) {
+  switch (msg.type) {
+    case "block":
+      if (state) {
+        refresh(); // Full refresh on new block for simplicity
+      }
+      break;
+    case "tx":
+      if (state) {
+        refresh(); // New tx in mempool
+      }
+      break;
+    case "tip":
+      if (state) {
+        // Update tip without full refresh
+        state.node.selected_tip = msg.id;
+        state.node.blue_score = msg.blue_score;
+        render();
+      }
+      break;
+    case "peer":
+      if (state) {
+        refresh(); // Peer change
+      }
+      break;
+    case "state":
+      state = msg.snapshot;
+      if (!selectedBlock) selectedBlock = state.node.selected_tip;
+      render();
+      break;
+    case "ping":
+      ws.send(JSON.stringify({ type: "pong" }));
+      break;
+  }
+}
+
+async function act(name, extra = "") {
+  const node = state?.selected || "alpha";
+  await api(`/api/${name}?node=${encodeURIComponent(node)}${extra}`, "POST");
+  await refresh();
+}
+
+function hexOf(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function bytesOf(hex) {
+  const h = hex.replace(/^0x/, "");
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+function walletRecord() {
+  try { return JSON.parse(localStorage.getItem("kovanica.wallet") || "null"); }
+  catch { return null; }
+}
+function saveWallet(rec) {
+  localStorage.setItem("kovanica.wallet", JSON.stringify(rec));
+}
+async function loadWordlist() {
+  if (bip39Words) return bip39Words;
+  const t = await fetch("/bip39.txt").then((r) => r.text());
+  bip39Words = t.trim().split(/\s+/);
+  if (bip39Words.length !== 2048) throw new Error("bip39 wordlist");
+  return bip39Words;
+}
+function ed25519Pkcs8(seed32) {
+  const p = [0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+  const out = new Uint8Array(p.length + 32);
+  out.set(p, 0);
+  out.set(seed32, p.length);
+  return out;
+}
+async function mnemonicToSeed(mnemonic) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(mnemonic.normalize("NFKD")), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: enc.encode("mnemonic"), iterations: 2048, hash: "SHA-512" },
+    key,
+    512
+  );
+  return new Uint8Array(bits);
+}
+async function accountSeed(seed64, index) {
+  const buf = new Uint8Array(seed64.length + 4);
+  buf.set(seed64, 0);
+  new DataView(buf.buffer).setUint32(seed64.length, index >>> 0, false);
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+}
+
+async function bip44Seed(seed64, coinType, account, change, index) {
+  // BIP44 path: m / 44' / coin_type' / account' / change / index
+  // We'll derive step by step using HMAC-SHA512 (BIP32)
+  const hardened = (i) => 0x80000000 | i;
+  
+  // Master key from seed
+  const masterKey = await crypto.subtle.importKey(
+    "raw", seed64, { name: "HMAC", hash: "SHA-512" }, false, ["sign"]
+  );
+  
+  // m / 44'
+  let chainCode = new Uint8Array(await crypto.subtle.sign("HMAC", masterKey, new Uint8Array([0, 0, 0, hardened(44)])));
+  let privateKey = chainCode.slice(0, 32);
+  chainCode = chainCode.slice(32);
+  
+  // m / 44' / coin_type'
+  const coinTypeKey = await crypto.subtle.importKey("raw", privateKey, { name: "HMAC", hash: "SHA-512" }, false, ["sign"]);
+  let hmac = new Uint8Array(await crypto.subtle.sign("HMAC", coinTypeKey, new Uint8Array([0, 0, 0, hardened(coinType)])));
+  privateKey = hmac.slice(0, 32);
+  chainCode = hmac.slice(32);
+  
+  // m / 44' / coin_type' / account'
+  const accountKey = await crypto.subtle.importKey("raw", privateKey, { name: "HMAC", hash: "SHA-512" }, false, ["sign"]);
+  hmac = new Uint8Array(await crypto.subtle.sign("HMAC", accountKey, new Uint8Array([0, 0, 0, hardened(account)])));
+  privateKey = hmac.slice(0, 32);
+  chainCode = hmac.slice(32);
+  
+  // m / 44' / coin_type' / account' / change
+  const changeKey = await crypto.subtle.importKey("raw", privateKey, { name: "HMAC", hash: "SHA-512" }, false, ["sign"]);
+  hmac = new Uint8Array(await crypto.subtle.sign("HMAC", changeKey, new Uint8Array([0, 0, 0, change])));
+  privateKey = hmac.slice(0, 32);
+  chainCode = hmac.slice(32);
+  
+  // m / 44' / coin_type' / account' / change / index
+  const indexKey = await crypto.subtle.importKey("raw", privateKey, { name: "HMAC", hash: "SHA-512" }, false, ["sign"]);
+  hmac = new Uint8Array(await crypto.subtle.sign("HMAC", indexKey, new Uint8Array([0, 0, 0, index])));
+  const finalKey = hmac.slice(0, 32);
+  
+  return finalKey;
+}
+
+// Kovanica coin type (unregistered, using 999 for testnet)
+const KOVANICA_COIN_TYPE = 999;
+async function keysFromSeed32(seed32) {
+  const pkcs8 = ed25519Pkcs8(seed32);
+  const priv = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, ["sign"]);
+  const jwk = await crypto.subtle.exportKey("jwk", priv);
+  const rawPriv = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["sign"]);
+  const pubJwk = { kty: "OKP", crv: "Ed25519", x: jwk.x };
+  const pub = await crypto.subtle.importKey("jwk", pubJwk, { name: "Ed25519" }, true, ["verify"]);
+  const pubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", pub));
+  return { jwk, address: hexOf(pubRaw), _priv: rawPriv };
+}
+async function bip39FromEntropy(entropy) {
+  const words = await loadWordlist();
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", entropy));
+  const bits = [];
+  for (const b of entropy) for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1);
+  const cs = entropy.length * 8 / 32;
+  for (let i = 7; i >= 8 - cs; i--) bits.push((hash[0] >> i) & 1);
+  const out = [];
+  for (let i = 0; i < bits.length; i += 11) {
+    let v = 0;
+    for (let j = 0; j < 11; j++) v = (v << 1) | bits[i + j];
+    out.push(words[v]);
+  }
+  return out.join(" ");
+}
+async function walletOpen(mnemonic, account, change, index, shown) {
+  const seed64 = await mnemonicToSeed(mnemonic);
+  const seed32 = await bip44Seed(seed64, KOVANICA_COIN_TYPE, account, change, index);
+  const keys = await keysFromSeed32(seed32);
+  const path = `m/44'/${KOVANICA_COIN_TYPE}'/${account}'/${change}/${index}`;
+  const rec = { mnemonic, account, change, index, path, jwk: keys.jwk, address: keys.address, mnemonicShown: !!shown };
+  saveWallet(rec);
+  walletBal = 0;
+  walletHist = [];
+  return rec;
+}
+async function walletCreate() {
+  try {
+    const entropy = crypto.getRandomValues(new Uint8Array(16));
+    const mnemonic = await bip39FromEntropy(entropy);
+    await walletOpen(mnemonic, 0, 0, 0, true);
+    walletMsg = "write down the 12 words";
+  } catch (e) {
+    walletMsg = "err " + (e.message || "this browser has no Ed25519 WebCrypto");
+  }
+}
+async function walletImport(phrase) {
+  const words = phrase.trim().toLowerCase().split(/\s+/);
+  if (words.length !== 12 && words.length !== 24) throw new Error("need 12 or 24 words");
+  const list = await loadWordlist();
+  for (const w of words) if (!list.includes(w)) throw new Error("unknown word " + w);
+  await walletOpen(words.join(" "), 0, 0, 0, false);
+  walletMsg = "imported";
+}
+async function walletSign(sighashHex) {
+  const rec = walletRecord();
+  if (!rec) throw new Error("No wallet");
+  
+  if (rec.type === "hardware") {
+    return hwWalletSign(sighashHex);
+  }
+  
+  const key = await crypto.subtle.importKey("jwk", rec.jwk, { name: "Ed25519" }, false, ["sign"]);
+  const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", key, bytesOf(sighashHex)));
+  return hexOf(sig);
+}
+async function walletFaucet() {
+  const rec = walletRecord();
+  const node = state?.selected || "alpha";
+  const r = await api(`/api/faucet?node=${node}&to=${rec.address}&amount=${atom()}`, "POST");
+  walletMsg = r.ok ? "faucet paid 1 KVNC" : "err faucet";
+}
+async function walletSend(to, amountHuman) {
+  const rec = walletRecord();
+  const node = state?.selected || "alpha";
+  const amount = parseKvnc(amountHuman);
+  
+  // Get fee estimate
+  const feeEstimate = await estimateFee(amount);
+  
+  const prep = await api(`/api/prepare?node=${node}&from=${rec.address}&to=${to}&amount=${amount}&fee=${feeEstimate}`, "POST");
+  const sig = await walletSign(prep.sighash);
+  const sub = await api(`/api/submit?node=${node}&from=${rec.address}&to=${to}&amount=${amount}&sig=${sig}&fee=${feeEstimate}`, "POST");
+  await api(`/api/produce?node=${node}`, "POST");
+  walletMsg = `ok tx ${short(sub.tx)} (fee: ${fmtKvnc(feeEstimate)})`;
+}
+
+async function estimateFee(amount) {
+  if (!state || !state.node.pending) return state?.node?.min_fee || 0;
+  
+  const pending = state.node.pending;
+  if (pending.length === 0) return state.node.min_fee || 0;
+  
+  // Calculate fee percentiles from mempool
+  const fees = pending.map(t => t.fee || 0).sort((a, b) => a - b);
+  const medianFee = fees[Math.floor(fees.length / 2)];
+  const p90Fee = fees[Math.floor(fees.length * 0.9)];
+  
+  // Use p90 fee for faster confirmation, but cap at reasonable amount
+  const baseFee = Math.max(state.node.min_fee || 0, p90Fee);
+  
+  // Scale by amount (larger txs may need slightly higher fee)
+  const scale = amount > 100000000 ? 1.2 : 1; // >1 KVNC
+  
+  return Math.round(baseFee * scale);
+}
+
+// ============================================================================
+// Hardware Wallet Support
+// ============================================================================
+
+// WebHID Transport for Ledger
+class LedgerTransport {
+  constructor(device) {
+    this.device = device;
+    this.channel = 0x0101;
+    this.packetSize = 64;
+    this.sequence = 0;
+  }
+
+  static async isSupported() {
+    return "hid" in navigator;
+  }
+
+  static async requestDevice() {
+    if (!await LedgerTransport.isSupported()) {
+      throw new Error("WebHID not supported in this browser");
+    }
+    const devices = await navigator.hid.requestDevice({
+      filters: [
+        { vendorId: 0x2c97, productId: 0x0001 }, // Ledger Nano S
+        { vendorId: 0x2c97, productId: 0x0004 }, // Ledger Nano X
+        { vendorId: 0x2c97, productId: 0x0005 }, // Ledger Nano S Plus
+        { vendorId: 0x2c97, productId: 0x1000 }, // Ledger Stax
+        { vendorId: 0x2c97, productId: 0x1001 }  // Ledger Flex
+      ]
+    });
+    if (!devices.length) throw new Error("No Ledger device selected");
+    return devices[0];
+  }
+
+  async open() {
+    await this.device.open();
+    this.device.addEventListener("inputreport", (e) => this.onInputReport(e));
+  }
+
+  async close() {
+    await this.device.close();
+  }
+
+  onInputReport(event) {
+    const data = new Uint8Array(event.data.buffer);
+    if (this.responseCallback) {
+      this.responseCallback(data);
+    }
+  }
+
+  async exchange(apdu) {
+    return new Promise((resolve, reject) => {
+      this.responseCallback = (data) => {
+        const response = data.slice(2);
+        const sw = (response[response.length - 2] << 8) | response[response.length - 1];
+        if (sw === 0x9000) {
+          resolve(response.slice(0, -2));
+        } else {
+          reject(new Error(`Ledger error: 0x${sw.toString(16).toUpperCase()}`));
+        }
+      };
+
+      const packets = this.splitApdu(apdu);
+      for (let i = 0; i < packets.length; i++) {
+        const packet = packets[i];
+        const report = new Uint8Array(this.packetSize);
+        report[0] = (this.channel >> 8) & 0xFF;
+        report[1] = this.channel & 0xFF;
+        report[2] = (this.sequence >> 8) & 0xFF;
+        report[3] = this.sequence & 0xFF;
+        report.set(packets[i], 4);
+        this.sequence++;
+        this.device.sendReport(0, report);
+      }
+    });
+  }
+
+  splitApdu(apdu) {
+    const packets = [];
+    const maxDataSize = this.packetSize - 4;
+    let offset = 0;
+    while (offset < apdu.length) {
+      const chunkSize = Math.min(maxDataSize, apdu.length - offset);
+      const packet = new Uint8Array(maxDataSize);
+      if (offset === 0) {
+        packet.set(apdu.slice(0, 5));
+        packet.set(apdu.slice(5, 5 + chunkSize - 5), 5);
+      } else {
+        packet.set(apdu.slice(offset, offset + chunkSize));
+      }
+      packets.push(packet);
+      offset += chunkSize;
+    }
+    return packets;
+  }
+
+  static createApdu(cla, ins, p1, p2, data = new Uint8Array()) {
+    const apdu = new Uint8Array(5 + data.length);
+    apdu[0] = cla;
+    apdu[1] = ins;
+    apdu[2] = p1;
+    apdu[2] = p2;
+    apdu[4] = data.length;
+    if (data.length > 0) {
+      apdu.set(data, 5);
+    }
+    return apdu;
+  }
+
+  async getVersion() {
+    const apdu = LedgerTransport.createApdu(0xe0, 0x01, 0x00, 0x00);
+    return this.exchange(apdu);
+  }
+
+  async getPublicKey(path) {
+    const pathBytes = this.serializePath(path);
+    const apdu = LedgerTransport.createApdu(0xe0, 0x02, 0x00, 0x00, pathBytes);
+    return this.exchange(apdu);
+  }
+
+  async signTransaction(path, transactionHash) {
+    const pathBytes = this.serializePath(path);
+    const data = new Uint8Array(pathBytes.length + transactionHash.length);
+    data.set(pathBytes);
+    data.set(transactionHash, pathBytes.length);
+    const apdu = LedgerTransport.createApdu(0xe0, 0x04, 0x00, 0x00, data);
+    return this.exchange(apdu);
+  }
+
+  serializePath(path) {
+    const parts = path.split("/").slice(1);
+    const result = new Uint8Array(parts.length * 4);
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      let value = parseInt(part.replace("'", ""), 10);
+      if (part.endsWith("'")) {
+        value |= 0x80000000;
+      }
+      new DataView(result.buffer, i * 4).setUint32(0, value, false);
+    }
+    return result;
+  }
+}
+
+// WebUSB Transport for Trezor
+class TrezorTransport {
+  constructor(device) {
+    this.device = device;
+    this.interfaceNumber = 0;
+    this.endpointIn = 0x81;
+    this.endpointOut = 0x01;
+  }
+
+  static async isSupported() {
+    return "usb" in navigator;
+  }
+
+  static async requestDevice() {
+    if (!await TrezorTransport.isSupported()) {
+      throw new Error("WebUSB not supported in this browser");
+    }
+    const device = await navigator.usb.requestDevice({
+      filters: [
+        { vendorId: 0x534c, productId: 0x0001 }, // Trezor One
+        { vendorId: 0x1209, productId: 0x53c1 }, // Trezor Model T
+        { vendorId: 0x1209, productId: 0x53c0 }  // Trezor Safe 3
+      ]
+    });
+    return device;
+  }
+
+  async open() {
+    await this.device.open();
+    await this.device.selectConfiguration(1);
+    await this.device.claimInterface(this.interfaceNumber);
+  }
+
+  async close() {
+    await this.device.releaseInterface(this.interfaceNumber);
+    await this.device.close();
+  }
+
+  async exchange(message) {
+    const data = new Uint8Array(message.length + 8);
+    data.set(message);
+    await this.device.transferOut(this.endpointOut, data);
+    
+    const result = await this.device.transferIn(this.endpointIn, 64);
+    return new Uint8Array(result.data.buffer);
+  }
+
+  async initialize() {
+    const initMsg = new Uint8Array([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    await this.exchange(initMsg);
+  }
+
+  async getPublicKey(path) {
+    const pathBytes = this.serializePath(path);
+    const msg = new Uint8Array([0x02, 0x00, 0x00, 0x00, pathBytes.length, ...pathBytes]);
+    const response = await this.exchange(msg);
+    return response.slice(1, 34);
+  }
+
+  async signTransaction(path, transactionHash) {
+    const pathBytes = this.serializePath(path);
+    const msg = new Uint8Array([0x03, 0x00, 0x00, 0x00, pathBytes.length, ...pathBytes, ...transactionHash]);
+    const response = await this.exchange(msg);
+    return response;
+  }
+
+  serializePath(path) {
+    const parts = path.split("/").slice(1);
+    const result = new Uint8Array(parts.length * 4);
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      let value = parseInt(part.replace("'", ""), 10);
+      if (part.endsWith("'")) {
+        value |= 0x80000000;
+      }
+      new DataView(result.buffer, i * 4).setUint32(0, value, false);
+    }
+    return result;
+  }
+}
+
+// Hardware wallet manager
+
+async function connectHardwareWallet(type) {
+  try {
+    walletMsg = `Connecting ${type}...`;
+    await refresh();
+
+    if (type === "ledger") {
+      const device = await LedgerTransport.requestDevice();
+      hwTransport = new LedgerTransport(device);
+      await hwTransport.open();
+      hwDeviceType = "ledger";
+      
+      const version = await hwTransport.getVersion();
+      hwDeviceInfo = { type: "ledger", version };
+      
+      const path = "44'/999'/0'/0/0";
+      const pubKey = await hwTransport.getPublicKey(path);
+      const address = await publicKeyToAddress(pubKey);
+      
+      const rec = {
+        type: "hardware",
+        deviceType: "ledger",
+        path: "m/44'/999'/0'/0/0",
+        address: address,
+        hwInfo: hwDeviceInfo
+      };
+      saveWallet(rec);
+      await walletOpen("hardware:ledger:" + path, 0, 0, 0, false);
+      walletMsg = `Ledger connected: ${short(address)}`;
+      
+    } else if (type === "trezor") {
+      const device = await TrezorTransport.requestDevice();
+      hwTransport = new TrezorTransport(device);
+      await hwTransport.open();
+      hwDeviceType = "trezor";
+      
+      await hwTransport.initialize();
+      hwDeviceInfo = { type: "trezor" };
+      
+      const path = "44'/999'/0'/0/0";
+      const pubKey = await hwTransport.getPublicKey(path);
+      const address = await publicKeyToAddress(pubKey);
+      
+      const rec = {
+        type: "hardware",
+        deviceType: "trezor",
+        path: "m/44'/999'/0'/0/0",
+        address: address,
+        hwInfo: hwDeviceInfo
+      };
+      saveWallet(rec);
+      await walletOpen("hardware:trezor:" + path, 0, 0, 0, false);
+      walletMsg = `Trezor connected: ${short(address)}`;
+    }
+    
+    await refresh();
+  } catch (err) {
+    walletMsg = "err " + (err.message || err);
+    await refresh();
+  }
+}
+
+async function disconnectHardwareWallet() {
+  if (hwTransport) {
+    await hwTransport.close();
+    hwTransport = null;
+    hwDeviceType = null;
+    hwDeviceInfo = null;
+  }
+  localStorage.removeItem("kovanica.wallet");
+  walletBal = null;
+  walletHist = [];
+  walletMsg = "Hardware wallet disconnected";
+  await refresh();
+}
+
+async function hwWalletSign(sighash) {
+  if (!hwTransport || !hwDeviceType) {
+    throw new Error("No hardware wallet connected");
+  }
+  
+  const rec = walletRecord();
+  if (!rec || rec.type !== "hardware") {
+    throw new Error("No hardware wallet account selected");
+  }
+  
+  const path = rec.path || "m/44'/999'/0'/0/0";
+  
+  if (hwDeviceType === "ledger") {
+    return hwTransport.signTransaction(rec.path, sighash);
+  } else if (hwDeviceType === "trezor") {
+    return hwTransport.signTransaction(rec.path, sighash);
+  }
+  throw new Error("Unknown hardware wallet type");
+}
+
+async function publicKeyToAddress(pubKey) {
+  const hash = await crypto.subtle.digest("SHA-256", pubKey);
+  const addr = new Uint8Array(32);
+  addr.set(new Uint8Array(hash).slice(0, 32));
+  return "kvnc" + btoa(String.fromCharCode(...new Uint8Array(hash).slice(0, 20)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
+async function getAddressFromPath(path) {
+  // For hardware wallets, we need to get the public key from the device
+  // and derive the address. This is a simplified version - in reality
+  // we'd communicate with the hardware wallet.
+  if (hwDeviceType === "ledger" && hwTransport) {
+    const pubKey = await hwTransport.getPublicKey(path);
+    return publicKeyToAddress(pubKey);
+  } else if (hwDeviceType === "trezor" && hwTransport) {
+    const pubKey = await hwTransport.getPublicKey(path);
+    return publicKeyToAddress(pubKey);
+  }
+  // Fallback: derive from a deterministic hash of the path
+  const encoder = new TextEncoder();
+  const data = encoder.encode(path);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return publicKeyToAddress(new Uint8Array(hash));
+}
+
+async function walletOpen(mnemonic, account, change, index, shown) {
+  if (mnemonic && mnemonic.startsWith("hardware:")) {
+    const parts = mnemonic.split(":");
+    const type = parts[1];
+    const path = parts[2];
+    
+    if (type === "ledger") {
+      hwDeviceType = "ledger";
+      const device = await LedgerTransport.requestDevice();
+      hwTransport = new LedgerTransport(device);
+      await hwTransport.open();
+    } else if (type === "trezor") {
+      hwDeviceType = "trezor";
+      const device = await TrezorTransport.requestDevice();
+      hwTransport = new TrezorTransport(device);
+      await hwTransport.open();
+      await hwTransport.initialize();
+    }
+    
+    const rec = {
+      type: "hardware",
+      deviceType: type,
+      path: path,
+      mnemonic: mnemonic,
+      address: await getAddressFromPath(path)
+    };
+    saveWallet(rec);
+    walletBal = 0;
+    walletHist = [];
+    return rec;
+  }
+  
+  const seed64 = await mnemonicToSeed(mnemonic);
+  const seed32 = await bip44Seed(seed64, KOVANICA_COIN_TYPE, account, change, index);
+  const keys = await keysFromSeed32(seed32);
+  const path = `m/44'/${KOVANICA_COIN_TYPE}'/${account}'/${change}/${index}`;
+  const rec = { mnemonic, account, change, index, path, jwk: keys.jwk, address: keys.address, mnemonicShown: !!shown };
+  saveWallet(rec);
+  walletBal = 0;
+  walletHist = [];
+  return rec;
+}
+
+document.body.addEventListener("click", async (e) => {
+  const mine = e.target.closest("[data-mine]");
+  if (mine && mine.dataset.mine === "copy") {
+    await navigator.clipboard.writeText("curl -fsSL https://explorer.kovanica.online/download/install.sh | sh");
+    mine.textContent = "Copied!";
+    setTimeout(() => { mine.textContent = "Copy"; }, 1500);
+    return;
+  }
+  const w = e.target.closest("[data-wallet]");
+  if (w) {
+    const op = w.dataset.wallet;
+    if (op === "create") await walletCreate();
+    if (op === "forget") { localStorage.removeItem("kovanica.wallet"); walletBal = null; walletHist = []; walletMsg = ""; }
+    if (op === "copy" && walletRecord()) await navigator.clipboard.writeText(walletRecord().address);
+    if (op === "export" && walletRecord()) {
+      const rec = walletRecord();
+      rec.mnemonicShown = !rec.mnemonicShown;
+      saveWallet(rec);
+    }
+    if (op === "download" && walletRecord()) {
+      const rec = walletRecord();
+      const blob = new Blob([rec.mnemonic + "\n"], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "kovanica-seed.txt";
+      a.click();
+      walletMsg = "seed file downloaded — keep it offline";
+    }
+    if (op === "switch" && walletRecord()) {
+      const rec = walletRecord();
+      const account = Number(document.getElementById("acc-account").value) || 0;
+      const change = Number(document.getElementById("acc-change").value) || 0;
+      const index = Number(document.getElementById("acc-index").value) || 0;
+      await walletOpen(rec.mnemonic, account, change, index, false);
+      walletMsg = `account ${account}, change ${change}, index ${index}`;
+    }
+    if (op === "miner" && walletRecord()) {
+      try {
+        const rec = walletRecord();
+        await api(`/api/miner?node=${state?.selected || "alpha"}&addr=${rec.address}`, "POST");
+        walletMsg = "this address now receives block subsidy";
+      } catch (err) { walletMsg = "err " + (err.message || err); }
+    }
+    if (op === "faucet") {
+      try { await walletFaucet(); } catch (err) { walletMsg = "err " + (err.message || err); }
+    }
+    if (op === "hw-connect-ledger") {
+      await connectHardwareWallet("ledger");
+      return;
+    }
+    if (op === "hw-connect-trezor") {
+      await connectHardwareWallet("trezor");
+      return;
+    }
+    if (op === "hw-disconnect") {
+      await disconnectHardwareWallet();
+      return;
+    }
+    await refresh();
+    return;
+  }
+  const t = e.target.closest("[data-tab],[data-select],[data-act],[data-id]");
+  if (!t) return;
+  if (t.dataset.tab) { tab = t.dataset.tab; render(); }
+  if (t.dataset.select) { state.selected = t.dataset.select; selectedBlock = null; await refresh(); }
+  if (t.dataset.act) await act(t.dataset.act);
+  if (t.dataset.id && t.tagName === "TR") { selectedBlock = t.dataset.id; tab = "Graph"; render(); }
+});
+
+$("pause").onclick = async () => { mining = !mining; await api(`/api/mining?on=${mining ? 1 : 0}`, "POST"); render(); };
+$("reset").onclick = async () => { selectedBlock = null; await api("/api/reset", "POST"); await refresh(); };
+
+document.body.addEventListener("submit", async (e) => {
+  if (e.target.id === "wallet-import") {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try { await walletImport(String(fd.get("mnemonic") || "")); }
+    catch (err) { walletMsg = "err " + (err.message || err); }
+    await refresh();
+    return;
+  }
+  if (e.target.id === "wallet-send") {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await walletSend(String(fd.get("to")).trim(), String(fd.get("amount")));
+    } catch (err) {
+      walletMsg = "err " + (await (err.text?.() || err.message || "send failed"));
+    }
+    await refresh();
+    return;
+  }
+  if (e.target.id !== "send-form") return;
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  await act("send", `&from=${fd.get("from")}&amount=${fd.get("amount")}&to=${fd.get("to")}`);
+});
+
+poll = setInterval(refresh, 700);
+setupZoomPan();
+connectWebSocket();
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+[package]
+name = "kovanica-dag"
+description = "DAG data structure and GHOSTDAG consensus core for the Kovanica Ledger."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blake3.workspace = true
+hex.workspace = true
+ed25519-dalek.workspace = true
+curve25519-dalek.workspace = true
+rand_core.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+
+[[bench]]
+name = "dag_insert"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
