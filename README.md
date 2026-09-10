@@ -1,6 +1,6 @@
 # kovanica-node
 
-Run a **KovanicaDAG** node on `kovanica-testnet-1`.
+Run a **KovanicaDAG** node on `kovanica-testnet`.
 
 GHOSTDAG BlockDAG + UTXO ledger (Ed25519). Native token **KVNC** (8 decimals).
 Explorer: [explorer.kovanica.online](https://explorer.kovanica.online).
