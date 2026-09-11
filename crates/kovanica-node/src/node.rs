@@ -166,8 +166,6 @@ pub struct Sent {
     pub tx: TxId,
 }
 
-/// An unsigned transfer ready for a wallet to sign.
-#[derive(Clone, Debug)]
 /// Wire form for HTTP JSON: native KVNC (`None`) → `"KVNC"`. Other assets → lowercase hex.
 pub fn asset_id_to_wire(asset_id: Option<AssetId>) -> String {
     match asset_id {
@@ -198,6 +196,8 @@ pub fn asset_id_from_wire(s: Option<&str>) -> Result<Option<AssetId>, String> {
     }
 }
 
+/// An unsigned transfer ready for a wallet to sign.
+#[derive(Clone, Debug)]
 pub struct Prepared {
     /// The unsigned transaction (zeroed signatures).
     pub tx: Transaction,
