@@ -2370,18 +2370,25 @@ fn dispatch(
             let from = parse_addr(q.get("from").ok_or("from address required")?)?;
             let to = parse_addr(q.get("to").ok_or("to address required")?)?;
             let amount = parse_u64(q, "amount", 0)?;
+            // KVP-102: omitted / "KVNC" → native. Backward compatible.
+            let asset_id = crate::node::asset_id_from_wire(q.get("asset_id").map(String::as_str))?;
             let n = app.mesh.node(&node).ok_or("unknown node")?;
             let p = n
-                .prepare_transfer(from, amount, to)
+                .prepare_transfer_asset(from, amount, to, asset_id)
                 .map_err(|e| e.to_string())?;
+            let change = p.value.saturating_sub(amount.saturating_add(p.fee));
+            let asset_wire = crate::node::asset_id_to_wire(asset_id);
             return Ok(format!(
-                "{{\"ok\":true,\"sighash\":{},\"value\":{},\"fee\":{},\"change\":{},\"outpoint\":{{\"tx\":{},\"index\":{}}}}}",
+                "{{\"ok\":true,\"sighash\":{},\"value\":{},\"fee\":{},\"fee_asset_id\":{},\"change\":{},\"asset_id\":{},\"outpoint\":{{\"tx\":{},\"index\":{},\"asset_id\":{}}}}}",
                 jstr(&hex::encode(p.sighash)),
                 p.value,
                 p.fee,
-                p.value.saturating_sub(amount.saturating_add(p.fee)),
+                jstr("KVNC"),
+                change,
+                jstr(&asset_wire),
                 jstr(&p.outpoint.tx.to_string()),
-                p.outpoint.index
+                p.outpoint.index,
+                jstr(&asset_wire)
             ));
         }
         "submit" => {
@@ -2446,6 +2453,14 @@ fn dispatch(
     Ok("{\"ok\":true}".into())
 }
 
+fn balances_map_json(map: &std::collections::BTreeMap<String, u128>) -> String {
+    let parts: Vec<String> = map
+        .iter()
+        .map(|(k, v)| format!("{}:{}", jstr(k), v))
+        .collect();
+    format!("{{{}}}", parts.join(","))
+}
+
 fn history_json(
     app: &Explorer,
     q: &std::collections::HashMap<String, String>,
@@ -2476,9 +2491,13 @@ fn history_json(
         };
         for tx in &rec.txs {
             let mut delta: i128 = 0;
+            let mut row_asset: Option<kovanica_state::AssetId> = None;
             for o in tx.outputs() {
                 if o.owner == addr {
                     delta += o.value as i128;
+                    if row_asset.is_none() {
+                        row_asset = o.asset_id;
+                    }
                 }
             }
             for inp in tx.inputs() {
@@ -2486,6 +2505,9 @@ fn history_json(
                     if let Some(o) = prev.outputs().get(inp.outpoint.index as usize) {
                         if o.owner == addr {
                             delta -= o.value as i128;
+                            if row_asset.is_none() {
+                                row_asset = o.asset_id;
+                            }
                         }
                     }
                 }
@@ -2501,11 +2523,12 @@ fn history_json(
                 "out"
             };
             items.push(format!(
-                "{{\"block\":{},\"tx\":{},\"kind\":{},\"delta\":{}}}",
+                "{{\"block\":{},\"tx\":{},\"kind\":{},\"delta\":{},\"asset_id\":{}}}",
                 jstr(&id.to_string()),
                 jstr(&tx.id().to_string()),
                 jstr(kind),
-                delta
+                delta,
+                jstr(&crate::node::asset_id_to_wire(row_asset))
             ));
         }
     }
@@ -2515,10 +2538,13 @@ fn history_json(
         .skip(offset as usize)
         .take(limit as usize)
         .collect();
+    let bal = n.balance(&addr).map_err(|e| e.to_string())?;
+    let balances = n.balances_map_of(&addr).map_err(|e| e.to_string())?;
     Ok(format!(
-        "{{\"address\":{},\"balance\":{},\"txs\":{},\"limit\":{},\"offset\":{},\"total\":{}}}",
+        "{{\"address\":{},\"balance\":{},\"balances\":{},\"txs\":{},\"limit\":{},\"offset\":{},\"total\":{}}}",
         jstr(&addr.to_hex()),
-        n.balance(&addr).map_err(|e| e.to_string())?,
+        bal,
+        balances_map_json(&balances),
         jarr(paginated.into_iter()),
         limit,
         offset,
@@ -2537,26 +2563,29 @@ fn utxos_json(
         .unwrap_or_else(|| app.selected.clone());
     let n = app.mesh.node(&node).ok_or("unknown node")?;
     let bal = n.balance(&addr).map_err(|e| e.to_string())?;
+    let balances = n.balances_map_of(&addr).map_err(|e| e.to_string())?;
     let limit = parse_u64(q, "limit", 100)?.min(1000);
     let offset = parse_u64(q, "offset", 0)?;
-    let rows = n.utxos_of(&addr).map_err(|e| e.to_string())?;
+    let rows = n.utxos_detailed_of(&addr).map_err(|e| e.to_string())?;
     let total = rows.len();
     let items = rows
         .into_iter()
         .skip(offset as usize)
         .take(limit as usize)
-        .map(|(op, value)| {
+        .map(|(op, value, asset_id)| {
             format!(
-                "{{\"tx\":{},\"index\":{},\"value\":{}}}",
+                "{{\"tx\":{},\"index\":{},\"value\":{},\"asset_id\":{}}}",
                 jstr(&op.tx.to_string()),
                 op.index,
-                value
+                value,
+                jstr(&crate::node::asset_id_to_wire(asset_id))
             )
         });
     Ok(format!(
-        "{{\"address\":{},\"balance\":{},\"utxos\":{},\"limit\":{},\"offset\":{},\"total\":{}}}",
+        "{{\"address\":{},\"balance\":{},\"balances\":{},\"utxos\":{},\"limit\":{},\"offset\":{},\"total\":{}}}",
         jstr(&addr.to_hex()),
         bal,
+        balances_map_json(&balances),
         jarr(items),
         limit,
         offset,

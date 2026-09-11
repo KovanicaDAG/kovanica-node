@@ -168,6 +168,36 @@ pub struct Sent {
 
 /// An unsigned transfer ready for a wallet to sign.
 #[derive(Clone, Debug)]
+/// Wire form for HTTP JSON: native KVNC (`None`) → `"KVNC"`. Other assets → lowercase hex.
+pub fn asset_id_to_wire(asset_id: Option<AssetId>) -> String {
+    match asset_id {
+        None => "KVNC".to_string(),
+        Some(id) if id.is_native() => "KVNC".to_string(),
+        Some(id) => id.to_hex(),
+    }
+}
+
+/// Parse wire `asset_id` query/body value into ledger form.
+/// `"KVNC"`, empty, or missing → `None` (native). Else 32-byte hex → `Some(AssetId)`.
+pub fn asset_id_from_wire(s: Option<&str>) -> Result<Option<AssetId>, String> {
+    let Some(raw) = s.map(str::trim).filter(|x| !x.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.eq_ignore_ascii_case("KVNC") {
+        return Ok(None);
+    }
+    let bytes = hex::decode(raw).map_err(|_| "asset_id is not hex".to_string())?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "asset_id must be 32 bytes (64 hex chars) or KVNC".to_string())?;
+    let id = AssetId::from_bytes(arr);
+    if id.is_native() {
+        Ok(None)
+    } else {
+        Ok(Some(id))
+    }
+}
+
 pub struct Prepared {
     /// The unsigned transaction (zeroed signatures).
     pub tx: Transaction,
@@ -1203,6 +1233,35 @@ impl Node {
             .collect();
         rows.sort_by_key(|row| row.0);
         Ok(rows)
+    }
+
+    /// Unspent outputs owned by `owner`, including `asset_id` (KVP-102 HTTP).
+    pub fn utxos_detailed_of(
+        &self,
+        owner: &Address,
+    ) -> Result<Vec<(OutPoint, u64, Option<AssetId>)>, NodeError> {
+        let mut rows: Vec<(OutPoint, u64, Option<AssetId>)> = self
+            .ledger()?
+            .ledger_state()
+            .iter()
+            .filter(|(_, o)| &o.owner == owner)
+            .map(|(op, o)| (*op, o.value, o.asset_id))
+            .collect();
+        rows.sort_by_key(|row| row.0);
+        Ok(rows)
+    }
+
+    /// Spendable balances grouped by wire asset id (`"KVNC"` or hex).
+    pub fn balances_map_of(
+        &self,
+        owner: &Address,
+    ) -> Result<std::collections::BTreeMap<String, u128>, NodeError> {
+        let mut map = std::collections::BTreeMap::new();
+        for (_, value, asset_id) in self.utxos_detailed_of(owner)? {
+            let key = asset_id_to_wire(asset_id);
+            *map.entry(key).or_insert(0u128) += value as u128;
+        }
+        Ok(map)
     }
 
     /// Send `amount` from an explicit keypair to an arbitrary address
