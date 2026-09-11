@@ -29,6 +29,11 @@ proptest = "1.0"
 
 [dev-dependencies]
 libfuzzer-sys = "0.4"
+criterion = "0.5"
+
+[[bench]]
+name = "node_hot_paths"
+harness = false
 
 [features]
 # Enabled by `cargo fuzz` (via --cfg fuzzing builds) and for fuzz-target compilation.

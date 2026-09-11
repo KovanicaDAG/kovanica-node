@@ -47,7 +47,8 @@ const TESTNET_PAYLOAD_PRUNING_DEPTH: u64 = 1000;
 const ACTORS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 /// Single P2P path: plaintext TCP. Not 80/443/3010/8080 and not libp2p :30333.
 const P2P_LISTEN_DEFAULT: &str = "0.0.0.0:9000";
-const P2P_BOOTSTRAP: &str = "seed.kovanica.online:9000,seed3.kovanica.online:9000";
+const P2P_BOOTSTRAP: &str =
+    "seed.kovanica.online:9000,seed2.kovanica.online:9001,seed3.kovanica.online:9000";
 
 /// A network profile: identity, genesis parameters, and data-dir isolation.
 ///
@@ -917,7 +918,7 @@ fn bind_v6_only(addr: &str) -> std::io::Result<TcpListener> {
 
 pub const DEFAULT_PEERS: &[&str] = &[
     "seed.kovanica.online:9000",
-    "seed2.kovanica.online:9000",
+    "seed2.kovanica.online:9001",
     "seed3.kovanica.online:9000",
 ];
 
@@ -3419,7 +3420,7 @@ mod tests {
         assert!(!env_off(P2P_LISTEN_DEFAULT));
         assert_eq!(
             P2P_BOOTSTRAP,
-            "seed.kovanica.online:9000,seed3.kovanica.online:9000"
+            "seed.kovanica.online:9000,seed2.kovanica.online:9001,seed3.kovanica.online:9000"
         );
     }
 

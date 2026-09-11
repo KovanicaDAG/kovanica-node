@@ -843,15 +843,19 @@ impl Mesh {
     fn on_block(&mut self, to: &str, from: &str, record: BlockRecord) {
         let id = record_id(&record);
 
-        // Check hardening: duplicate tracking and peer scoring
-        let (is_new, banned) = self.hardening.on_block(from, &id, true);
-        if !is_new || banned {
-            // Duplicate or banned - don't process
-            return;
-        }
-
+        // The per-receiver seen-set is the flood-control gate. The shared
+        // P2P-hardening duplicate tracker is keyed by *sender* and is global
+        // to the whole mesh, so a fan-out of one block from one sender to
+        // several receivers would let the first receiver consume the "new"
+        // slot and drop the block for every other receiver — a correctness
+        // bug on any topology wider than a line. Duplicates therefore feed
+        // scoring only; whether to process is decided per receiver.
         let seen = self.seen_blocks.entry(to.to_string()).or_default();
         if !seen.insert(id) {
+            return;
+        }
+        let (_is_new, banned) = self.hardening.on_block(from, &id, true);
+        if banned {
             return;
         }
         if let Some(node) = self.nodes.get_mut(to) {
@@ -877,15 +881,14 @@ impl Mesh {
     fn on_tx(&mut self, to: &str, from: &str, tx: Transaction) {
         let id = tx.id();
 
-        // Check hardening: duplicate tracking and peer scoring
-        let (is_new, banned) = self.hardening.on_tx(from, &id, true);
-        if !is_new || banned {
-            // Duplicate or banned - don't process
-            return;
-        }
-
+        // Per-receiver seen-set gates processing; the shared per-sender
+        // hardening duplicate tracker records scoring only (see on_block).
         let seen = self.seen_txs.entry(to.to_string()).or_default();
         if !seen.insert(id) {
+            return;
+        }
+        let (_is_new, banned) = self.hardening.on_tx(from, &id, true);
+        if banned {
             return;
         }
         if let Some(node) = self.nodes.get_mut(to) {

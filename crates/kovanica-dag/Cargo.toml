@@ -24,5 +24,9 @@ criterion = "0.5"
 name = "dag_insert"
 harness = false
 
+[[bench]]
+name = "consensus"
+harness = false
+
 [lints.rust]
 unsafe_code = "forbid"
