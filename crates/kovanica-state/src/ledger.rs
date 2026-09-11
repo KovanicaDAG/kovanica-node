@@ -71,7 +71,7 @@ use kovanica_dag::{
 };
 
 use crate::htlc::HtlcScript;
-use crate::keys::{verify, verify_pk, Address};
+use crate::keys::{verify, verify_pk, Address, KeyPair};
 use crate::multisig::{verify_threshold_signatures, MultisigScript};
 use crate::script_v2::ScriptV2;
 use crate::stake::{
@@ -97,20 +97,24 @@ pub const HTLC_ACTIVATION_SCORE: u64 = 0;
 /// Default blue-score threshold for RFC-005 vault activation.
 pub const VAULT_ACTIVATION_SCORE: u64 = 0;
 
-/// Halving schedule for block subsidy.
+/// RFC-006 emission schedule for block subsidy.
 ///
-/// The subsidy starts at `genesis_subsidy` and halves every `halving_era` blocks
-/// along the selected-parent chain. Genesis (height 0) gets the full subsidy.
+/// Smooth geometric decay: `s(era) = floor(s(era-1) * 3/4)` with
+/// `era = height / era_length`. Genesis (height 0) gets the full subsidy.
+/// Eras >= 256 return 0.
+///
+/// Type name `HalvingSchedule` retained for API stability; decay is geometric
+/// (alpha = 3/4), not binary halving.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HalvingSchedule {
-    /// Subsidy at genesis (height 0).
+    /// Subsidy at genesis (height 0), in atoms.
     pub genesis_subsidy: u64,
-    /// Number of blocks per halving era.
+    /// Number of blocks per emission era (`E` in RFC-006).
     pub halving_era: u64,
 }
 
 impl HalvingSchedule {
-    /// Create a new halving schedule.
+    /// Create a new emission schedule.
     pub const fn new(genesis_subsidy: u64, halving_era: u64) -> Self {
         Self {
             genesis_subsidy,
@@ -118,19 +122,71 @@ impl HalvingSchedule {
         }
     }
 
-    /// Compute the subsidy for a block at `height` (height 0 = genesis).
-    pub fn subsidy_at(&self, height: u64) -> u64 {
-        let era = height / self.halving_era;
-        if era >= 63 {
-            0
-        } else {
-            self.genesis_subsidy >> era
+    /// RFC-006 schedule: s0 = 10 KVNC, E = 2_000_000.
+    pub const fn rfc006() -> Self {
+        Self {
+            genesis_subsidy: RFC006_GENESIS_SUBSIDY,
+            halving_era: RFC006_ERA_LENGTH,
         }
+    }
+
+    /// Subsidy at `height` (height 0 = genesis). Geometric alpha = 3/4 per era.
+    pub fn subsidy_at(&self, height: u64) -> u64 {
+        if self.halving_era == 0 {
+            return 0;
+        }
+        let era = height / self.halving_era;
+        if era >= 256 {
+            return 0;
+        }
+        let mut s = self.genesis_subsidy;
+        for _ in 0..era {
+            s = s.saturating_mul(3) / 4;
+            if s == 0 {
+                return 0;
+            }
+        }
+        s
     }
 }
 
-/// Default halving era: 1000 blocks.
-pub const DEFAULT_HALVING_ERA: u64 = 500_000;
+/// Default era length; prefer [`HalvingSchedule::rfc006`] for production.
+pub const DEFAULT_HALVING_ERA: u64 = RFC006_ERA_LENGTH;
+
+/// RFC-006: 1 KVNC = 10^8 atoms.
+pub const ATOM: u64 = 100_000_000;
+/// RFC-006 genesis subsidy: 10 KVNC per block.
+pub const RFC006_GENESIS_SUBSIDY: u64 = 10 * ATOM;
+/// RFC-006 era length: 2_000_000 blocks.
+pub const RFC006_ERA_LENGTH: u64 = 2_000_000;
+/// RFC-006 hard cap: 90.2M KVNC.
+pub const MAX_SUPPLY: u64 = 90_200_000 * ATOM;
+/// RFC-006 founder premine: 0.2M KVNC.
+pub const RFC006_PREMINE: u64 = 200_000 * ATOM;
+/// RFC-006 treasury total: 10M KVNC.
+pub const RFC006_TREASURY_TOTAL: u64 = 10_000_000 * ATOM;
+/// RFC-006 per-tranche treasury: 1M KVNC.
+pub const RFC006_TREASURY_TRANCHE: u64 = 1_000_000 * ATOM;
+/// RFC-006 number of treasury vault tranches.
+pub const RFC006_TREASURY_TRANCHES: u32 = 10;
+/// ~blocks/year at 1 block/s (vault absolute unlock spacing).
+pub const BLOCKS_PER_YEAR: u32 = 31_536_000;
+/// RFC-006 coinbase maturity.
+pub const COINBASE_MATURITY: u64 = 100;
+/// Fee producer share numerator (1/4); remainder burned.
+pub const FEE_PRODUCER_NUM: u64 = 1;
+pub const FEE_PRODUCER_DEN: u64 = 4;
+/// Placeholder treasury key seed base (tranche k uses base + k).
+pub const TREASURY_SEED_BASE: u32 = 0x7E45_0000;
+
+/// RFC-006 supply metrics from [`Ledger::supply`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct SupplyMetrics {
+    pub total: u64,
+    pub circulating: u64,
+    pub burned: u64,
+    pub max_supply: u64,
+}
 
 /// The VRF bundle a bonded validator attaches to a staked block: the public key
 /// the bonded stake is registered under, the ECVRF proof over the VRF input,
@@ -195,6 +251,7 @@ impl Default for HybridConfig {
 }
 use crate::tx::{
     decode_block_payload, encode_block_payload, DecodeError, OutPoint, Transaction, TxId,
+    TxOutput,
 };
 use crate::utxo::{UtxoEntry, UtxoSet};
 use crate::validation::TxStructureValidator;
@@ -223,8 +280,21 @@ pub enum LedgerError {
     ZeroValueOutput(TxId),
     /// A coinbase (input-less) transaction appeared somewhere other than first.
     MisplacedCoinbase(TxId),
-    /// The coinbase claims more than `subsidy + fees` allows.
+    /// The coinbase claims more than `subsidy + fee_share` allows.
     CoinbaseOverspend { claimed: u64, allowed: u64 },
+    /// RFC-006: minting would exceed MAX_SUPPLY.
+    SupplyCapExceeded {
+        claimed: u64,
+        native_minted: u64,
+        max_supply: u64,
+    },
+    /// RFC-006: coinbase output spent before maturity.
+    CoinbaseImmature {
+        outpoint: OutPoint,
+        creation_height: u64,
+        maturity: u64,
+        block_height: u64,
+    },
     /// A block's payload could not be decoded into transactions.
     Payload(DecodeError),
     /// The transaction violated a stake-registry rule (bond shape/ownership,
@@ -378,6 +448,23 @@ impl core::fmt::Display for LedgerError {
                     "coinbase overspend: claimed {claimed} > allowed {allowed}"
                 )
             }
+            LedgerError::SupplyCapExceeded {
+                claimed,
+                native_minted,
+                max_supply,
+            } => write!(
+                f,
+                "supply cap exceeded: claimed {claimed} + minted {native_minted} > max {max_supply}"
+            ),
+            LedgerError::CoinbaseImmature {
+                outpoint,
+                creation_height,
+                maturity,
+                block_height,
+            } => write!(
+                f,
+                "coinbase immature: {outpoint:?} created at {creation_height}, maturity {maturity}, block {block_height}"
+            ),
             LedgerError::Payload(e) => write!(f, "payload decode: {e}"),
             LedgerError::Stake { tx, reason } => write!(f, "stake rule violated in {tx}: {reason}"),
             LedgerError::InvalidWitnessCount {
@@ -661,8 +748,10 @@ fn apply_block_inner(
             .ok_or(LedgerError::ValueOverflow)?;
     }
 
+    // RFC-006: producer claims subsidy + fees/4; 75% of fees burned.
+    let fee_share = total_fees / FEE_PRODUCER_DEN * FEE_PRODUCER_NUM;
     let allowed = subsidy
-        .checked_add(total_fees)
+        .checked_add(fee_share)
         .ok_or(LedgerError::ValueOverflow)?;
     let minted = match coinbase {
         Some(cb) => apply_coinbase(
@@ -825,6 +914,21 @@ fn apply_regular(
             .get_entry(&input.outpoint)
             .ok_or(LedgerError::MissingInput(input.outpoint))?;
         let prev = &prev_entry.output;
+
+        // RFC-006 coinbase maturity.
+        if prev_entry.is_coinbase {
+            let mature_at = prev_entry
+                .creation_height
+                .saturating_add(COINBASE_MATURITY);
+            if height < mature_at {
+                return Err(LedgerError::CoinbaseImmature {
+                    outpoint: input.outpoint,
+                    creation_height: prev_entry.creation_height,
+                    maturity: COINBASE_MATURITY,
+                    block_height: height,
+                });
+            }
+        }
 
         // Pre-activation gating on spends:
         if blue_score <= multisig_activation_score
@@ -1356,7 +1460,7 @@ fn apply_regular(
     }
     // New outputs are born at the applying block's height (RFC-005 §3.2) —
     // this is the `creation_height` CSV measures relative age against.
-    add_outputs(staging, txid, tx, height)?;
+    add_outputs(staging, txid, tx, height, false)?;
 
     // Stake mutations come last and are infallible by now: every rule they
     // enforce was pre-checked against the same inputs above.
@@ -1421,24 +1525,27 @@ fn apply_coinbase(
             allowed,
         });
     }
-    add_outputs(staging, cb.id(), cb, height)?;
+    add_outputs(staging, cb.id(), cb, height, true)?;
     Ok(claimed_native)
 }
 
-/// Insert every output of `tx` into `staging`, keyed by `(txid, index)`,
-/// rejecting any outpoint that already exists.
+/// Insert every output of `tx` into `staging`. Coinbase outputs are flagged
+/// for RFC-006 maturity.
 fn add_outputs(
     staging: &mut UtxoSet,
     txid: TxId,
     tx: &Transaction,
     creation_height: u64,
+    is_coinbase: bool,
 ) -> Result<(), LedgerError> {
     for (i, output) in tx.outputs().iter().enumerate() {
         let outpoint = OutPoint::new(txid, i as u32);
-        if staging
-            .insert_with_height(outpoint, *output, creation_height)
-            .is_some()
-        {
+        let prev = if is_coinbase {
+            staging.insert_coinbase(outpoint, *output, creation_height)
+        } else {
+            staging.insert_with_height(outpoint, *output, creation_height)
+        };
+        if prev.is_some() {
             return Err(LedgerError::OutputAlreadyExists(outpoint));
         }
     }
@@ -1884,6 +1991,14 @@ pub struct Ledger {
     htlc_activation_score: u64,
     /// Blue score activation threshold for RFC-005 vault transactions.
     vault_activation_score: u64,
+    /// RFC-006: cumulative native KVNC atoms minted on the selected chain.
+    native_minted: u64,
+    /// RFC-006: cumulative fee atoms burned (75% of selected-chain fees).
+    fees_burned: u64,
+    /// Per-block native mint at insert time (summed along selected chain).
+    block_minted: HashMap<BlockId, u64>,
+    /// Per-block fees collected at insert time.
+    block_fees: HashMap<BlockId, u64>,
 }
 
 impl Ledger {
@@ -1897,9 +2012,16 @@ impl Ledger {
         schedule: HalvingSchedule,
         genesis_txs: &[Transaction],
     ) -> Result<Self, LedgerError> {
-        let genesis_subsidy = schedule.subsidy_at(0);
+        // Genesis may mint premine+treasury up to MAX_SUPPLY; curve applies after.
         let mut state = UtxoSet::new();
-        apply_block(&mut state, genesis_txs, genesis_subsidy)?;
+        let summary = apply_block(&mut state, genesis_txs, MAX_SUPPLY)?;
+        if summary.minted > MAX_SUPPLY {
+            return Err(LedgerError::SupplyCapExceeded {
+                claimed: summary.minted,
+                native_minted: 0,
+                max_supply: MAX_SUPPLY,
+            });
+        }
 
         let genesis = Block::genesis(1, 0, 0, encode_block_payload(genesis_txs));
         let genesis_id = genesis.id();
@@ -1915,6 +2037,11 @@ impl Ledger {
         stake_deltas.insert(genesis_id, StakeDelta::default());
         let mut heights = HashMap::new();
         heights.insert(genesis_id, 0);
+        let mut block_minted = HashMap::new();
+        block_minted.insert(genesis_id, summary.minted);
+        let mut block_fees = HashMap::new();
+        block_fees.insert(genesis_id, summary.fees);
+        let burned = summary.fees.saturating_sub(summary.fees / FEE_PRODUCER_DEN);
         Ok(Self {
             dag,
             schedule,
@@ -1934,6 +2061,10 @@ impl Ledger {
             script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
             htlc_activation_score: HTLC_ACTIVATION_SCORE,
             vault_activation_score: VAULT_ACTIVATION_SCORE,
+            native_minted: summary.minted,
+            fees_burned: burned,
+            block_minted,
+            block_fees,
         })
     }
 
@@ -2125,9 +2256,84 @@ impl Ledger {
         self.schedule.subsidy_at(height + 1)
     }
 
-    /// The halving schedule.
+    /// The emission schedule.
     pub fn schedule(&self) -> HalvingSchedule {
         self.schedule
+    }
+
+    /// RFC-006: cumulative native atoms minted.
+    pub fn native_minted(&self) -> u64 {
+        self.native_minted
+    }
+
+    /// RFC-006: cumulative fee atoms burned.
+    pub fn fees_burned(&self) -> u64 {
+        self.fees_burned
+    }
+
+    /// Sum of recorded native mint along the selected-parent chain ending at `tip`
+    /// (inclusive), walking via GHOSTDAG selected parents.
+    fn chain_minted_through(&self, tip: BlockId) -> u64 {
+        let mut total = 0u64;
+        let mut cur = Some(tip);
+        let mut guard = 0u32;
+        while let Some(id) = cur {
+            if let Some(m) = self.block_minted.get(&id) {
+                total = total.saturating_add(*m);
+            }
+            cur = self.dag.ghostdag(&id).and_then(|g| g.selected_parent);
+            guard += 1;
+            if guard > 10_000_000 {
+                break;
+            }
+        }
+        total
+    }
+
+    /// Recompute `native_minted` / `fees_burned` from the selected chain.
+    fn recompute_supply(&mut self) {
+        let mut minted = 0u64;
+        let mut fees = 0u64;
+        for id in self.dag.selected_chain() {
+            if let Some(m) = self.block_minted.get(&id) {
+                minted = minted.saturating_add(*m);
+            }
+            if let Some(f) = self.block_fees.get(&id) {
+                fees = fees.saturating_add(*f);
+            }
+        }
+        self.native_minted = minted;
+        self.fees_burned = fees.saturating_sub(fees / FEE_PRODUCER_DEN);
+    }
+
+    /// RFC-006 supply metrics at the selected tip.
+    pub fn supply(&self) -> SupplyMetrics {
+        let circulating = self.tip_state.total_value().min(u128::from(u64::MAX)) as u64;
+        SupplyMetrics {
+            total: self.native_minted,
+            circulating,
+            burned: self.fees_burned,
+            max_supply: MAX_SUPPLY,
+        }
+    }
+
+    /// RFC-006 genesis coinbase: founder premine + 10x1M treasury vaults.
+    ///
+    /// Treasury keys are placeholders (`TREASURY_SEED_BASE + k`) until ceremony.
+    /// Tranche k unlocks at height `k * BLOCKS_PER_YEAR`.
+    pub fn rfc006_genesis_coinbase(founder: Address) -> Transaction {
+        let mut outputs = Vec::with_capacity(1 + RFC006_TREASURY_TRANCHES as usize);
+        outputs.push(TxOutput::native(RFC006_PREMINE, founder));
+        for k in 1..=RFC006_TREASURY_TRANCHES {
+            let unlock_height = k.saturating_mul(BLOCKS_PER_YEAR);
+            let owner_pk = *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
+                .address()
+                .payload();
+            let vault = VaultScript::new(unlock_height, 0, owner_pk)
+                .expect("treasury vault template is well-formed");
+            outputs.push(TxOutput::native(RFC006_TREASURY_TRANCHE, vault.address()));
+        }
+        Transaction::coinbase(outputs, b"genesis-rfc006".to_vec())
     }
 
     /// The UTXO state in `block`'s own view, if `block` is present.
@@ -2470,7 +2676,7 @@ impl Ledger {
 
         // Stateful validation: the block's own transactions must be valid against
         // its view pre-state. Failure rejects the block before it enters the DAG.
-        apply_block_inner(
+        let summary = apply_block_inner(
             &mut state,
             Some(&mut stake),
             txs,
@@ -2485,6 +2691,20 @@ impl Ledger {
             self.vault_activation_score,
         )?;
 
+        // RFC-006 supply cap against the selected-parent chain + this block.
+        let parent_chain_minted = self.chain_minted_through(sp);
+        if parent_chain_minted
+            .checked_add(summary.minted)
+            .map(|tot| tot > MAX_SUPPLY)
+            .unwrap_or(true)
+        {
+            return Err(LedgerInsertError::State(LedgerError::SupplyCapExceeded {
+                claimed: summary.minted,
+                native_minted: parent_chain_minted,
+                max_supply: MAX_SUPPLY,
+            }));
+        }
+
         // Commit: add to the DAG (structural checks run here), then store the
         // block's net delta relative to its selected parent's view.
         let id = self.dag.insert(block)?;
@@ -2496,11 +2716,14 @@ impl Ledger {
         self.deltas.insert(id, delta);
         self.stake_deltas.insert(id, stake_delta);
         self.heights.insert(id, new_height);
+        self.block_minted.insert(id, summary.minted);
+        self.block_fees.insert(id, summary.fees);
         // The selected tip can only change to the block just inserted; when it
         // does, its state is the single materialised tip state.
         if self.dag.selected_tip() == id {
             self.tip_state = state;
             self.tip_stake = stake;
+            self.recompute_supply();
         }
         self.prune();
         Ok(id)
@@ -2906,6 +3129,9 @@ impl Ledger {
         for block in &tip_segment {
             kovanica_dag::encode_block(block, &mut buf);
         }
+        // v7: supply counters at the live tip (not only the checkpoint block).
+        buf.extend_from_slice(&self.native_minted.to_le_bytes());
+        buf.extend_from_slice(&self.fees_burned.to_le_bytes());
         Ok(buf)
     }
 
@@ -2961,13 +3187,15 @@ impl Ledger {
         let checkpoint_height = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
         pos += 8;
 
-        // Decode checkpoint UTXO set. Checkpoint v5 and earlier carry no per-entry
-        // creation heights — those UTXOs are unlocked immediately
-        // (creation_height = 0; csv only delays, never fast-forwards — the
-        // safe legacy default, RFC-005 §3.2/§8).
+        // Decode checkpoint UTXO set.
+        // v5-: no creation_height, no coinbase flag
+        // v6: creation_height, no coinbase flag
+        // v7+: creation_height + is_coinbase
         let mut remaining = &bytes[pos..];
         let checkpoint_state = if version <= 5 {
             UtxoSet::decode_v5(&mut remaining)
+        } else if version == 6 {
+            UtxoSet::decode_v6(&mut remaining)
         } else {
             UtxoSet::decode(&mut remaining)
         }
@@ -3024,6 +3252,19 @@ impl Ledger {
             blocks.push(block);
         }
 
+        // v7: trailing supply counters (tip values at write time).
+        let (stored_minted, stored_burned) = if version >= 7 {
+            if bytes.len() < block_pos + 16 {
+                return Err(LedgerCheckpointError::UnexpectedEof);
+            }
+            let minted = u64::from_le_bytes(bytes[block_pos..block_pos + 8].try_into().unwrap());
+            let burned =
+                u64::from_le_bytes(bytes[block_pos + 8..block_pos + 16].try_into().unwrap());
+            (Some(minted), Some(burned))
+        } else {
+            (None, None)
+        };
+
         // The first block in tip_segment is the checkpoint block; use it as genesis.
         let mut blocks_iter = blocks.into_iter();
         let checkpoint_block = blocks_iter
@@ -3062,6 +3303,10 @@ impl Ledger {
             script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
             htlc_activation_score: HTLC_ACTIVATION_SCORE,
             vault_activation_score: VAULT_ACTIVATION_SCORE,
+            native_minted: 0,
+            fees_burned: 0,
+            block_minted: HashMap::new(),
+            block_fees: HashMap::new(),
         };
         ledger.deltas.insert(checkpoint_id, checkpoint_delta);
         ledger
@@ -3116,6 +3361,21 @@ impl Ledger {
             ledger
                 .insert_prepared_block(rebuilt, &txs)
                 .map_err(LedgerCheckpointError::Rebuild)?;
+        }
+
+        // Authoritative supply from checkpoint (v7+). Tip replay may have
+        // recomputed from an incomplete block_minted map (history below
+        // finality is not present); prefer the stored tip counters.
+        if let (Some(m), Some(b)) = (stored_minted, stored_burned) {
+            ledger.native_minted = m;
+            ledger.fees_burned = b;
+        } else {
+            // Legacy: approximate from checkpoint UTXO value only.
+            ledger.native_minted = ledger
+                .tip_state
+                .total_value()
+                .min(u128::from(MAX_SUPPLY)) as u64;
+            ledger.fees_burned = 0;
         }
 
         Ok(ledger)
@@ -3272,7 +3532,8 @@ const CHECKPOINT_MAGIC: [u8; 4] = *b"KVCP";
 /// optional asset_id to UTXO encoding; v5 adds the optional stealth extension
 /// (R + view_tag + P) to UTXO encoding so stealth outputs survive a checkpoint
 /// round-trip.
-const CHECKPOINT_VERSION: u16 = 6;
+/// v7 (RFC-006): UTXO entries carry `is_coinbase`; trailing native_minted + fees_burned.
+const CHECKPOINT_VERSION: u16 = 7;
 
 /// Why a ledger checkpoint could not be encoded or decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3509,31 +3770,32 @@ mod tests {
     }
 
     #[test]
-    fn coinbase_may_claim_subsidy_plus_fees_but_no_more() {
+    fn coinbase_may_claim_subsidy_plus_fee_share_but_no_more() {
         let alice = KeyPair::from_u64(1);
         let bob = KeyPair::from_u64(2);
         let miner = KeyPair::from_u64(3);
         let mut utxo = UtxoSet::new();
         let op = funded(&mut utxo, &alice, 100, 1);
 
-        // Transfer leaves a fee of 10; subsidy 50 ⇒ coinbase may claim 60.
+        // Transfer leaves a fee of 10; subsidy 50 ⇒ producer share fees/4 = 2
+        // ⇒ coinbase may claim 52 (RFC-006 75/25 burn).
         let transfer = Transaction::signed(
             &[(op, &alice)],
             vec![TxOutput::native(90, bob.address())],
             vec![],
         );
         let good_cb =
-            Transaction::coinbase(vec![TxOutput::native(60, miner.address())], b"h1".to_vec());
+            Transaction::coinbase(vec![TxOutput::native(52, miner.address())], b"h1".to_vec());
         let summary = apply_block(&mut utxo, &[good_cb, transfer.clone()], 50).unwrap();
         assert_eq!(
             summary,
             BlockSummary {
                 fees: 10,
-                minted: 60
+                minted: 52
             }
         );
 
-        // Claiming 61 overspends.
+        // Claiming 53 overspends.
         let mut utxo2 = UtxoSet::new();
         let op2 = funded(&mut utxo2, &alice, 100, 1);
         let transfer2 = Transaction::signed(
@@ -3542,15 +3804,98 @@ mod tests {
             vec![],
         );
         let greedy_cb =
-            Transaction::coinbase(vec![TxOutput::native(61, miner.address())], b"h1".to_vec());
+            Transaction::coinbase(vec![TxOutput::native(53, miner.address())], b"h1".to_vec());
         let err = apply_block(&mut utxo2, &[greedy_cb, transfer2], 50).unwrap_err();
         assert_eq!(
             err,
             LedgerError::CoinbaseOverspend {
-                claimed: 61,
-                allowed: 60
+                claimed: 53,
+                allowed: 52
             }
         );
+    }
+
+
+
+    #[test]
+    fn rfc006_geometric_subsidy() {
+        let s = HalvingSchedule::rfc006();
+        assert_eq!(s.subsidy_at(0), RFC006_GENESIS_SUBSIDY);
+        assert_eq!(s.subsidy_at(RFC006_ERA_LENGTH - 1), RFC006_GENESIS_SUBSIDY);
+        assert_eq!(s.subsidy_at(RFC006_ERA_LENGTH), RFC006_GENESIS_SUBSIDY * 3 / 4);
+        assert_eq!(
+            s.subsidy_at(2 * RFC006_ERA_LENGTH),
+            RFC006_GENESIS_SUBSIDY * 3 / 4 * 3 / 4
+        );
+    }
+
+    #[test]
+    fn rfc006_coinbase_immature_until_maturity() {
+        let miner = KeyPair::from_u64(1);
+        let alice = KeyPair::from_u64(2);
+        let mut utxo = UtxoSet::new();
+        let cb = Transaction::coinbase(
+            vec![TxOutput::native(100, miner.address())],
+            b"cb".to_vec(),
+        );
+        let op = OutPoint::new(cb.id(), 0);
+        apply_block_inner(
+            &mut utxo,
+            None,
+            &[cb],
+            100,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(utxo.get_entry(&op).unwrap().is_coinbase);
+
+        let spend = Transaction::signed(
+            &[(op, &miner)],
+            vec![TxOutput::native(90, alice.address())],
+            vec![],
+        );
+        // height 50 < 0+100 → immature
+        let err = apply_block_inner(
+            &mut utxo.clone(),
+            None,
+            &[spend.clone()],
+            0,
+            50,
+            50,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, LedgerError::CoinbaseImmature { .. }));
+
+        // height 100 → mature
+        apply_block_inner(
+            &mut utxo,
+            None,
+            &[spend],
+            0,
+            100,
+            100,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(!utxo.contains(&op));
     }
 
     // ---- stake registry integration ----

@@ -22,14 +22,17 @@ pub struct UtxoEntry {
     pub output: TxOutput,
     /// Linearized block height of the block that created this output.
     pub creation_height: u64,
+    /// RFC-006: whether this output was created by a coinbase transaction.
+    pub is_coinbase: bool,
 }
 
 impl UtxoEntry {
-    /// A legacy entry with no relative-lock age (`creation_height = 0`).
+    /// A legacy entry with no relative-lock age and not marked coinbase.
     pub const fn new_legacy(output: TxOutput) -> Self {
         Self {
             output,
             creation_height: 0,
+            is_coinbase: false,
         }
     }
 }
@@ -84,15 +87,33 @@ impl UtxoSet {
         output: TxOutput,
         creation_height: u64,
     ) -> Option<TxOutput> {
-        self.map
-            .insert(
-                outpoint,
-                UtxoEntry {
-                    output,
-                    creation_height,
-                },
-            )
-            .map(|old| old.output)
+        self.insert_entry(
+            outpoint,
+            UtxoEntry {
+                output,
+                creation_height,
+                is_coinbase: false,
+            },
+        )
+        .map(|old| old.output)
+    }
+
+    /// Insert a coinbase output (RFC-006 maturity applies).
+    pub fn insert_coinbase(
+        &mut self,
+        outpoint: OutPoint,
+        output: TxOutput,
+        creation_height: u64,
+    ) -> Option<TxOutput> {
+        self.insert_entry(
+            outpoint,
+            UtxoEntry {
+                output,
+                creation_height,
+                is_coinbase: true,
+            },
+        )
+        .map(|old| old.output)
     }
 
     /// Insert a full entry (output + creation height).
@@ -195,6 +216,8 @@ impl UtxoSet {
             }
             // v6: creation height of this output (8 bytes LE).
             buf.extend_from_slice(&entry.creation_height.to_le_bytes());
+            // v7 (RFC-006): coinbase flag.
+            buf.push(u8::from(entry.is_coinbase));
         }
         buf
     }
@@ -208,7 +231,7 @@ impl UtxoSet {
                 let output = &entry.output;
                 let asset = if output.asset_id.is_some() { 1 + 32 } else { 1 };
                 let stealth = if output.stealth.is_some() { 1 + 65 } else { 1 };
-                32 + 4 + 8 + 33 + asset + stealth + 8
+                32 + 4 + 8 + 33 + asset + stealth + 8 + 1
             })
             .sum::<usize>()
     }
@@ -219,20 +242,24 @@ impl UtxoSet {
     /// v5: reads optional stealth extension (65 bytes) after the asset_id.
     /// v6: reads per-entry `creation_height` (8 bytes) after the stealth flag.
     pub fn decode(bytes: &mut &[u8]) -> Result<Self, UtxoDecodeError> {
-        Self::decode_impl(bytes, true)
+        Self::decode_impl(bytes, true, true)
     }
 
-    /// Decode a v5 (or older) checkpoint UTXO set: identical to [`Self::decode`]
-    /// except per-entry `creation_height` is absent and therefore defaults to 0.
-    ///
-    /// This is the safe legacy default — CSV only *delays* spends, never
-    /// fast-forwards them, so pre-upgrade outputs that report age 0 are simply
-    /// immediately final.
+    /// Decode a v6 checkpoint (creation_height present, no coinbase flag).
+    pub fn decode_v6(bytes: &mut &[u8]) -> Result<Self, UtxoDecodeError> {
+        Self::decode_impl(bytes, true, false)
+    }
+
+    /// Decode a v5 (or older) checkpoint UTXO set: no creation_height, no coinbase flag.
     pub fn decode_v5(bytes: &mut &[u8]) -> Result<Self, UtxoDecodeError> {
-        Self::decode_impl(bytes, false)
+        Self::decode_impl(bytes, false, false)
     }
 
-    fn decode_impl(bytes: &mut &[u8], with_creation_height: bool) -> Result<Self, UtxoDecodeError> {
+    fn decode_impl(
+        bytes: &mut &[u8],
+        with_creation_height: bool,
+        with_coinbase_flag: bool,
+    ) -> Result<Self, UtxoDecodeError> {
         let mut reader = CheckpointReader::new(bytes);
         let count = reader.read_u64()? as usize;
         let mut map = HashMap::with_capacity(count);
@@ -263,6 +290,11 @@ impl UtxoSet {
             } else {
                 0
             };
+            let is_coinbase = if with_coinbase_flag {
+                reader.read_u8()? != 0
+            } else {
+                false
+            };
             map.insert(
                 OutPoint::new(tx, index),
                 UtxoEntry {
@@ -273,6 +305,7 @@ impl UtxoSet {
                         stealth,
                     },
                     creation_height,
+                    is_coinbase,
                 },
             );
         }

@@ -454,9 +454,9 @@ pub struct Node {
     stealth_counter: std::sync::atomic::AtomicU64,
 }
 
-/// Blocks per subsidy-halving era. Issuance is `cap >> (height / HALVING_ERA)`.
-pub const HALVING_ERA: u64 = 500_000;
-/// Floor: `max(1, subsidy / 500_000)`. On the 200 KVNC testnet that is 0.0004 KVNC.
+/// RFC-006 emission era length (blocks).
+pub const HALVING_ERA: u64 = 2_000_000;
+/// Floor: `max(1, subsidy / 500_000)`.
 pub const MIN_FEE_DIVISOR: u64 = 500_000;
 
 impl Default for Node {
@@ -670,8 +670,12 @@ impl Node {
             return Err(NodeError::AlreadyInitialized);
         }
         let founder = Self::address(founder_seed);
-        let coinbase =
-            Transaction::coinbase(vec![TxOutput::native(amount, founder)], b"genesis".to_vec());
+        // RFC-006: when premine matches the standard 0.2M, include treasury vaults.
+        let coinbase = if amount == kovanica_state::RFC006_PREMINE {
+            Ledger::rfc006_genesis_coinbase(founder)
+        } else {
+            Transaction::coinbase(vec![TxOutput::native(amount, founder)], b"genesis".to_vec())
+        };
         let schedule = HalvingSchedule::new(subsidy, DEFAULT_HALVING_ERA);
         let ledger = if finality_depth == u64::MAX && payload_pruning_depth == u64::MAX {
             Ledger::new(k, schedule, &[coinbase]).map_err(NodeError::Ledger)?
@@ -775,14 +779,9 @@ impl Node {
     }
 
     /// Compute the subsidy at a given height (height 0 = genesis).
-    /// `cap` is the genesis subsidy. Halving era is `HALVING_ERA` (500_000 blocks).
+    /// RFC-006 geometric decay alpha=3/4 per era of `HALVING_ERA` blocks.
     pub fn issuance_at(cap: u64, height: u64) -> u64 {
-        let era = height / HALVING_ERA;
-        if era >= 63 {
-            0
-        } else {
-            cap >> era
-        }
+        kovanica_state::HalvingSchedule::new(cap, HALVING_ERA).subsidy_at(height)
     }
 
     pub(crate) fn ledger(&self) -> Result<&Ledger, NodeError> {

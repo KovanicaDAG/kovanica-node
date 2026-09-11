@@ -36,8 +36,10 @@ const BIP39: &str = include_str!("bip39-english.txt");
 const DOCS: &str = include_str!("../../../TESTNET.md");
 /// 1 KVNC = 10^8 base units (atoms).
 const ATOM: u64 = 100_000_000;
-const GENESIS_SUBSIDY: u64 = 200 * ATOM;
-const GENESIS_PREMINE: u64 = 200 * ATOM;
+/// RFC-006 genesis subsidy: 10 KVNC/block.
+const GENESIS_SUBSIDY: u64 = 10 * ATOM;
+/// RFC-006 founder premine: 0.2M KVNC (+ 10M treasury vaults in coinbase).
+const GENESIS_PREMINE: u64 = 200_000 * ATOM;
 /// Founder actor seed used by `genesis_node()` (deterministic keys).
 const FOUNDER_SEED: u64 = 1;
 /// Finality depth used by the live testnet (blocks below this score become final).
@@ -96,20 +98,17 @@ impl NetworkProfile {
         }
     }
 
-    /// The mainnet profile — **DORMANT**. Final genesis parameters are TBD and
-    /// must be decided by the protocol owners before launch; this placeholder
-    /// exists so the profile plumbing (network id, data-dir isolation, faucet
-    /// gating) is in place without inventing consensus values. Do not fill in
-    /// numbers here — that is a consensus decision, not an implementation one.
+    /// Mainnet profile filled with RFC-006 parameters but still **DORMANT**.
+    /// Requires `KOVANICA_MAINNET_OVERRIDE=1` to boot.
     fn mainnet() -> Self {
         Self {
             id: "kovanica-mainnet",
-            genesis_k: 0,             // TBD — do not invent
-            genesis_subsidy: 0,       // TBD — do not invent
-            genesis_premine: 0,       // TBD — do not invent
-            founder_seed: 0,          // TBD — do not invent
-            finality_depth: 0,        // TBD — do not invent
-            payload_pruning_depth: 0, // TBD — do not invent
+            genesis_k: 3,
+            genesis_subsidy: GENESIS_SUBSIDY,
+            genesis_premine: GENESIS_PREMINE,
+            founder_seed: FOUNDER_SEED,
+            finality_depth: 1000,
+            payload_pruning_depth: 10_000,
             dormant: true,
         }
     }
@@ -3111,8 +3110,9 @@ fn node_json(node: &Node) -> String {
         .collect();
     let pending = jarr(node.pending_txs().iter().map(|tx| pending_json(node, tx)));
     let utxo = ledger.ledger_state();
+    let supply = ledger.supply();
     format!(
-        "{{\"blocks\":{},\"tips\":{},\"selected_tip\":{},\"blue_score\":{},\"blue_work\":{},\"k\":{},\"subsidy\":{},\"issuance\":{},\"halving_era\":{},\"min_fee\":{},\"genesis\":{},\"supply\":{},\"token\":{},\"decimals\":{},\"miner\":{},\"atom\":{},\"pow\":{},\"ui\":{},\"utxos\":{},\"chain_len\":{},\"mempool\":{},\"tx_count\":{},\"dag\":{},\"order\":{},\"pending\":{}}}",
+        "{{\"blocks\":{},\"tips\":{},\"selected_tip\":{},\"blue_score\":{},\"blue_work\":{},\"k\":{},\"subsidy\":{},\"issuance\":{},\"halving_era\":{},\"min_fee\":{},\"genesis\":{},\"supply\":{},\"native_minted\":{},\"circulating\":{},\"burned\":{},\"max_supply\":{},\"token\":{},\"decimals\":{},\"miner\":{},\"atom\":{},\"pow\":{},\"ui\":{},\"utxos\":{},\"chain_len\":{},\"mempool\":{},\"tx_count\":{},\"dag\":{},\"order\":{},\"pending\":{}}}",
         dag.len(),
         jarr(dag.tips().iter().map(|t| jstr(&t.to_string()))),
         jstr(&selected_tip),
@@ -3124,7 +3124,11 @@ fn node_json(node: &Node) -> String {
         HALVING_ERA,
         node.min_fee(),
         jstr(&ledger.genesis().to_string()),
-        utxo.total_value(),
+        supply.total,
+        supply.total,
+        supply.circulating,
+        supply.burned,
+        supply.max_supply,
         jstr("KVNC"),
         8,
         match node.miner() {
@@ -3397,11 +3401,12 @@ mod tests {
     }
 
     #[test]
-    fn issuance_halves_each_era() {
-        assert_eq!(Node::issuance_at(200 * ATOM, 0), 200 * ATOM);
-        assert_eq!(Node::issuance_at(200 * ATOM, 499_999), 200 * ATOM);
-        assert_eq!(Node::issuance_at(200 * ATOM, 500_000), 100 * ATOM);
-        assert_eq!(Node::issuance_at(200 * ATOM, 1_000_000), (200 * ATOM) >> 2);
+    fn issuance_geometric_each_era() {
+        // era length HALVING_ERA (2_000_000); alpha = 3/4
+        assert_eq!(Node::issuance_at(10 * ATOM, 0), 10 * ATOM);
+        assert_eq!(Node::issuance_at(10 * ATOM, 1_999_999), 10 * ATOM);
+        assert_eq!(Node::issuance_at(10 * ATOM, 2_000_000), 10 * ATOM * 3 / 4);
+        assert_eq!(Node::issuance_at(10 * ATOM, 4_000_000), 10 * ATOM * 3 / 4 * 3 / 4);
     }
 
     #[test]
