@@ -21,7 +21,7 @@ fn asset(seed: u8) -> AssetId {
 /// Build a node whose ledger contains only the given outputs via a multi-output coinbase.
 fn node_with_outputs(outputs: Vec<TxOutput>) -> Node {
     let mut node = Node::new();
-    let _ = node.genesis(3, 1_000, 10_000, 1);
+    let _ = node.genesis(3, 1_000, 10_000, 1, None);
     let _ = outputs;
     node
 }
@@ -183,7 +183,7 @@ fn selection_does_not_mix_two_custom_assets() {
 #[test]
 fn node_prepare_native_succeeds_after_genesis() {
     let mut node = Node::new();
-    let (_gid, founder) = node.genesis(3, 1_000, 10_000, 1).expect("genesis");
+    let (_gid, founder) = node.genesis(3, 1_000, 10_000, 1, None).expect("genesis");
     let to = Node::address(2);
 
     let prepared = node
@@ -200,7 +200,7 @@ fn node_prepare_native_succeeds_after_genesis() {
 #[test]
 fn node_prepare_unknown_asset_is_insufficient_funds() {
     let mut node = Node::new();
-    let (_gid, founder) = node.genesis(3, 1_000, 10_000, 1).expect("genesis");
+    let (_gid, founder) = node.genesis(3, 1_000, 10_000, 1, None).expect("genesis");
     let to = Node::address(2);
     let ghost = asset(99);
 

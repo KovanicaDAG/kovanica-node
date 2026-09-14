@@ -37,7 +37,7 @@ fn staked_block_produced_gossiped_and_readmitted() {
     let mut producer = Node::new();
     let mut peer = Node::new();
     for node in [&mut producer, &mut peer] {
-        node.genesis(3, 1_000, 1_000, 1).unwrap();
+        node.genesis(3, 1_000, 1_000, 1, None).unwrap();
         assert!(!node.hybrid_enabled());
         node.enable_hybrid(cfg.clone()).unwrap();
         assert!(node.hybrid_enabled());
@@ -109,7 +109,7 @@ fn staked_block_produced_gossiped_and_readmitted() {
 #[test]
 fn unbonded_validator_falls_back_to_pow() {
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     node.enable_hybrid(hybrid_cfg()).unwrap();
     node.set_validator_seed([9u8; 32]); // identity set but NOTHING bonded
 
@@ -125,7 +125,7 @@ fn staking_rpc_reports_state() {
     use kovanica_node::rpc::execute_line;
 
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
 
     let out = execute_line(&mut node, "staking");
     assert!(out.contains("hybrid=false"), "{out}");

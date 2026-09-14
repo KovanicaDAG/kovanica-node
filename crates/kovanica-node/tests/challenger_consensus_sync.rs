@@ -307,7 +307,7 @@ fn test_wall_clock_drift_exact_boundary_on_node() {
     let now_ms = 5_000_000u64;
     let mut node = Node::new();
     node.set_now_ms(now_ms);
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
 
     let gen_id = node.genesis_id().unwrap();
 
@@ -515,7 +515,7 @@ fn test_locator_generation_structure_and_exponential_backoff() {
 fn test_node_headers_from_deep_reorg_and_fork_convergence() {
     let mut node = Node::new();
     node.set_now_ms(1_000);
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
 
     let gen_id = node.genesis_id().unwrap();
 
@@ -574,7 +574,7 @@ fn test_spv_tcp_sync_across_node_reorg() {
     let handle = thread::spawn(move || {
         let mut node = Node::new();
         node.set_now_ms(1_000);
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
 
         for i in 1..=10 {
             node.set_now_ms(1_000 + i * 1_000);
@@ -610,7 +610,7 @@ fn test_spv_tcp_sync_across_node_reorg() {
 
     let mut temp_node = Node::new();
     temp_node.set_now_ms(1_000);
-    temp_node.genesis(3, 1000, 1000, 1).unwrap();
+    temp_node.genesis(3, 1000, 1000, 1, None).unwrap();
     let g_id = temp_node.genesis_id().unwrap();
     let g_hdr = temp_node.spv_header(&g_id).unwrap();
 
@@ -634,7 +634,7 @@ fn test_dag_competing_branch_reorg_and_locator_common_ancestor_resolution() {
     // 1. Full Node with GHOSTDAG consensus
     let mut node = Node::new();
     node.set_now_ms(1_000);
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
     let gen_id = node.genesis_id().unwrap();
 
     // 2. Build initial chain (Branch A) up to height 10

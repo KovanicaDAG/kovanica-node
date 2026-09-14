@@ -61,7 +61,7 @@ fn fee_rate_eviction_drops_lowest_rate_tx() {
         ..Default::default()
     };
     let mut node = Node::with_mempool_config(config);
-    node.genesis(3, 100_000, 100_000, 1).unwrap();
+    node.genesis(3, 100_000, 100_000, 1, None).unwrap();
 
     // Produce two empty blocks to create additional actor-1 UTXOs.
     node.produce_empty().unwrap();
@@ -99,7 +99,7 @@ fn replace_by_fee_succeeds_with_bump() {
         ..Default::default()
     };
     let mut node = Node::with_mempool_config(config);
-    node.genesis(3, 100_000, 100_000, 1).unwrap();
+    node.genesis(3, 100_000, 100_000, 1, None).unwrap();
 
     let utxos = actor1_utxos(&node);
     let (op, value) = utxos[0];
@@ -121,7 +121,7 @@ fn replace_by_fee_rejects_insufficient_bump() {
         ..Default::default()
     };
     let mut node = Node::with_mempool_config(config);
-    node.genesis(3, 100_000, 100_000, 1).unwrap();
+    node.genesis(3, 100_000, 100_000, 1, None).unwrap();
 
     let utxos = actor1_utxos(&node);
     let (op, value) = utxos[0];

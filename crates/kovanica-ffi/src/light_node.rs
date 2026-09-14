@@ -16,9 +16,11 @@
 use std::sync::{Mutex, MutexGuard};
 
 use kovanica_dag::BlockId;
-use kovanica_node::{net, Node};
+use kovanica_node::{net, Node, TreasuryGenesis};
 use kovanica_state::stake::bond_tag;
-use kovanica_state::{KeyPair, OutPoint, Sig, StealthAddress, Transaction, TxOutput};
+use kovanica_state::{
+    KeyPair, OutPoint, Sig, StealthAddress, Transaction, TxOutput, RFC006_PREMINE,
+};
 
 /// Why a [`LightNode`] operation failed.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -269,6 +271,16 @@ impl LightNode {
             config.subsidy,
             config.founder_amount,
             config.founder_seed,
+            // RFC-006 genesis gate: the live light-node config uses
+            // founder_amount = RFC006_PREMINE (200 KVNC), so the genesis
+            // coinbase must include the 10x1M treasury vaults with the
+            // placeholder keys to reproduce the live network genesis
+            // (9565fc20…). Non-standard premines stay treasury-less.
+            if config.founder_amount == RFC006_PREMINE {
+                Some(TreasuryGenesis::placeholder())
+            } else {
+                None
+            },
             config.finality_depth,
             config.payload_pruning_depth,
         )?;

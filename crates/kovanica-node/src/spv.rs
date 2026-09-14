@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn test_locator_generation() {
         let mut node = Node::new();
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
         let genesis_hdr = node.spv_header(&node.genesis_id().unwrap()).unwrap();
         let client = SpvClient::new(genesis_hdr.clone(), false, None);
 
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn test_merkle_block_verification() {
         let mut node = Node::new();
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
         let sent = node.send(1, 200, 2).unwrap();
 
         let genesis_hdr = node.spv_header(&node.genesis_id().unwrap()).unwrap();

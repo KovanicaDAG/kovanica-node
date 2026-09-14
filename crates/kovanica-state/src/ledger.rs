@@ -177,7 +177,12 @@ pub const COINBASE_MATURITY: u64 = 100;
 pub const FEE_PRODUCER_NUM: u64 = 1;
 pub const FEE_PRODUCER_DEN: u64 = 4;
 /// Placeholder treasury key seed base (tranche k uses base + k).
-pub const TREASURY_SEED_BASE: u32 = 0x7E45_0000;
+///
+/// TESTNET-ONLY: the placeholder keys are publicly derivable by design
+/// (`KeyPair::from_u64(TREASURY_SEED_BASE + k)` — anyone can compute them).
+/// Production MUST pass a real secret `treasury_seed` via key ceremony; never
+/// use the placeholder keys for real funds.
+const TREASURY_SEED_BASE: u32 = 0x7E45_0000;
 
 /// RFC-006 supply metrics from [`Ledger::supply`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -2023,9 +2028,15 @@ pub struct Ledger {
     native_minted: u64,
     /// RFC-006: cumulative fee atoms burned (75% of selected-chain fees).
     fees_burned: u64,
-    /// Per-block native mint at insert time (summed along selected chain).
+    /// Cumulative native mint in each block's view (selected-parent chain +
+    /// mergeset coinbases + own coinbase); the selected tip's entry is the
+    /// total minted in its past.
     block_minted: HashMap<BlockId, u64>,
-    /// Per-block fees collected at insert time.
+    /// Cumulative fee burn in each block's view (selected-parent chain +
+    /// mergeset txs + own txs, each block contributing `fees - fees/4`); the
+    /// selected tip's entry is the total burned in its past. Stored as the
+    /// per-block sum so `fees_burned` is exact (the cumulative floor
+    /// `total - total/4` differs from the true sum of per-block burns).
     block_fees: HashMap<BlockId, u64>,
 }
 
@@ -2067,9 +2078,9 @@ impl Ledger {
         heights.insert(genesis_id, 0);
         let mut block_minted = HashMap::new();
         block_minted.insert(genesis_id, summary.minted);
-        let mut block_fees = HashMap::new();
-        block_fees.insert(genesis_id, summary.fees);
         let burned = summary.fees.saturating_sub(summary.fees / FEE_PRODUCER_DEN);
+        let mut block_fees = HashMap::new();
+        block_fees.insert(genesis_id, burned);
         Ok(Self {
             dag,
             schedule,
@@ -2311,20 +2322,50 @@ impl Ledger {
         self.block_minted.get(&tip).copied().unwrap_or(0)
     }
 
-    /// Recompute `native_minted` / `fees_burned` from the selected chain.
-    fn recompute_supply(&mut self) {
-        let mut minted = 0u64;
-        let mut fees = 0u64;
-        for id in self.dag.selected_chain() {
-            if let Some(m) = self.block_minted.get(&id) {
-                minted = minted.saturating_add(*m);
+    /// The cumulative fee burn recorded in `tip`'s view (selected-parent chain
+    /// + all mergeset txs + the block's own txs, each contributing
+    ///   `fees - fees/4`).
+    ///
+    /// `block_fees[id]` stores the **cumulative** view burn, mirroring
+    /// `block_minted`, so the selected tip's entry IS the total burned in its
+    /// past — an O(1) lookup.
+    fn chain_fees_burned_through(&self, tip: BlockId) -> u64 {
+        self.block_fees.get(&tip).copied().unwrap_or(0)
+    }
+
+    /// The chain height of `block` in the selected-parent chain, computed by
+    /// walking selected parents until a block with a known height is reached.
+    /// Mirrors `apply_dag`'s height computation (`height = sp_height + 1`), so
+    /// the incremental and batch paths agree on every block's chain height.
+    ///
+    /// The `heights` map is pruned for final blocks, but ghostdag data
+    /// (selected-parent pointers) is retained, so the walk can reconstruct the
+    /// height of a final block from the nearest non-final ancestor. Returns
+    /// `None` only when the walk is impossible — the whole chain below the
+    /// finality boundary is pruned (callers fall back to blue score).
+    fn chain_height_of(&self, block: BlockId) -> Option<u64> {
+        let mut steps = 0u64;
+        let mut cur = block;
+        loop {
+            if let Some(h) = self.heights.get(&cur) {
+                return Some(h + steps);
             }
-            if let Some(f) = self.block_fees.get(&id) {
-                fees = fees.saturating_add(*f);
-            }
+            let sp = self.dag.ghostdag(&cur).and_then(|g| g.selected_parent)?;
+            cur = sp;
+            steps += 1;
         }
-        self.native_minted = minted;
-        self.fees_burned = fees.saturating_sub(fees / FEE_PRODUCER_DEN);
+    }
+
+    /// Recompute `native_minted` / `fees_burned` from the selected tip's
+    /// cumulative view totals. Both maps are cumulative, so the tip's entry is
+    /// the total in its past — summing along the chain would double-count.
+    /// `block_fees` stores the cumulative **per-block burn** (each block
+    /// contributes `fees - fees/4`), so `fees_burned` is the exact sum of
+    /// per-block burns, not the cumulative floor `total - total/4`.
+    fn recompute_supply(&mut self) {
+        let tip = self.dag.selected_tip();
+        self.native_minted = self.block_minted.get(&tip).copied().unwrap_or(0);
+        self.fees_burned = self.block_fees.get(&tip).copied().unwrap_or(0);
     }
 
     /// RFC-006 supply metrics at the selected tip.
@@ -2336,25 +2377,6 @@ impl Ledger {
             burned: self.fees_burned,
             max_supply: MAX_SUPPLY,
         }
-    }
-
-    /// RFC-006 genesis coinbase: founder premine + 10x1M treasury vaults.
-    ///
-    /// Treasury keys are placeholders (`TREASURY_SEED_BASE + k`) until ceremony.
-    /// Tranche k unlocks at height `k * BLOCKS_PER_YEAR`.
-    pub fn rfc006_genesis_coinbase(founder: Address) -> Transaction {
-        let mut outputs = Vec::with_capacity(1 + RFC006_TREASURY_TRANCHES as usize);
-        outputs.push(TxOutput::native(RFC006_PREMINE, founder));
-        for k in 1..=RFC006_TREASURY_TRANCHES {
-            let unlock_height = k.saturating_mul(BLOCKS_PER_YEAR);
-            let owner_pk = *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
-                .address()
-                .payload();
-            let vault = VaultScript::new(unlock_height, 0, owner_pk)
-                .expect("treasury vault template is well-formed");
-            outputs.push(TxOutput::native(RFC006_TREASURY_TRANCHE, vault.address()));
-        }
-        Transaction::coinbase(outputs, b"genesis-rfc006".to_vec())
     }
 
     /// The UTXO state in `block`'s own view, if `block` is present.
@@ -2674,9 +2696,19 @@ impl Ledger {
         // cap check below sees the true view total (mergeset coinbases included
         // — the oracle finding this fixes).
         let mut view_minted = self.chain_minted_through(sp);
+        let mut view_fees = self.chain_fees_burned_through(sp);
         for merged in &preview.mergeset {
-            let merged_height = self.heights.get(merged).copied().unwrap_or(0);
             let merged_blue_score = self.dag.ghostdag(merged).map_or(0, |g| g.blue_score);
+            // C1: the merged block's TRUE chain height, not blue score. The
+            // batch path (apply_dag) computes chain heights by walking selected
+            // parents from genesis; the incremental path must agree so every
+            // mergeset coinbase gets the same creation_height (CSV/maturity
+            // parity). The heights map is pruned for final blocks, so walk the
+            // selected-parent chain from the merged block until a known height
+            // is reached (mirroring apply_dag's height = sp_height + 1). Blue
+            // score is only a last-resort fallback when the whole chain below
+            // the finality boundary is pruned.
+            let merged_height = self.chain_height_of(*merged).unwrap_or(merged_blue_score);
             let payload = self
                 .dag
                 .block(merged)
@@ -2702,6 +2734,12 @@ impl Ledger {
                     self.vault_activation_score,
                 ) {
                     view_minted = view_minted.saturating_add(merged_summary.minted);
+                    // A2: each block contributes its OWN burn (fees - fees/4);
+                    // the cumulative floor total - total/4 differs from the sum
+                    // of per-block burns.
+                    view_fees = view_fees.saturating_add(
+                        merged_summary.fees - merged_summary.fees / FEE_PRODUCER_DEN,
+                    );
                 }
             }
         }
@@ -2724,6 +2762,7 @@ impl Ledger {
             self.vault_activation_score,
         )?;
         view_minted = view_minted.saturating_add(summary.minted);
+        view_fees = view_fees.saturating_add(summary.fees - summary.fees / FEE_PRODUCER_DEN);
 
         // RFC-006 supply cap against the full view (selected-parent chain + mergeset + this block).
         if view_minted > MAX_SUPPLY {
@@ -2745,9 +2784,9 @@ impl Ledger {
         self.deltas.insert(id, delta);
         self.stake_deltas.insert(id, stake_delta);
         self.heights.insert(id, new_height);
-        // Cumulative view total (selected-parent chain + mergeset + own).
+        // Cumulative view totals (selected-parent chain + mergeset + own).
         self.block_minted.insert(id, view_minted);
-        self.block_fees.insert(id, summary.fees);
+        self.block_fees.insert(id, view_fees);
         // The selected tip can only change to the block just inserted; when it
         // does, its state is the single materialised tip state.
         if self.dag.selected_tip() == id {
@@ -3403,10 +3442,32 @@ impl Ledger {
                 .map_err(LedgerCheckpointError::Rebuild)?;
         }
 
-        // Authoritative supply from checkpoint (v7+). Tip replay may have
-        // recomputed from an incomplete block_minted map (history below
-        // finality is not present); prefer the stored tip counters.
+        // Authoritative supply from checkpoint (v7+). The stored values are the
+        // LIVE TIP's totals at write time, but the tip-segment replay above
+        // computed cumulative values starting from 0 at the checkpoint block
+        // (its pre-checkpoint history is pruned, so block_minted[checkpoint_id]
+        // was never set). Reconcile: the checkpoint block's view totals are the
+        // stored totals minus the tip segment's own contribution. Add that base
+        // to every replayed block's cumulative entry so the maps are continuous
+        // and a new block after restore computes view_minted = stored_total +
+        // own (A1 — previously the first post-restore block collapsed the
+        // supply counters to just its own contribution).
         if let (Some(m), Some(b)) = (stored_minted, stored_burned) {
+            let tip = ledger.dag.selected_tip();
+            let replayed_minted = ledger.block_minted.get(&tip).copied().unwrap_or(0);
+            let replayed_burn = ledger.block_fees.get(&tip).copied().unwrap_or(0);
+            let base_minted = m.saturating_sub(replayed_minted);
+            let base_burn = b.saturating_sub(replayed_burn);
+            for v in ledger.block_minted.values_mut() {
+                *v = v.saturating_add(base_minted);
+            }
+            for v in ledger.block_fees.values_mut() {
+                *v = v.saturating_add(base_burn);
+            }
+            // The checkpoint block itself (the restored genesis) carries the
+            // base totals; it was never inserted through the replay path.
+            ledger.block_minted.insert(checkpoint_id, base_minted);
+            ledger.block_fees.insert(checkpoint_id, base_burn);
             ledger.native_minted = m;
             ledger.fees_burned = b;
         } else {
@@ -3418,6 +3479,60 @@ impl Ledger {
 
         Ok(ledger)
     }
+}
+
+/// RFC-006 genesis coinbase: founder premine + 10x1M treasury vaults.
+///
+/// Treasury keys are derived from `treasury_seed` (32 bytes) if provided:
+/// `BLAKE3(seed || "treasury" || k)` — not derivable without the seed.
+///
+/// If `treasury_seed` is `None`, the **placeholder** keys are used:
+/// `KeyPair::from_u64(TREASURY_SEED_BASE + k)`. These are **TESTNET-ONLY and
+/// publicly derivable by design** — anyone can compute them from the public
+/// constant, so they must NEVER hold real funds. Production MUST pass a real
+/// secret seed via key ceremony; the placeholder path exists solely to keep
+/// the live testnet genesis (9565fc20…) reproducible.
+///
+/// Tranche k unlocks at height `k * BLOCKS_PER_YEAR`.
+pub fn rfc006_genesis_coinbase(founder: Address, treasury_seed: Option<[u8; 32]>) -> Transaction {
+    let mut outputs = Vec::with_capacity(1 + RFC006_TREASURY_TRANCHES as usize);
+    outputs.push(TxOutput::native(RFC006_PREMINE, founder));
+    for k in 1..=RFC006_TREASURY_TRANCHES {
+        let unlock_height = k.saturating_mul(BLOCKS_PER_YEAR);
+        let owner_pk = if let Some(seed) = treasury_seed {
+            // Derive key from secret seed: BLAKE3(seed || "treasury" || k)
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&seed);
+            hasher.update(b"treasury");
+            hasher.update(&k.to_le_bytes());
+            let derived = hasher.finalize();
+            *KeyPair::from_seed(*derived.as_bytes()).address().payload()
+        } else {
+            // Placeholder (TESTNET-ONLY): publicly derivable by design so the
+            // live testnet genesis stays reproducible. Never use for real funds.
+            *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
+                .address()
+                .payload()
+        };
+        let vault = VaultScript::new(unlock_height, 0, owner_pk)
+            .expect("treasury vault template is well-formed");
+        outputs.push(TxOutput::native(RFC006_TREASURY_TRANCHE, vault.address()));
+    }
+    Transaction::coinbase(outputs, b"genesis-rfc006".to_vec())
+}
+
+/// Derive the placeholder treasury public key for tranche `k` (1-based).
+///
+/// This matches the derivation used when `treasury_seed = None` in
+/// [`rfc006_genesis_coinbase`]. Exposed for testing and verification.
+///
+/// ⚠️ TESTNET-ONLY: these keys are **publicly derivable by design**
+/// (`KeyPair::from_u64(TREASURY_SEED_BASE + k)` — anyone can compute them).
+/// Do not use them for real funds; production must pass a real secret seed.
+pub fn placeholder_treasury_key(k: u32) -> [u8; 32] {
+    *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
+        .address()
+        .payload()
 }
 
 /// Decode a single block from the checkpoint tip segment format.

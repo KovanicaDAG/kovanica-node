@@ -10,7 +10,7 @@ use kovanica_node::{apply_relay, Node, RelayMsg, RelaySession};
 fn genesis_node() -> Node {
     let mut node = Node::new();
     node.set_now_ms(1_000);
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
     node
 }
 

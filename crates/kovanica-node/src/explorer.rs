@@ -21,14 +21,14 @@ use kovanica_state::{
 use crate::dht::{NodeId, PeerContact, RoutingTable};
 use crate::dns_seed::{DnsSeedConfig, DnsSeedResolver};
 use crate::metrics::{
-    init_metrics, record_explorer_http_request, render_prometheus, set_explorer_ws_clients,
-    set_peer_count,
+    init_metrics, record_explorer_http_request, record_supply, render_prometheus,
+    set_explorer_ws_clients, set_peer_count,
 };
 use crate::net::{
     decode_records, encode_records, pull_blocks_timeout, serve_exchange, serve_headers_first,
     sync_headers_first,
 };
-use crate::node::{BlockRecord, Node, WalletDirection, HALVING_ERA};
+use crate::node::{BlockRecord, Node, TreasuryGenesis, WalletDirection, HALVING_ERA};
 use crate::p2p::Mesh;
 
 const UI: &str = include_str!("explorer.html");
@@ -699,11 +699,35 @@ fn line_mesh() -> Mesh {
 fn genesis_node() -> Node {
     let profile = network_profile();
     let mut node = Node::new();
+    // RFC-006 treasury: the testnet profile uses the deterministic placeholder
+    // keys (publicly derivable by design — testnet-only). Mainnet MUST boot
+    // with a real secret seed from the key ceremony (`KOVANICA_TREASURY_SEED`,
+    // 64 hex chars); refusing to boot with publicly-derivable keys on mainnet
+    // is the fail-fast guard for the Gate-2 MEDIUM (mainnet placeholder keys).
+    let treasury = if profile.id == "kovanica-mainnet" {
+        match std::env::var("KOVANICA_TREASURY_SEED") {
+            Ok(hex) if hex.len() == 64 => {
+                let mut seed = [0u8; 32];
+                for (i, byte) in hex.as_bytes().chunks(2).enumerate() {
+                    seed[i] = u8::from_str_radix(std::str::from_utf8(byte).expect("ascii hex"), 16)
+                        .expect("KOVANICA_TREASURY_SEED must be 64 hex chars");
+                }
+                TreasuryGenesis { seed: Some(seed) }
+            }
+            _ => panic!(
+                "kovanica-mainnet requires KOVANICA_TREASURY_SEED (64 hex chars): \
+                 refusing to boot with publicly-derivable placeholder treasury keys"
+            ),
+        }
+    } else {
+        TreasuryGenesis::placeholder()
+    };
     node.genesis_with_finality(
         profile.genesis_k,
         profile.genesis_subsidy,
         profile.genesis_premine,
         profile.founder_seed,
+        Some(treasury),
         profile.finality_depth,
         profile.payload_pruning_depth,
     )
@@ -1158,6 +1182,12 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
         // Sample live gauges on every scrape so Prometheus always sees fresh
         // values even when no block/mempool event fired recently.
         set_peer_count(app.live_peers.len());
+        // RFC-006 supply gauges from the selected node's ledger (atoms).
+        if let Some(n) = app.mesh.node(&app.selected) {
+            if let Ok(ledger) = n.ledger() {
+                record_supply(ledger.supply());
+            }
+        }
         return respond_prometheus_metrics(&mut stream);
     }
 

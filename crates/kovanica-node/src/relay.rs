@@ -906,7 +906,7 @@ mod tests {
     #[test]
     fn test_handle_relay_query() {
         let mut node = Node::new();
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
         let sent = node.send(1, 200, 2).unwrap();
 
         // Query GetHeaders
@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn test_handle_relay_query_dht_ping() {
         let mut node = Node::new();
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
 
         let sender = NodeId::from_bytes([1u8; 32]);
         let nonce = 12345u64;
@@ -1018,7 +1018,7 @@ mod tests {
     #[test]
     fn test_handle_relay_query_dht_find_node() {
         let mut node = Node::new();
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
 
         let sender = NodeId::from_bytes([1u8; 32]);
         let target = NodeId::from_bytes([2u8; 32]);

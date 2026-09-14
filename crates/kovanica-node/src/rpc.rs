@@ -66,6 +66,7 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
                     u64_arg(subsidy)?,
                     u64_arg(amount)?,
                     u64_arg(seed)?,
+                    None, // RPC genesis is treasury-less; the explorer profile opts in explicitly
                 )
                 .map_err(|e| e.to_string())?;
             Ok(format!("genesis {genesis} founder {founder}"))
@@ -79,6 +80,7 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
                     u64_arg(subsidy)?,
                     u64_arg(amount)?,
                     u64_arg(seed)?,
+                    None, // RPC genesis is treasury-less; the explorer profile opts in explicitly
                     u64_arg(finality_depth)?,
                     u64::MAX,
                 )

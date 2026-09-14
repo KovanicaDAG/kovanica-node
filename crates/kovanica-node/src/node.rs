@@ -107,6 +107,8 @@ pub enum NodeError {
     InsufficientMultisigSignatures { have: usize, need: u8 },
     /// A multisig operation expected a single input but the transaction has more.
     MultisigInputCount { expected: usize, actual: usize },
+    /// Treasury genesis requires the standard RFC-006 premine amount.
+    TreasuryPremineMismatch { amount: u64 },
 }
 
 impl core::fmt::Display for NodeError {
@@ -151,11 +153,41 @@ impl core::fmt::Display for NodeError {
                     "multisig transaction must have exactly {expected} input(s), got {actual}"
                 )
             }
+            NodeError::TreasuryPremineMismatch { amount } => write!(
+                f,
+                "treasury genesis requires the standard RFC-006 premine ({amount} != RFC006_PREMINE)"
+            ),
         }
     }
 }
 
 impl std::error::Error for NodeError {}
+
+/// RFC-006 treasury genesis configuration.
+///
+/// Treasury inclusion is an **explicit** decision — it is never inferred from
+/// the premine amount. When present, the genesis coinbase mints the standard
+/// RFC-006 premine ([`kovanica_state::RFC006_PREMINE`]) plus
+/// [`kovanica_state::RFC006_TREASURY_TRANCHES`] vault outputs, each locking
+/// [`kovanica_state::RFC006_TREASURY_TRANCHE`] behind an absolute-time vault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreasuryGenesis {
+    /// Treasury key seed. `None` = deterministic placeholder keys
+    /// (`KeyPair::from_u64(0x7E45_0000 + k)` — **TESTNET-ONLY and publicly
+    /// derivable by design**; anyone can compute them, so they must never hold
+    /// real funds); `Some(seed)` = derive the treasury keys from the secret
+    /// (`BLAKE3(seed || "treasury" || k)`, mainnet key ceremony; the seed must
+    /// be delivered out-of-band and never stored in the repository).
+    pub seed: Option<[u8; 32]>,
+}
+
+impl TreasuryGenesis {
+    /// Treasury with the deterministic placeholder keys (testnet default).
+    /// ⚠️ TESTNET-ONLY: these keys are publicly derivable by design.
+    pub fn placeholder() -> Self {
+        Self { seed: None }
+    }
+}
 
 /// The result of a successful [`Node::send`]: the block that carried the spend
 /// and the transaction's id.
@@ -706,8 +738,17 @@ impl Node {
         subsidy: u64,
         amount: u64,
         founder_seed: u64,
+        treasury: Option<TreasuryGenesis>,
     ) -> Result<(BlockId, Address), NodeError> {
-        self.genesis_with_finality(k, subsidy, amount, founder_seed, u64::MAX, u64::MAX)
+        self.genesis_with_finality(
+            k,
+            subsidy,
+            amount,
+            founder_seed,
+            treasury,
+            u64::MAX,
+            u64::MAX,
+        )
     }
 
     /// Like [`Node::genesis`], but with configurable finality depth and payload
@@ -729,6 +770,7 @@ impl Node {
         subsidy: u64,
         amount: u64,
         founder_seed: u64,
+        treasury: Option<TreasuryGenesis>,
         finality_depth: u64,
         payload_pruning_depth: u64,
     ) -> Result<(BlockId, Address), NodeError> {
@@ -736,11 +778,21 @@ impl Node {
             return Err(NodeError::AlreadyInitialized);
         }
         let founder = Self::address(founder_seed);
-        // RFC-006: when premine matches the standard 0.2M, include treasury vaults.
-        let coinbase = if amount == kovanica_state::RFC006_PREMINE {
-            Ledger::rfc006_genesis_coinbase(founder)
-        } else {
-            Transaction::coinbase(vec![TxOutput::native(amount, founder)], b"genesis".to_vec())
+        // RFC-006: treasury inclusion is explicit — never inferred from the
+        // premine amount. With treasury on, the genesis coinbase mints the
+        // standard RFC-006 premine plus treasury vaults; `amount` must match
+        // the standard premine (it is part of the consensus genesis and cannot
+        // vary while the treasury is present).
+        let coinbase = match treasury {
+            Some(t) => {
+                if amount != kovanica_state::RFC006_PREMINE {
+                    return Err(NodeError::TreasuryPremineMismatch { amount });
+                }
+                kovanica_state::rfc006_genesis_coinbase(founder, t.seed)
+            }
+            None => {
+                Transaction::coinbase(vec![TxOutput::native(amount, founder)], b"genesis".to_vec())
+            }
         };
         let schedule = HalvingSchedule::new(subsidy, DEFAULT_HALVING_ERA);
         let ledger = if finality_depth == u64::MAX && payload_pruning_depth == u64::MAX {
@@ -3192,7 +3244,7 @@ mod tests {
     #[test]
     fn test_node_spv_header_and_export() {
         let mut node = Node::new();
-        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1, None).unwrap();
         let sent1 = node.send(1, 100, 2).unwrap();
         let sent2 = node.send(2, 50, 3).unwrap();
 
@@ -3221,7 +3273,7 @@ mod tests {
     #[test]
     fn test_node_headers_from() {
         let mut node = Node::new();
-        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1, None).unwrap();
         let sent1 = node.send(1, 100, 2).unwrap();
         let sent2 = node.send(2, 50, 3).unwrap();
 
@@ -3258,7 +3310,7 @@ mod tests {
     #[test]
     fn test_node_merkle_block() {
         let mut node = Node::new();
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
         let sent = node.send(1, 200, 2).unwrap();
 
         // Matching transaction
@@ -3296,7 +3348,7 @@ mod tests {
         let mut node = Node::new();
         let miner_kp = KeyPair::from_u64(1);
         node.set_miner(miner_kp.address());
-        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1, None).unwrap();
 
         let template = node.mining_template().unwrap();
         assert_eq!(template.parents, vec![genesis]);
@@ -3324,7 +3376,7 @@ mod tests {
         let mut node = Node::new();
         let miner_kp = KeyPair::from_u64(1);
         node.set_miner(miner_kp.address());
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
 
         // Submit a spend to the mempool
         node.pool(1, 100, 2).unwrap();

@@ -26,7 +26,7 @@ fn make_2of3(node: &mut Node) -> (Address, String) {
 #[test]
 fn two_of_three_create_fund_spend() {
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     let (ms_addr, _script) = make_2of3(&mut node);
 
     // Fund the multisig address with a single coin.
@@ -71,7 +71,7 @@ fn two_of_three_create_fund_spend() {
 #[test]
 fn multisig_spend_fails_with_one_signature() {
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     let (ms_addr, _script) = make_2of3(&mut node);
     node.send_to(1, 500, ms_addr).unwrap();
 
@@ -94,7 +94,7 @@ fn multisig_spend_fails_with_one_signature() {
 #[test]
 fn multisig_spend_rejects_unauthorized_signer() {
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     let (ms_addr, _script) = make_2of3(&mut node);
     node.send_to(1, 500, ms_addr).unwrap();
 
@@ -117,7 +117,7 @@ fn multisig_spend_rejects_unauthorized_signer() {
 #[test]
 fn multisig_spend_rejects_duplicate_signature() {
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     let (ms_addr, _script) = make_2of3(&mut node);
     node.send_to(1, 500, ms_addr).unwrap();
 
@@ -141,7 +141,7 @@ fn multisig_spend_rejects_duplicate_signature() {
 #[test]
 fn multisig_spend_rejects_wrong_redeem_script() {
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     let (ms_addr, _script) = make_2of3(&mut node);
     node.send_to(1, 500, ms_addr).unwrap();
 
@@ -177,7 +177,7 @@ fn snapshot_roundtrip_preserves_multisig_utxo() {
     let path_str = path.to_str().unwrap();
 
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     let (ms_addr, _script) = make_2of3(&mut node);
     node.send_to(1, 500, ms_addr).unwrap();
     node.save(path_str).unwrap();
@@ -225,7 +225,7 @@ fn snapshot_roundtrip_preserves_multisig_utxo() {
 #[test]
 fn create_multisig_rejects_bad_threshold() {
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     let pks: Vec<[u8; 32]> = (1..=3)
         .map(|s| *KeyPair::from_u64(s).address().payload())
         .collect();

@@ -107,7 +107,7 @@ fn bench_mempool(c: &mut Criterion) {
 /// every tx id is unique while the spends stay mutually conflicting.
 fn node_with_contested_pool(n: usize) -> Node {
     let mut node = Node::new();
-    node.genesis(3, 1000, 1000, 1).expect("genesis");
+    node.genesis(3, 1000, 1000, 1, None).expect("genesis");
     for i in 0..n {
         node.pool(1, 400, 1000 + i as u64).expect("pooled transfer");
     }

@@ -11,17 +11,22 @@
 //! used with `csv = 0` (disabled).  Only the owner key may spend once the
 //! absolute lock expires.
 
-use kovanica_node::Node;
+use kovanica_node::{Node, TreasuryGenesis};
 use kovanica_state::vault::VaultScript;
 use kovanica_state::{
-    Address, HalvingSchedule, KeyPair, Ledger, LedgerError, LedgerInsertError, OutPoint,
-    Transaction, TxOutput, BLOCKS_PER_YEAR, DEFAULT_HALVING_ERA, RFC006_PREMINE,
-    RFC006_TREASURY_TRANCHE, RFC006_TREASURY_TRANCHES, TREASURY_SEED_BASE,
+    placeholder_treasury_key, Address, HalvingSchedule, KeyPair, Ledger, LedgerError,
+    LedgerInsertError, OutPoint, Transaction, TxOutput, BLOCKS_PER_YEAR, DEFAULT_HALVING_ERA,
+    RFC006_PREMINE, RFC006_TREASURY_TRANCHE, RFC006_TREASURY_TRANCHES,
 };
 
 /// One KVNC in atoms.
-const ATOM: u64 = 100_000_000;
 const K: u16 = 3;
+
+/// The live kovanica-testnet genesis block id (RFC-006, placeholder treasury).
+/// Verified against `GET https://explorer.kovanica.online/api/head` — the
+/// placeholder derivation MUST reproduce this hash exactly (no testnet reset).
+const LIVE_TESTNET_GENESIS: &str =
+    "9565fc20cb465eec0198a65c07da6b825e4211c4060d581a2c7dac6c96bafc97";
 
 // ---------------------------------------------------------------------------
 // 1. Genesis with treasury emits premine + 10 vault tranches
@@ -32,10 +37,16 @@ fn genesis_with_treasury_emits_premine_and_vault_tranches() {
     let founder_kp = KeyPair::from_u64(1);
 
     let mut node = Node::new();
-    // When amount == RFC006_PREMINE the node automatically includes treasury
-    // vaults (see `genesis_with_finality`).
+    // Treasury inclusion is explicit: `Some(TreasuryGenesis::placeholder())`
+    // opts the genesis coinbase into the RFC-006 premine + treasury vaults.
     let (genesis_id, founder) = node
-        .genesis(K, 100, RFC006_PREMINE, 1)
+        .genesis(
+            K,
+            100,
+            RFC006_PREMINE,
+            1,
+            Some(TreasuryGenesis::placeholder()),
+        )
         .expect("genesis with treasury");
 
     assert_eq!(founder, founder_kp.address());
@@ -46,9 +57,7 @@ fn genesis_with_treasury_emits_premine_and_vault_tranches() {
     // Each tranche is locked in a vault; verify balances and script shape.
     let mut total_vault_value: u64 = 0;
     for k in 1..=RFC006_TREASURY_TRANCHES {
-        let owner_pk = *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
-            .address()
-            .payload();
+        let owner_pk = placeholder_treasury_key(k);
         let unlock_height = k.saturating_mul(BLOCKS_PER_YEAR);
         let script = VaultScript::new(unlock_height, 0, owner_pk).expect("valid vault");
         assert_eq!(
@@ -177,22 +186,24 @@ fn tranche_spendable_at_unlock_height() {
 #[test]
 fn treasury_keys_are_deterministic_placeholders() {
     for k in 1..=RFC006_TREASURY_TRANCHES {
-        let pk1 = *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
-            .address()
-            .payload();
-        let pk2 = *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
-            .address()
-            .payload();
+        let pk1 = placeholder_treasury_key(k);
+        let pk2 = placeholder_treasury_key(k);
         assert_eq!(pk1, pk2, "key must be deterministic for tranche {k}");
         assert_ne!(pk1, [0u8; 32], "key must not be zero for tranche {k}");
+        // The placeholder derivation is the OLD pre-Phase-1 formula:
+        // KeyPair::from_u64(0x7E45_0000 + k) — publicly derivable by design
+        // (TESTNET-ONLY). This is what keeps the live testnet genesis stable.
+        let expected = *KeyPair::from_u64(u64::from(0x7E45_0000u32 + k))
+            .address()
+            .payload();
+        assert_eq!(
+            pk1, expected,
+            "placeholder key for tranche {k} must use the legacy derivation"
+        );
     }
     // All tranche keys must differ.
     let keys: Vec<[u8; 32]> = (1..=RFC006_TREASURY_TRANCHES)
-        .map(|k| {
-            *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
-                .address()
-                .payload()
-        })
+        .map(placeholder_treasury_key)
         .collect();
     for i in 0..keys.len() {
         for j in (i + 1)..keys.len() {
@@ -201,12 +212,32 @@ fn treasury_keys_are_deterministic_placeholders() {
     }
 }
 
+/// The placeholder-treasury genesis MUST reproduce the live testnet genesis
+/// hash (9565fc20…) — the whole point of keeping the OLD placeholder
+/// derivation. A divergence here means a testnet reset.
+#[test]
+fn genesis_with_placeholder_treasury_matches_live_testnet_genesis() {
+    let mut node = Node::new();
+    let (genesis_id, _founder) = node
+        .genesis(
+            K,
+            10 * 100_000_000, // RFC-006 genesis subsidy (10 KVNC)
+            RFC006_PREMINE,
+            1, // live founder seed
+            Some(TreasuryGenesis::placeholder()),
+        )
+        .expect("genesis with treasury");
+    assert_eq!(
+        genesis_id.to_hex(),
+        LIVE_TESTNET_GENESIS,
+        "placeholder-treasury genesis must equal the live testnet genesis"
+    );
+}
+
 #[test]
 fn tranche_vault_scripts_have_correct_unlock_heights() {
     for k in 1..=RFC006_TREASURY_TRANCHES {
-        let owner_pk = *KeyPair::from_u64(u64::from(TREASURY_SEED_BASE + k))
-            .address()
-            .payload();
+        let owner_pk = placeholder_treasury_key(k);
         let unlock_height = k.saturating_mul(BLOCKS_PER_YEAR);
         let script = VaultScript::new(unlock_height, 0, owner_pk).expect("valid");
         assert_eq!(script.unlock_height(), unlock_height);
@@ -223,8 +254,27 @@ fn tranche_vault_scripts_have_correct_unlock_heights() {
 fn genesis_without_treasury_has_only_premine() {
     let mut node = Node::new();
     let (_genesis, founder) = node
-        .genesis(K, 1_000, 1_000, 1) // amount != RFC006_PREMINE → no treasury
+        .genesis(K, 1_000, 1_000, 1, None) // explicit: no treasury vaults
         .expect("genesis without treasury");
 
     assert_eq!(node.balance(&founder).unwrap(), 1_000);
+}
+
+// ---------------------------------------------------------------------------
+// 5. Treasury with a non-standard premine is rejected (explicit-flag guard)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn treasury_with_non_standard_premine_is_rejected() {
+    let mut node = Node::new();
+    // Treasury inclusion is explicit, and the premine is part of the consensus
+    // genesis: asking for treasury with a non-standard premine must fail loudly
+    // rather than silently minting the standard premine.
+    let err = node
+        .genesis(K, 100, 1_000, 1, Some(TreasuryGenesis::placeholder()))
+        .expect_err("treasury with non-standard premine must be rejected");
+    assert!(
+        err.to_string().contains("RFC006_PREMINE"),
+        "unexpected error: {err}"
+    );
 }

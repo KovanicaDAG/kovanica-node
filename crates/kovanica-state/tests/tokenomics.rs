@@ -707,3 +707,159 @@ fn snapshot_roundtrip_preserves_supply() {
         "DAG size preserved"
     );
 }
+
+// ---------------------------------------------------------------------------
+// (f) Oracle regression tests (Gate 1 remediation)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn checkpoint_restore_keeps_supply_continuous_after_new_block() {
+    // A1 regression: after a checkpoint restore, inserting a new block must
+    // compute view_minted = stored_total + own. Previously block_minted was
+    // never seeded for the checkpoint block, so the first post-restore block
+    // collapsed native_minted/fees_burned to just its own contribution.
+    const SMALL: HalvingSchedule = HalvingSchedule::new(1_000, ERA);
+    let alice = KeyPair::from_u64(1);
+    let bob = KeyPair::from_u64(2);
+    let miner = KeyPair::from_u64(3);
+    let coinbase = Transaction::coinbase(
+        vec![TxOutput::native(1_000, alice.address())],
+        b"genesis".to_vec(),
+    );
+    let coin = OutPoint::new(coinbase.id(), 0);
+    let mut ledger = Ledger::with_finality(K, SMALL, &[coinbase], 2).unwrap();
+    let genesis = ledger.genesis();
+
+    // Block 1: alice spends 1_000 → bob 800 + alice 100 (fee 100, burn 75).
+    let t1 = Transaction::signed(
+        &[(coin, &alice)],
+        vec![
+            TxOutput::native(800, bob.address()),
+            TxOutput::native(100, alice.address()),
+        ],
+        b"t1".to_vec(),
+    );
+    let cb1 = Transaction::coinbase(
+        vec![TxOutput::native(1_025, miner.address())],
+        b"cb1".to_vec(),
+    );
+    let t1_change = OutPoint::new(t1.id(), 1);
+    let mut tip = ledger.insert(vec![genesis], 1, 0, 0, &[cb1, t1]).unwrap();
+    // Block 2: alice spends 100 → bob 50 + alice 49 (fee 1, burn 1).
+    let t2 = Transaction::signed(
+        &[(t1_change, &alice)],
+        vec![
+            TxOutput::native(50, bob.address()),
+            TxOutput::native(49, alice.address()),
+        ],
+        b"t2".to_vec(),
+    );
+    let cb2 = Transaction::coinbase(
+        vec![TxOutput::native(1_000, miner.address())],
+        b"cb2".to_vec(),
+    );
+    tip = ledger.insert(vec![tip], 1, 0, 0, &[cb2, t2]).unwrap();
+    // Blocks 3-6: empty (subsidy 1_000 each).
+    for i in 3..=6u64 {
+        let cb = Transaction::coinbase(
+            vec![TxOutput::native(1_000, miner.address())],
+            format!("cb{i}").into_bytes(),
+        );
+        tip = ledger.insert(vec![tip], 1, 0, 0, &[cb]).unwrap();
+    }
+
+    // native_minted = 1_000 (genesis) + 1_025 + 1_000×5 = 7_025; burned = 76.
+    assert_eq!(ledger.supply().total, 7_025);
+    assert_eq!(ledger.supply().burned, 76);
+
+    let buf = ledger.write_checkpoint().unwrap();
+    let mut restored = Ledger::read_checkpoint(&buf).unwrap();
+    // Immediately after restore the stored totals are authoritative.
+    assert_eq!(restored.supply().total, 7_025);
+    assert_eq!(restored.supply().burned, 76);
+
+    // Insert one more empty block: supply must be continuous, not collapse.
+    let cb7 = Transaction::coinbase(
+        vec![TxOutput::native(1_000, miner.address())],
+        b"cb7".to_vec(),
+    );
+    let tip = restored.dag().selected_tip();
+    restored.insert(vec![tip], 1, 0, 0, &[cb7]).unwrap();
+    assert_eq!(
+        restored.supply().total,
+        8_025,
+        "native_minted must be continuous across the restore"
+    );
+    assert_eq!(
+        restored.supply().burned,
+        76,
+        "fees_burned must be continuous across the restore"
+    );
+}
+
+#[test]
+fn mergeset_coinbase_creation_height_matches_apply_dag() {
+    // C1 regression: the incremental insert path must give a mergeset block's
+    // coinbase the same creation_height as the batch apply_dag path. The batch
+    // path uses CHAIN height (selected-parent walk); the incremental path used
+    // to use blue_score, which exceeds chain height for blocks with a mergeset.
+    const SMALL: HalvingSchedule = HalvingSchedule::new(1_000, ERA);
+    let coinbase = Transaction::coinbase(
+        vec![TxOutput::native(1_000, KeyPair::from_u64(1).address())],
+        b"genesis".to_vec(),
+    );
+    let mut ledger = Ledger::new(K, SMALL, &[coinbase]).unwrap();
+    let genesis = ledger.genesis();
+
+    // DAG shape (S is the mergeset block of M; blue_score(S)=4, chain_height(S)=3):
+    //   G → A → C → D → E → M
+    //   G → B ↗        ↗ S
+    //   G → B → S ↗
+    let cb = |seed: u64, tag: &str| {
+        Transaction::coinbase(
+            vec![TxOutput::native(1_000, KeyPair::from_u64(seed).address())],
+            tag.as_bytes().to_vec(),
+        )
+    };
+    let a = ledger
+        .insert(vec![genesis], 1, 0, 0, &[cb(1, "a")])
+        .unwrap();
+    let b = ledger
+        .insert(vec![genesis], 1, 0, 0, &[cb(2, "b")])
+        .unwrap();
+    let c = ledger.insert(vec![a, b], 1, 0, 0, &[cb(3, "c")]).unwrap();
+    let d = ledger.insert(vec![c], 1, 0, 0, &[cb(3, "d")]).unwrap();
+    let e = ledger.insert(vec![d], 1, 0, 0, &[cb(3, "e")]).unwrap();
+    let s = ledger.insert(vec![c, b], 1, 0, 0, &[cb(4, "s")]).unwrap();
+    let m = ledger.insert(vec![e, s], 1, 0, 0, &[cb(5, "m")]).unwrap();
+
+    // S's coinbase output.
+    let s_cb = cb(4, "s");
+    let s_coin = OutPoint::new(s_cb.id(), 0);
+
+    // Incremental path: S's coinbase creation_height in M's view.
+    let inc_state = ledger.state(&m).expect("M's view state");
+    let inc_entry = inc_state
+        .get_entry(&s_coin)
+        .expect("S's coinbase must be in M's view (mergeset)");
+    let inc_height = inc_entry.creation_height;
+
+    // Batch path: apply_dag over the same DAG.
+    let run = apply_dag(ledger.dag(), SMALL.genesis_subsidy);
+    let batch_entry = run
+        .utxo
+        .get_entry(&s_coin)
+        .expect("S's coinbase must be in the batch result");
+    let batch_height = batch_entry.creation_height;
+
+    // Both must agree, and equal the true chain height of S (3), not its blue
+    // score (4) — the C1 parity invariant.
+    assert_eq!(
+        inc_height, batch_height,
+        "incremental and batch creation_height must match"
+    );
+    assert_eq!(
+        inc_height, 3,
+        "S's chain height is 3 (blue_score is 4); got {inc_height}"
+    );
+}
