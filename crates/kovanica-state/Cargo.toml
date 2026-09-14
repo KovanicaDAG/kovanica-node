@@ -30,3 +30,5 @@ harness = false
 
 [lints.rust]
 unsafe_code = "forbid"
+# hybrid_activation_height retained for retarget replay; read path not yet wired
+dead_code = "allow"
