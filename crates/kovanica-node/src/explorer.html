@@ -96,7 +96,7 @@
     <div class="dag-head">
       <div>
         <h2>BlockDAG</h2>
-        <p class="muted" style="margin:4px 0 0;font-size:12px">Native token <strong>Kovanica (KVNC)</strong> on <span id="net-label">kovanica-testnet</span>. Subsidy halves every 1000 blocks. Engine is the Rust node.</p>
+        <p class="muted" style="margin:4px 0 0;font-size:12px">Native token <strong>Kovanica (KVNC)</strong> on <span id="net-label">kovanica-testnet</span>. Subsidy halves every 2000000 blocks. Engine is the Rust node.</p>
       </div>
       <div class="row" style="gap: 8px;">
         <button class="ghost" id="zoom-in" title="Zoom in">+</button>
@@ -563,7 +563,7 @@ function analyticsPanel(s) {
         <div style="display:flex;justify-content:space-between"><dt>Issuance</dt><dd>${fmtKvnc(node.issuance || 0)}</dd></div>
         <div style="display:flex;justify-content:space-between"><dt>Total Supply</dt><dd>${fmtKvnc(node.supply || 0)}</dd></div>
         <div style="display:flex;justify-content:space-between"><dt>Min Fee</dt><dd>${fmtKvnc(node.min_fee || 0)}</dd></div>
-        <div style="display:flex;justify-content:space-between"><dt>Halving Era</dt><dd>${node.halving_era || 1000} blocks</dd></div>
+        <div style="display:flex;justify-content:space-between"><dt>Era Length</dt><dd>${node.halving_era || 2000000} blocks</dd></div>
         <div style="display:flex;justify-content:space-between"><dt>PoW</dt><dd>${node.pow ? "enabled" : "disabled"}</dd></div>
       </dl>
     </div>

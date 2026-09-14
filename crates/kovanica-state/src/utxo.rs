@@ -35,6 +35,22 @@ impl UtxoEntry {
             is_coinbase: false,
         }
     }
+
+    /// RFC-006: whether this coinbase output is spendable at the given block
+    /// height. Genesis coinbases (`creation_height == 0`) are always spendable.
+    /// Regular coinbases require `height >= creation_height + COINBASE_MATURITY`.
+    pub fn is_spendable_at(&self, height: u64) -> bool {
+        if !self.is_coinbase {
+            return true; // non-coinbase outputs have no maturity restriction
+        }
+        if self.creation_height == 0 {
+            return true; // genesis coinbase is exempt
+        }
+        height
+            >= self
+                .creation_height
+                .saturating_add(crate::ledger::COINBASE_MATURITY)
+    }
 }
 
 /// The set of unspent transaction outputs — the full ledger state at a point in

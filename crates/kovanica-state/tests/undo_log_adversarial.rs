@@ -503,13 +503,18 @@ fn coinbase_maturity_and_value_conservation() {
         "same-block coinbase spend must be rejected"
     );
 
-    // Coinbase accepted alone; subsequent block spends the coinbase output.
+    // Coinbase accepted alone; a later block spends the coinbase output after
+    // it matures (RFC-006: creation_height 2 → spendable at height 102).
     let cb_id = coinbase.id();
     let b1 = ledger.insert(vec![genesis], 1, 2, 0, &[coinbase]).unwrap();
     let bob_cb = OutPoint::new(cb_id, 0);
+    let mut tip = b1;
+    for _ in 0..100 {
+        tip = ledger.insert(vec![tip], 1, 0, 0, &[]).unwrap();
+    }
     let b2 = ledger
         .insert(
-            vec![b1],
+            vec![tip],
             1,
             3,
             0,

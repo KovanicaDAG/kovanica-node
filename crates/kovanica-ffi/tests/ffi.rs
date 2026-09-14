@@ -10,6 +10,14 @@ fn fresh() -> LightNode {
     LightNode::new(LightConfig::default()).expect("genesis ok")
 }
 
+/// Advance past the RFC-006 coinbase-maturity boundary (100 blocks) so
+/// seed 1's genesis coinbase is spendable.
+fn mature(node: &LightNode) {
+    for _ in 0..100 {
+        let _ = node.produce_empty_block();
+    }
+}
+
 /// A light node with a validator identity and hybrid admission active.
 fn validator_node() -> LightNode {
     let node = fresh();
@@ -65,6 +73,7 @@ fn bonding_requires_validator_identity() {
 #[test]
 fn bond_splits_then_freezes_and_staked_block_wins() {
     let node = validator_node();
+    mature(&node);
 
     // The founder holds one coin of exactly 1000; bonding 500 forces a sizing
     // split (500 frozen + 500 spendable), then the bond transaction itself.
@@ -95,6 +104,7 @@ fn bond_splits_then_freezes_and_staked_block_wins() {
 #[test]
 fn rebonding_skips_frozen_coins_and_refills_from_coinbase() {
     let node = validator_node();
+    mature(&node);
     node.bond_stake(1, 500).unwrap();
 
     // Only an unfrozen 500-coin remains: a second 500-bond must reuse it
@@ -129,6 +139,7 @@ fn unbonded_validator_falls_back_to_pow() {
 #[test]
 fn sync_blob_between_two_nodes_converges() {
     let producer = validator_node();
+    mature(&producer);
     producer.bond_stake(1, 500).unwrap();
     producer.produce_empty_block().unwrap();
     producer.send(1, 400, 2).unwrap();
@@ -170,6 +181,7 @@ fn garbage_sync_blob_is_rejected_not_panicked_on() {
 #[test]
 fn snapshot_roundtrip_preserves_staked_ids_and_keeps_producing() {
     let node = validator_node();
+    mature(&node);
     node.bond_stake(1, 500).unwrap();
     let staked = node.produce_empty_block().unwrap();
     assert_eq!(staked.kind, BlockKind::Staked);
@@ -203,6 +215,7 @@ fn snapshot_roundtrip_preserves_staked_ids_and_keeps_producing() {
 #[test]
 fn send_from_uses_imported_secret_without_storing_it() {
     let node = fresh();
+    mature(&node);
 
     // The demo founder's secret is from_u64(1): le bytes zero-padded.
     let mut founder_secret = [0u8; 32];
@@ -223,6 +236,7 @@ fn send_from_uses_imported_secret_without_storing_it() {
 #[test]
 fn unbond_through_ffi_requires_maturity() {
     let node = validator_node();
+    mature(&node);
     node.bond_stake(1, 500).unwrap();
     assert!(node.pending_unbond_height().unwrap().is_some());
     assert!(node.chain_height().unwrap() > 0);
@@ -239,6 +253,7 @@ fn unbond_through_ffi_requires_maturity() {
 #[test]
 fn retarget_enabled_hybrid_pins_pow_and_syncs() {
     let producer = fresh();
+    mature(&producer);
     producer.set_validator_seed(vec![0xAB; 32]).unwrap();
     producer.enable_hybrid(1, 1, NOMINAL_WORK, true).unwrap();
 
@@ -267,6 +282,7 @@ fn retarget_enabled_hybrid_pins_pow_and_syncs() {
 #[test]
 fn light_sync_filters_and_proofs_end_to_end() {
     let producer = fresh();
+    mature(&producer);
     producer.send(1, 300, 2).unwrap(); // a real payment to watch
 
     // Phone receives the selected chain as headers + filters only.
@@ -346,6 +362,8 @@ fn garbage_light_sync_is_rejected_not_panicked_on() {
 #[test]
 fn history_over_ffi_matches_utxo_semantics() {
     let node = fresh();
+    // Genesis coinbase is exempt from maturity (creation_height == 0), so it
+    // can be spent immediately without mining 100 blocks.
     node.send(1, 400, 2).unwrap();
 
     let founder_hex = kovanica_node::Node::address(1).to_hex();
@@ -414,6 +432,7 @@ fn filter_matches_any_batches_watch_addresses() {
 #[test]
 fn bond_and_unbond_from_secret_spend_wallet_funds() {
     let node = validator_node();
+    mature(&node);
 
     // The deterministic founder actor (seed 1) is funded by genesis. Its
     // Ed25519 secret is the little-endian encoding of 1 padded to 32 bytes.
@@ -454,6 +473,8 @@ fn bond_and_unbond_from_secret_spend_wallet_funds() {
 #[test]
 fn send_to_script_v2_and_stealth_over_ffi() {
     let node = fresh();
+    // Genesis coinbase is exempt from maturity (creation_height == 0), so it
+    // can be spent immediately without mining 100 blocks.
 
     // The deterministic founder actor (seed 1) is funded by genesis (1000).
     // Its Ed25519 secret is the little-endian encoding of 1 padded to 32 bytes.
@@ -488,6 +509,7 @@ fn send_to_script_v2_and_stealth_over_ffi() {
 #[test]
 fn htlc_over_ffi() {
     let node = fresh();
+    mature(&node);
 
     // The deterministic founder actor (seed 1) is funded by genesis (1000).
     // Its Ed25519 secret is the little-endian encoding of 1 padded to 32 bytes.

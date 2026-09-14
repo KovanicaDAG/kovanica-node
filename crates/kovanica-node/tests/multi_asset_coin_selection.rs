@@ -35,8 +35,10 @@ fn native_prepare_ignores_custom_asset_utxos() {
     let custom = asset(7);
 
     let mut utxo = UtxoSet::new();
+    // RFC-006: a native coinbase cannot exceed subsidy + fees/4, so mint the
+    // full 1_000 subsidy (custom-asset coinbases are exempt from the cap).
     let cb_native = Transaction::coinbase(
-        vec![TxOutput::native(5_000, alice.address())],
+        vec![TxOutput::native(1_000, alice.address())],
         b"n".to_vec(),
     );
     let cb_asset = Transaction::coinbase(
@@ -56,7 +58,10 @@ fn native_prepare_ignores_custom_asset_utxos() {
         .collect();
     owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let total: u64 = owned.iter().map(|(_, v)| *v).sum();
-    assert_eq!(total, 5_000, "native selection must not include 9000 custom");
+    assert_eq!(
+        total, 1_000,
+        "native selection must not include 9000 custom"
+    );
     assert!(total >= need);
 
     let mut owned_c: Vec<(OutPoint, u64)> = utxo
@@ -70,7 +75,7 @@ fn native_prepare_ignores_custom_asset_utxos() {
 
     let mut only_native = UtxoSet::new();
     let cb = Transaction::coinbase(
-        vec![TxOutput::native(5_000, alice.address())],
+        vec![TxOutput::native(1_000, alice.address())],
         b"only_n".to_vec(),
     );
     apply_block(&mut only_native, &[cb], 1_000).unwrap();

@@ -359,8 +359,11 @@ impl LightNode {
 
         // Source coin selection over UNFROZEN coins only (frozen value moves
         // exclusively through unbond transactions).
+        // Spendable coins only: `spendable_utxos_of` respects RFC-006
+        // coinbase maturity, so a freshly-mined subsidy coinbase is never
+        // chosen over an older (mature) funding coin.
         let candidates: Vec<(OutPoint, u64)> = node
-            .utxos_of(&addr)?
+            .spendable_utxos_of(&addr)?
             .into_iter()
             .filter(|(op, _)| !node.outpoint_is_frozen(op).unwrap_or(true))
             .collect();
@@ -381,9 +384,12 @@ impl LightNode {
                     .find(|(op, _v)| *op == funder)
                     .map(|(_, v)| *v - amount)
                     .unwrap_or(0);
+                let fee = node.min_fee();
                 let mut outputs = vec![TxOutput::native(amount, addr)];
-                if rest > 0 {
-                    outputs.push(TxOutput::native(rest, addr));
+                if rest > fee {
+                    outputs.push(TxOutput::native(rest - fee, addr));
+                } else if rest == fee {
+                    // exact: fee is paid, no change
                 }
                 let mut split =
                     Transaction::unsigned(std::slice::from_ref(&funder), outputs, Vec::new());
@@ -459,8 +465,11 @@ impl LightNode {
             .map(|pk| *pk.as_bytes())
             .ok_or_else(|| invalid("call set_validator_seed before bonding"))?;
 
+        // Spendable coins only: `spendable_utxos_of` respects RFC-006
+        // coinbase maturity, so a freshly-mined subsidy coinbase is never
+        // chosen over an older (mature) funding coin.
         let candidates: Vec<(OutPoint, u64)> = node
-            .utxos_of(&addr)?
+            .spendable_utxos_of(&addr)?
             .into_iter()
             .filter(|(op, _)| !node.outpoint_is_frozen(op).unwrap_or(true))
             .collect();
@@ -480,9 +489,12 @@ impl LightNode {
                     .find(|(op, _v)| *op == funder)
                     .map(|(_, v)| *v - amount)
                     .unwrap_or(0);
+                let fee = node.min_fee();
                 let mut outputs = vec![TxOutput::native(amount, addr)];
-                if rest > 0 {
-                    outputs.push(TxOutput::native(rest, addr));
+                if rest > fee {
+                    outputs.push(TxOutput::native(rest - fee, addr));
+                } else if rest == fee {
+                    // exact: fee is paid, no change
                 }
                 let mut split =
                     Transaction::unsigned(std::slice::from_ref(&funder), outputs, Vec::new());

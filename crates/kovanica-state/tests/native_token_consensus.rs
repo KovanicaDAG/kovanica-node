@@ -30,6 +30,16 @@ fn make_asset_id(seed: u64) -> AssetId {
     AssetId::from_bytes(bytes)
 }
 
+/// Chain `COINBASE_MATURITY` empty blocks so a coinbase minted at the current
+/// tip becomes spendable (RFC-006: creation_height H → spendable at H+100).
+fn mature_coinbase(ledger: &mut Ledger) {
+    for _ in 0..100 {
+        ledger
+            .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[])
+            .unwrap();
+    }
+}
+
 // =========================================================================
 // Category 1: Positive Single-Asset & Multi-Asset Transfers
 // =========================================================================
@@ -488,6 +498,9 @@ fn test_native_token_post_activation_output_allowed() {
         .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[asset_cb])
         .unwrap();
 
+    // Mature the asset coinbase (RFC-006) before spending it.
+    mature_coinbase(&mut ledger);
+
     // Now create a native KVNC coinbase for spending
     let coinbase = Transaction::coinbase(
         vec![TxOutput::native(1_000, alice.address())],
@@ -505,7 +518,6 @@ fn test_native_token_post_activation_output_allowed() {
     );
 
     let res = ledger.insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[spend]);
-    eprintln!("Result: {:?}", res);
     assert!(res.is_ok());
     let utxo = ledger.state(&ledger.dag().selected_tip()).unwrap();
     assert_eq!(utxo.balance_of_asset(&bob.address(), Some(asset)), 900);
@@ -534,6 +546,9 @@ fn test_native_token_post_activation_spend_allowed() {
     ledger
         .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[coinbase])
         .unwrap();
+
+    // Mature the asset coinbase (RFC-006) before spending it.
+    mature_coinbase(&mut ledger);
 
     // Spend asset after activation
     let spend = Transaction::signed(
@@ -572,20 +587,24 @@ fn test_native_token_activation_boundary_exact() {
         .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[asset_cb])
         .unwrap();
 
+    // Mature the asset coinbase (RFC-006) before spending it.
+    mature_coinbase(&mut ledger);
+
     // Now change activation score to 1 (activate at blue_score > 1)
     ledger.set_native_token_activation_score(1);
 
-    // Create a native KVNC coinbase for spending (blue_score = 2)
+    // Create a native KVNC coinbase for spending (blue_score = 102)
     let coinbase = Transaction::coinbase(
         vec![TxOutput::native(1_000, alice.address())],
         b"cb".to_vec(),
     );
     ledger
         .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[coinbase])
-        .unwrap(); // blue_score = 2
+        .unwrap(); // blue_score = 102
 
-    // At blue_score = 2, activation_score = 1, so 2 > 1 -> post-activation (allowed)
-    // Spend the asset UTXO to create asset output (conservation per asset)
+    // At blue_score = 103, activation_score = 1, so 103 > 1 -> post-activation
+    // (allowed). Spend the asset UTXO to create asset output (conservation per
+    // asset).
     let spend = Transaction::signed(
         &[(asset_coin, &alice)],
         vec![TxOutput::new(900, Some(asset), bob.address())],
@@ -722,6 +741,9 @@ fn test_native_token_checkpoint_roundtrip() {
         )
         .unwrap();
 
+    // Mature the asset coinbase (RFC-006) before spending it.
+    mature_coinbase(&mut ledger);
+
     // Transfer asset
     let coin = OutPoint::new(coinbase.id(), 0);
     let spend = Transaction::signed(
@@ -799,6 +821,9 @@ fn test_native_token_snapshot_roundtrip() {
         )
         .unwrap();
 
+    // Mature the asset coinbase (RFC-006) before spending it.
+    mature_coinbase(&mut ledger);
+
     // Transfer asset
     let coin = OutPoint::new(coinbase.id(), 0);
     let spend = Transaction::signed(
@@ -861,6 +886,15 @@ fn test_native_token_apply_dag_with_assets() {
     let block2_id = block2.id();
     dag.insert(block2).unwrap();
 
+    // Mature the asset coinbase (RFC-006: creation_height 1 → spendable at
+    // height 101) with empty blocks before the transfer block.
+    let mut prev = block2_id;
+    for _ in 0..100 {
+        let empty = Block::new(vec![prev], 1, 0, 0, Vec::new());
+        prev = empty.id();
+        dag.insert(empty).unwrap();
+    }
+
     // Block with asset transfer
     let coin = OutPoint::new(coinbase.id(), 0);
     let spend = Transaction::signed(
@@ -868,7 +902,7 @@ fn test_native_token_apply_dag_with_assets() {
         vec![TxOutput::new(900, Some(asset), bob.address())],
         b"transfer".to_vec(),
     );
-    let block3 = Block::new(vec![block2_id], 1, 0, 0, encode_block_payload(&[spend]));
+    let block3 = Block::new(vec![prev], 1, 0, 0, encode_block_payload(&[spend]));
     dag.insert(block3).unwrap();
 
     // Apply DAG

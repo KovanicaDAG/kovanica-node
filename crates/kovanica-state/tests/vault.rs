@@ -244,16 +244,19 @@ fn csv_creation_height_from_later_block() {
         .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[cb])
         .unwrap();
 
+    // Mature the coinbase (RFC-006: creation_height 6 → spendable at height
+    // 106) so the CSV gate below is the binding constraint, not maturity.
+    extend_chain(&mut ledger, 100); // tip height 106
+
     let spend = build_multi_input_spend(
         &[(coin, &owner)],
         vec![TxOutput::native(900, bob)],
         b"csv-h6".to_vec(),
         0,
-        3,
+        105,
     );
 
-    // Spend at height 8: 8 < 6+3 → non-final.
-    extend_chain(&mut ledger, 1); // tip height 7
+    // Spend at height 107: 107 < 6+105 → non-final.
     let err = ledger
         .insert(
             vec![ledger.dag().selected_tip()],
@@ -267,17 +270,17 @@ fn csv_creation_height_from_later_block() {
         err,
         LedgerInsertError::State(LedgerError::NonFinalRelativeSequence {
             creation_height: 6,
-            sequence: 3,
-            block_height: 8,
+            sequence: 105,
+            block_height: 107,
             ..
         })
     ));
 
-    // Spend at height 9: 9 >= 6+3 → accepted.
-    extend_chain(&mut ledger, 1); // tip height 8
+    // Spend at height 111: 111 >= 6+105 → accepted.
+    extend_chain(&mut ledger, 4); // tip height 110
     ledger
         .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[spend])
-        .expect("output has aged 3 blocks from height 6");
+        .expect("output has aged 105 blocks from height 6");
 }
 
 #[test]
@@ -299,17 +302,23 @@ fn csv_parallel_utxo_lookup() {
         .insert(vec![ledger.dag().selected_tip()], 1, 0, 0, &[cb])
         .unwrap(); // block height 10
 
+    // Mature coin_b (RFC-006: creation_height 10 → spendable at height 110) so
+    // the CSV gate below is the binding constraint, not maturity. coin_a is the
+    // genesis coinbase (exempt, creation_height 0).
+    extend_chain(&mut ledger, 100); // tip height 110
+
     let bob = funder.address();
     let spend = build_multi_input_spend(
         &[(coin_a, &owner_a), (coin_b, &owner_b)],
         vec![TxOutput::native(1_900, bob)],
         b"csv-2in".to_vec(),
         0,
-        5,
+        105,
     );
 
-    // Tip height 10 (spend height 11): coin_b is final (11 >= 10+5? NO — 11 < 15).
-    // …so the tx is rejected because coin_b has not aged 5 blocks since height 10.
+    // Tip height 110 (spend height 111): coin_b is final (111 >= 10+105? NO —
+    // 111 < 115). …so the tx is rejected because coin_b has not aged 105 blocks
+    // since height 10.
     let err = ledger
         .insert(
             vec![ledger.dag().selected_tip()],
@@ -323,12 +332,12 @@ fn csv_parallel_utxo_lookup() {
         err,
         LedgerInsertError::State(LedgerError::NonFinalRelativeSequence {
             creation_height: 10,
-            sequence: 5,
+            sequence: 105,
             ..
         })
     ));
 
-    // Tip height 14 (spend height 15): both clocks satisfied → accepted.
+    // Tip height 114 (spend height 115): both clocks satisfied → accepted.
     for _ in 0..4 {
         extend_chain(&mut ledger, 1);
     }

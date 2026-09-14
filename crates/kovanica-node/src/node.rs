@@ -14,13 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kovanica_dag::{pow, Block, BlockId, Dag, VrfPublicKey, VrfSecretKey};
 use kovanica_dag::{vrf_keypair_from_seed, vrf_prove};
+use kovanica_state::ledger::apply_block_with_stake;
 use kovanica_state::multisig::{verify_threshold_signatures, MultisigScript};
 use kovanica_state::stake::{Freeze, UNBOND_MATURITY, UNBOND_PREFIX};
 use kovanica_state::{
-    apply_block, decode_block_payload, encode_block_payload, verify, Address, AssetId,
-    HalvingSchedule, HtlcScript, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError,
-    LedgerStore, OutPoint, Sig, StakedVrf, StealthAddress, Transaction, TxId, TxInput, TxOutput,
-    UtxoSet, VaultScript, DEFAULT_HALVING_ERA,
+    decode_block_payload, encode_block_payload, verify, Address, AssetId, HalvingSchedule,
+    HtlcScript, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore,
+    OutPoint, Sig, StakedVrf, StealthAddress, Transaction, TxId, TxInput, TxOutput, UtxoSet,
+    VaultScript, COINBASE_MATURITY, DEFAULT_HALVING_ERA, FEE_PRODUCER_DEN, FEE_PRODUCER_NUM,
 };
 
 use crate::mempool_v2::{MempoolConfig, MempoolV2};
@@ -603,6 +604,35 @@ impl Node {
         self.now_ms().max(floor)
     }
 
+    /// The work target to use for a block built on `parents`. When hybrid mode
+    /// with a retargeting policy is active, this returns the hybrid config's
+    /// retarget target (via [`Ledger::expected_work`]); otherwise it falls back
+    /// to the DAG's difficulty target or 1.
+    fn work_target_for_parents(&self, parents: &[BlockId]) -> u128 {
+        if let Some(ledger) = self.ledger.as_ref() {
+            if let Some(work) = ledger.expected_work(parents) {
+                eprintln!(
+                    "DEBUG work_target_for_parents: expected_work returned {} (hybrid_enabled={})",
+                    work,
+                    ledger.hybrid_enabled()
+                );
+                return work;
+            } else {
+                eprintln!("DEBUG work_target_for_parents: expected_work returned None (hybrid_enabled={})", ledger.hybrid_enabled());
+            }
+        }
+        let fallback = self
+            .ledger()
+            .ok()
+            .and_then(|l| l.dag().next_work_target(parents))
+            .unwrap_or(1);
+        eprintln!(
+            "DEBUG work_target_for_parents: fallback returned {}",
+            fallback
+        );
+        fallback
+    }
+
     /// The proof-of-work nonce to stamp on a new block built on `parents` with
     /// `work`, `timestamp_ms`, and transactions `txs`.
     ///
@@ -613,14 +643,20 @@ impl Node {
     /// byte-identical to the block [`Ledger::insert`] will build (same parents,
     /// work, timestamp, and payload encoding) so the winning nonce carries over
     /// to exactly the same id.
+    /// Mine a nonce for a block with the given parameters. Returns 0 if neither
+    /// DAG-level PoW nor hybrid retargeting is enforced.
     fn mine_nonce(
-        dag: &Dag,
+        &self,
         parents: &[BlockId],
         work: u128,
         timestamp_ms: u64,
         txs: &[Transaction],
     ) -> u64 {
-        if !dag.proof_of_work_enabled() {
+        let ledger = self.ledger.as_ref().expect("checked above");
+        let dag = ledger.dag();
+        // Mine if either DAG-level PoW is enabled OR hybrid mode with retarget is active.
+        let hybrid_retarget = ledger.hybrid_config().and_then(|c| c.retarget).is_some();
+        if !dag.proof_of_work_enabled() && !hybrid_retarget {
             return 0;
         }
         let template = Block::new(
@@ -986,10 +1022,10 @@ impl Node {
         }
 
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let block = self
             .ledger
             .as_mut()
@@ -1102,9 +1138,28 @@ impl Node {
             .checked_add(fee)
             .ok_or(NodeError::InsufficientFunds)?;
         let state = self.ledger()?.ledger_state();
+        let chain_height = self
+            .ledger()
+            .as_ref()
+            .map(|l| l.tip_blue_score())
+            .unwrap_or(0);
+        let mature_before = chain_height.saturating_sub(COINBASE_MATURITY);
         let mut owned: Vec<(OutPoint, u64)> = state
             .iter()
             .filter(|(_, out)| out.owner == kp.address() && out.asset_id.is_none())
+            .filter(|(op, _)| {
+                // Non-coinbase outputs are always spendable;
+                // coinbase outputs need creation_height <= mature_before.
+                // We approximate: if creation_height is 0 (legacy), allow.
+                // For the maturity check we need the UtxoEntry; use get_entry.
+                match state.get_entry(op) {
+                    Some(entry) => entry
+                        .is_coinbase
+                        .then(|| entry.creation_height <= mature_before)
+                        .unwrap_or(true),
+                    None => true,
+                }
+            })
             .map(|(op, out)| (*op, out.value))
             .collect();
         owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -1166,9 +1221,26 @@ impl Node {
             .checked_add(fee)
             .ok_or(NodeError::InsufficientFunds)?;
         let state = self.ledger()?.ledger_state();
+        // RFC-006 coinbase maturity: only spend coinbases whose creation height
+        // is at least COINBASE_MATURITY below the current chain height, or the
+        // ledger rejects the tx at produce time (CoinbaseImmature). Mirrors
+        // build_transfer_with_outputs.
+        let chain_height = self
+            .ledger()
+            .as_ref()
+            .map(|l| l.tip_blue_score())
+            .unwrap_or(0);
+        let mature_before = chain_height.saturating_sub(COINBASE_MATURITY);
         let mut owned: Vec<(OutPoint, u64)> = state
             .iter()
             .filter(|(_, out)| out.owner == from && out.asset_id == asset_id)
+            .filter(|(op, _)| match state.get_entry(op) {
+                Some(entry) => entry
+                    .is_coinbase
+                    .then(|| entry.creation_height <= mature_before)
+                    .unwrap_or(true),
+                None => true,
+            })
             .map(|(op, out)| (*op, out.value))
             .collect();
         owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -1235,6 +1307,25 @@ impl Node {
         Ok(rows)
     }
 
+    /// Unspent outputs owned by `owner` that are spendable now (RFC-006
+    /// coinbase-maturity respected).  Immutable coinbase outputs are
+    /// returned; coinbase outputs whose `creation_height` is still within
+    /// `COINBASE_MATURITY` blocks of the tip are filtered out.
+    pub fn spendable_utxos_of(&self, owner: &Address) -> Result<Vec<(OutPoint, u64)>, NodeError> {
+        let chain_height = self.chain_height().unwrap_or(0);
+        let mature_before = chain_height.saturating_sub(COINBASE_MATURITY);
+        let mut rows: Vec<(OutPoint, u64)> = self
+            .ledger()?
+            .ledger_state()
+            .iter_entries()
+            .filter(|(_, entry)| &entry.output.owner == owner)
+            .filter(|(_, entry)| !entry.is_coinbase || entry.creation_height <= mature_before)
+            .map(|(op, entry)| (*op, entry.output.value))
+            .collect();
+        rows.sort_by_key(|row| row.0);
+        Ok(rows)
+    }
+
     /// Unspent outputs owned by `owner`, including `asset_id` (KVP-102 HTTP).
     pub fn utxos_detailed_of(
         &self,
@@ -1285,10 +1376,10 @@ impl Node {
         let tx = self.build_transfer_with_asset(kp, amount, to, asset_id)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
@@ -1358,10 +1449,10 @@ impl Node {
         let tx = self.build_transfer_with(kp, amount, to)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
@@ -1410,10 +1501,10 @@ impl Node {
         let tx = self.build_transfer_with_outputs(kp, amount, output)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
@@ -1714,10 +1805,10 @@ impl Node {
     fn insert_tx_block(&mut self, tx: Transaction) -> Result<TxId, NodeError> {
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
@@ -1944,18 +2035,31 @@ impl Node {
             return Ok(None);
         }
 
-        let (subsidy, mut working, original) = {
+        let (subsidy, mut working, original, mut stake, next_height) = {
             let ledger = self.ledger.as_ref().expect("checked above");
+            let tip = ledger.dag().selected_tip();
             (
                 ledger.subsidy(),
                 ledger.ledger_state(),
                 ledger.ledger_state(),
+                ledger.stake_state(&tip).unwrap_or_default(),
+                ledger.tip_blue_score() + 1,
             )
         };
         let mut selected = Vec::new();
         let mut selected_ids = Vec::new();
         for tx in self.mempool.ordered_pending() {
-            if apply_block(&mut working, std::slice::from_ref(&tx), subsidy).is_ok() {
+            // Validate against the real next block height so coinbase-maturity
+            // (RFC-006) is judged correctly: immature spends are excluded.
+            if apply_block_with_stake(
+                &mut working,
+                &mut stake,
+                std::slice::from_ref(&tx),
+                subsidy,
+                next_height,
+            )
+            .is_ok()
+            {
                 selected_ids.push(tx.id());
                 selected.push(tx);
             }
@@ -1987,8 +2091,8 @@ impl Node {
         }
 
         let dag = self.ledger.as_ref().expect("checked above").dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &block_txs);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, &block_txs);
         let ledger = self.ledger.as_mut().expect("checked above");
         let start = std::time::Instant::now();
         let block = ledger
@@ -2082,9 +2186,10 @@ impl Node {
         }
 
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let work = self.work_target_for_parents(&parents);
+        eprintln!("DEBUG produce_empty: work = {}", work);
         let txs = self.issuance_txs(timestamp, 0);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &txs);
+        let nonce = self.mine_nonce(&parents, work, timestamp, &txs);
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let start = std::time::Instant::now();
         let id = ledger
@@ -2106,12 +2211,25 @@ impl Node {
     pub fn mining_template_for(&self, miner: Option<Address>) -> Result<MiningTemplate, NodeError> {
         let ledger = self.ledger.as_ref().ok_or(NodeError::NotInitialized)?;
         let subsidy = ledger.subsidy();
+        let tip = ledger.dag().selected_tip();
+        let next_height = ledger.tip_blue_score() + 1;
         let mut working = ledger.ledger_state();
+        let mut stake = ledger.stake_state(&tip).unwrap_or_default();
         let original = ledger.ledger_state();
 
         let mut selected = Vec::new();
         for tx in self.mempool.ordered_pending() {
-            if apply_block(&mut working, std::slice::from_ref(&tx), subsidy).is_ok() {
+            // Validate against the real next block height so templates exclude
+            // immature-coinbase spends (RFC-006) that would be rejected at submit.
+            if apply_block_with_stake(
+                &mut working,
+                &mut stake,
+                std::slice::from_ref(&tx),
+                subsidy,
+                next_height,
+            )
+            .is_ok()
+            {
                 selected.push(tx);
             }
         }
@@ -2119,7 +2237,8 @@ impl Node {
 
         let parents = ledger.dag().tips();
         let timestamp_ms = self.next_timestamp(ledger.dag(), &parents);
-        let work = ledger.dag().next_work_target(&parents).unwrap_or(1);
+        let work = self.work_target_for_parents(&parents);
+        let dag = ledger.dag();
 
         let mut block_txs = self.issuance_txs_for(miner, timestamp_ms, fees);
         block_txs.extend(selected);
@@ -2150,7 +2269,9 @@ impl Node {
             return Vec::new();
         };
         let subsidy = self.issuance().unwrap_or(0);
-        let total = subsidy.saturating_add(extra_fees);
+        // RFC-006: 75% of fees are burned; the producer claims subsidy + fees/4.
+        let fee_share = extra_fees / FEE_PRODUCER_DEN * FEE_PRODUCER_NUM;
+        let total = subsidy.saturating_add(fee_share);
         if total == 0 {
             return Vec::new();
         }

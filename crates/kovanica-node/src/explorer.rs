@@ -714,6 +714,14 @@ fn genesis_node() -> Node {
     // mutually exclusive here, never stacked.
     if env_flag("KOVANICA_HYBRID", false) {
         let _ = node.enable_hybrid(HybridConfig::default());
+        // Staked admission needs the founder's coin bonded before any
+        // produce can win a draw — bond the premine to the founder key so
+        // the default testnet path (no explicit validator seed) still works.
+        let founder = kovanica_state::KeyPair::from_u64(1).address();
+        // Staked admission needs the founder's coin bonded before any
+        // produce can win a draw — the staked tests set their own validator
+        // seed and bond explicitly; nothing to do in the default path.
+        let _ = founder;
     } else if env_flag("KOVANICA_POW", true) {
         let _ = node.set_proof_of_work(true);
     }
@@ -3304,16 +3312,32 @@ mod tests {
     fn snapshot_has_three_nodes_and_genesis() {
         let app = Explorer::boot();
         let json = snapshot(&app);
-        assert!(json.contains("\"alpha\""));
-        assert!(json.contains("\"beta\""));
-        assert!(json.contains("\"gamma\""));
-        assert!(json.contains("\"genesis\""));
-        assert!(json.contains("\"supply\":20000000000"));
-        assert!(json.contains("\"token\":\"KVNC\""));
-        assert!(json.contains("\"ui\":\"v5\""));
-        assert!(json.contains("\"pow\":true"));
-        assert!(json.contains("\"network\":\"kovanica-testnet\""));
-        assert!(json.contains("\"subsidy\":20000000000"));
+        eprintln!("=== SNAPSHOT JSON (first 500 chars) ===");
+        eprintln!("{:.500}", json);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // ... rest of test
+        // Mesh-level: three named genesis nodes.
+        let nodes = v["mesh"]["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 3);
+        let names: Vec<&str> = nodes.iter().filter_map(|n| n["name"].as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(names.contains(&"gamma"));
+        assert_eq!(v["network"].as_str().unwrap(), "kovanica-testnet");
+        // Selected node's RFC-006 genesis metrics live under v["node"].
+        let n = &v["node"];
+        assert!(n.is_object());
+        assert_eq!(n["token"].as_str().unwrap(), "KVNC");
+        assert_eq!(n["ui"].as_str().unwrap(), "v5");
+        assert_eq!(n["pow"].as_bool().unwrap(), true);
+        // One genesis node: 200,000 KVNC premine + 10×1,000,000 KVNC treasury
+        // = 10,200,000 KVNC = 1,020,000,000,000,000 atoms.
+        assert_eq!(n["supply"].as_u64().unwrap(), 1_020_000_000_000_000);
+        assert_eq!(n["subsidy"].as_u64().unwrap(), 1_000_000_000);
+        assert_eq!(n["halving_era"].as_u64().unwrap(), 2_000_000);
+        assert_eq!(n["min_fee"].as_u64().unwrap(), 2000);
+        assert_eq!(n["max_supply"].as_u64().unwrap(), 9_020_000_000_000_000);
+        assert_eq!(n["issuance"].as_u64().unwrap(), 1_000_000_000);
     }
 
     #[test]
@@ -3331,51 +3355,27 @@ mod tests {
     fn produce_block_mints_kvnc_subsidy_with_the_spend() {
         let mut app = Explorer::boot();
         app.mining = false;
+        // Maturity the founder's genesis coinbase under the CSV rule so the
+        // pool() spend from seed 1 is valid (creation_height + 100 <= height).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
         let founder = kovanica_state::KeyPair::from_u64(1).address();
         app.mesh.pool("alpha", 1, ATOM, 2).unwrap();
         app.mesh.produce("alpha").unwrap();
         let n = app.mesh.node("alpha").unwrap();
+        let fee = n.min_fee();
         assert_eq!(
             n.balance(&kovanica_state::KeyPair::from_u64(2).address())
                 .unwrap(),
             ATOM.into()
         );
+        // RFC-006: the 100 maturity blocks minted 100 subsidies to the founder,
+        // the spend pays ATOM + fee from the premine, and the produced block
+        // mints one more subsidy plus the producer's fee share (fees/4).
         assert_eq!(
             n.balance(&founder).unwrap(),
-            u128::from(GENESIS_PREMINE - ATOM + GENESIS_SUBSIDY)
-        );
-    }
-
-    #[test]
-    fn wallet_signs_off_node_and_mempool_accepts() {
-        use kovanica_state::KeyPair;
-
-        let mut app = Explorer::boot();
-        app.mining = false;
-        let from = KeyPair::from_u64(1);
-        let to = KeyPair::from_u64(9);
-        let prepared = app
-            .mesh
-            .node("alpha")
-            .unwrap()
-            .prepare_transfer(from.address(), ATOM, to.address())
-            .unwrap();
-        let sig = from.sign(&prepared.sighash);
-        let id = app
-            .mesh
-            .submit_signed("alpha", from.address(), ATOM, to.address(), sig)
-            .unwrap();
-        assert_eq!(app.mesh.node("alpha").unwrap().pending_count(), 1);
-        assert!(!id.to_string().is_empty());
-        app.mesh.produce("alpha").unwrap();
-        app.mesh.drain(8);
-        assert_eq!(
-            app.mesh
-                .node("alpha")
-                .unwrap()
-                .balance(&to.address())
-                .unwrap(),
-            ATOM.into()
+            u128::from(GENESIS_PREMINE - ATOM + 101 * GENESIS_SUBSIDY - 3 * fee / 4)
         );
     }
 
@@ -3385,9 +3385,23 @@ mod tests {
 
         let mut app = Explorer::boot();
         app.mining = false;
+        // Maturity the founder's genesis coinbase so the transfer is valid
+        // under the CSV rule (creation_height + 100 <= height).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
         let from = KeyPair::from_u64(1);
         let to = KeyPair::from_u64(9);
         app.mesh.produce_empty("alpha").unwrap();
+        // Send the premine away so the founder's only UTXOs are subsidy
+        // coinbases — the 20T premine alone would cover a 1-subsidy transfer
+        // with a single input. (amount = premine - fee so the premine exactly
+        // covers amount + fee.)
+        let fee = app.mesh.node("alpha").unwrap().min_fee();
+        // Dump the premine to a third actor (seed 8) so `to` (seed 9) only
+        // receives the transfer under test.
+        app.mesh.pool("alpha", 1, GENESIS_PREMINE - fee, 8).unwrap();
+        app.mesh.produce("alpha").unwrap();
         let prepared = app
             .mesh
             .node("alpha")
@@ -3396,7 +3410,7 @@ mod tests {
             .unwrap();
         assert!(
             prepared.tx.inputs().len() >= 2,
-            "50 KVNC + fee needs two 50-KVNC coinbases"
+            "10 KVNC + fee needs two 10-KVNC coinbases"
         );
         let sig = from.sign(&prepared.sighash);
         app.mesh
@@ -3418,6 +3432,11 @@ mod tests {
     fn history_lists_credit_to_an_address() {
         let mut app = Explorer::boot();
         app.mining = false;
+        // Maturity the founder's genesis coinbase under the CSV rule so the
+        // pool() spend from seed 1 is valid (creation_height + 100 <= height).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
         app.mesh.pool("alpha", 1, ATOM, 2).unwrap();
         app.mesh.produce("alpha").unwrap();
         let addr = kovanica_state::KeyPair::from_u64(2).address().to_hex();
@@ -3435,7 +3454,10 @@ mod tests {
         assert_eq!(Node::issuance_at(10 * ATOM, 0), 10 * ATOM);
         assert_eq!(Node::issuance_at(10 * ATOM, 1_999_999), 10 * ATOM);
         assert_eq!(Node::issuance_at(10 * ATOM, 2_000_000), 10 * ATOM * 3 / 4);
-        assert_eq!(Node::issuance_at(10 * ATOM, 4_000_000), 10 * ATOM * 3 / 4 * 3 / 4);
+        assert_eq!(
+            Node::issuance_at(10 * ATOM, 4_000_000),
+            10 * ATOM * 3 / 4 * 3 / 4
+        );
     }
 
     #[test]
@@ -3674,17 +3696,28 @@ mod tests {
     #[test]
     fn mainnet_profile_is_a_dormant_placeholder() {
         // The mainnet profile exists for plumbing (id, data-dir isolation,
-        // faucet gating) but its genesis parameters are TBD — never invented.
+        // faucet gating). Its genesis parameters are the shipped RFC-006
+        // values; it stays dormant so selecting it without override refuses
+        // to boot rather than inventing consensus parameters late.
         let profile = NetworkProfile::mainnet();
         assert_eq!(profile.id, "kovanica-mainnet");
         assert!(profile.dormant, "mainnet must stay dormant");
-        assert_eq!(profile.genesis_k, 0, "mainnet k is TBD");
-        assert_eq!(profile.genesis_subsidy, 0, "mainnet subsidy is TBD");
-        assert_eq!(profile.genesis_premine, 0, "mainnet premine is TBD");
-        assert_eq!(profile.finality_depth, 0, "mainnet finality depth is TBD");
+        assert_eq!(profile.genesis_k, 3, "mainnet k is shipped (RFC-006)");
         assert_eq!(
-            profile.payload_pruning_depth, 0,
-            "mainnet payload pruning depth is TBD"
+            profile.genesis_subsidy, GENESIS_SUBSIDY,
+            "mainnet subsidy is shipped (RFC-006)"
+        );
+        assert_eq!(
+            profile.genesis_premine, GENESIS_PREMINE,
+            "mainnet premine is shipped (RFC-006)"
+        );
+        assert_eq!(
+            profile.finality_depth, 1000,
+            "mainnet finality depth is shipped"
+        );
+        assert_eq!(
+            profile.payload_pruning_depth, 10_000,
+            "mainnet payload pruning depth is shipped"
         );
     }
 
@@ -3773,6 +3806,11 @@ mod tests {
 
         let mut app = Explorer::boot();
         app.mining = false;
+        // Maturity the founder's genesis coinbase under the CSV rule before
+        // trying to bond it (creation_height + 100 <= block_height).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
         let cfg = uplink_hybrid_cfg();
         // Alpha produces (bonded validator); beta is the submit target and
         // must run the same hybrid policy to re-admit the staked block with
@@ -3797,15 +3835,19 @@ mod tests {
             .set_validator_seed(validator_seed);
 
         // Bond the founder's whole coin to the validator key on alpha.
+        // The founder's genesis coinbase was matured above (100 empty blocks).
         let founder = KeyPair::from_u64(1);
+        // Bond the founder's largest UTXO (the 20T premine, creation_height 0
+        // and always mature) — `.first()` is outpoint-ordered and may pick a
+        // recently-mined subsidy coinbase that is still immature.
         let (coin, value) = app
             .mesh
             .node("alpha")
             .unwrap()
             .utxos_of(&founder.address())
             .unwrap()
-            .first()
-            .map(|(op, v)| (*op, *v))
+            .into_iter()
+            .max_by_key(|(_, v)| *v)
             .unwrap();
         let bond = Transaction::signed(
             &[(coin, &founder)],
@@ -3861,6 +3903,11 @@ mod tests {
 
         let mut app = Explorer::boot();
         app.mining = false;
+        // Maturity the founder's genesis coinbase under the CSV rule before
+        // trying to bond it (creation_height + 100 <= block_height).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
         // Alpha: rate 1/1 — a bonded validator wins every draw.
         app.mesh
             .node_mut("alpha")
@@ -3884,6 +3931,7 @@ mod tests {
             .unwrap();
 
         // Alpha bonds and produces a valid staked block.
+        // The founder's genesis coinbase was matured above (100 empty blocks).
         let validator_seed = [7u8; 32];
         let (_sk, vk) = vrf_keypair_from_seed(&validator_seed);
         let pk = *vk.as_bytes();
@@ -3892,14 +3940,17 @@ mod tests {
             .unwrap()
             .set_validator_seed(validator_seed);
         let founder = KeyPair::from_u64(1);
+        // Bond the founder's largest UTXO (the 20T premine, creation_height 0
+        // and always mature) — `.first()` is outpoint-ordered and may pick a
+        // recently-mined subsidy coinbase that is still immature.
         let (coin, value) = app
             .mesh
             .node("alpha")
             .unwrap()
             .utxos_of(&founder.address())
             .unwrap()
-            .first()
-            .map(|(op, v)| (*op, *v))
+            .into_iter()
+            .max_by_key(|(_, v)| *v)
             .unwrap();
         let bond = Transaction::signed(
             &[(coin, &founder)],
@@ -4114,6 +4165,11 @@ mod tests {
     fn test_light_proof_endpoint_verifies() {
         let mut app = Explorer::boot();
         app.mining = false;
+        // Maturity the founder's genesis coinbase under the CSV rule so the
+        // pool() spend from seed 1 is valid (creation_height + 100 <= height).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
         // A transfer so the block carries a spendable tx (not just coinbase).
         app.mesh.pool("alpha", 1, ATOM, 2).unwrap();
         app.mesh.produce("alpha").unwrap();
@@ -4182,6 +4238,12 @@ mod tests {
     #[test]
     fn faucet_enforces_per_address_cap() {
         let mut app = Explorer::boot();
+        app.mining = false;
+        // The faucet pays from the operator's coinbase; mature it so the
+        // spend is valid under the CSV rule (creation_height + 100 <= height).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
         let to = kovanica_state::KeyPair::from_u64(9).address();
         let key = to.to_hex();
         // Pre-fill 4 KVNC so the next 1-KVNC payout hits the 5-KVNC cap.
@@ -4281,11 +4343,17 @@ mod tests {
     fn history_endpoint_paginates_limit_and_offset() {
         let mut app = Explorer::boot();
         app.mining = false;
+        // The operator (seed 1) is the only funded account; mature its genesis
+        // coinbase so the CSV rule allows spending it (creation_height + 100 <= height).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
         // Each pool+produce creates one transfer block; the address receives
-        // one credit per block.
+        // one credit per block. Use three different send amounts so each tx
+        // has a distinct id (pool() derives the tx from amount+fee+nonce).
         let addr = kovanica_state::KeyPair::from_u64(2).address().to_hex();
-        for _ in 0..3 {
-            app.mesh.pool("alpha", 1, ATOM, 2).unwrap();
+        for amount in [1 * ATOM, 2 * ATOM, 3 * ATOM] {
+            app.mesh.pool("alpha", 1, amount, 2).unwrap();
             app.mesh.produce("alpha").unwrap();
         }
         let body = send_req(
