@@ -374,7 +374,7 @@ fn stake_registry_delta_composition_and_frozen_spend_rejection() {
     let bond = bond_tx(coin, &alice, 1_000, pk);
     let frozen_op = OutPoint::new(bond.id(), 0);
     let a = ledger.insert(vec![genesis], 1, 1, 0, &[bond]).unwrap();
-    assert_eq!(ledger.stake_state(&a).unwrap().stake_of(&pk), 1_000);
+    assert_eq!(ledger.stake_state(&a).unwrap().stake_of(&pk, None), 1_000);
 
     // Block B (parallel to A): regular spend of the same coin.
     let spend_b = transfer(coin, &alice, &bob.address(), 1_000, 1_000);
@@ -415,7 +415,7 @@ fn stake_unbond_and_maturity_across_finality() {
     let ub = ledger
         .insert(vec![tip], 1, UNBOND_MATURITY + 3, 0, &[unbond])
         .unwrap();
-    assert_eq!(ledger.stake_state(&ub).unwrap().total_stake(), 0);
+    assert_eq!(ledger.stake_state(&ub).unwrap().total_stake(None), 0);
     assert_eq!(ledger.state(&ub).unwrap().total_value(), 1_000);
 
     for id in ledger.dag().linearize() {
@@ -466,11 +466,11 @@ fn stake_delta_folding_across_finality_boundary() {
 
     // Main's bond block still reconstructs with the frozen output.
     assert_eq!(
-        ledger.stake_state(&bond_block).unwrap().stake_of(&pk),
+        ledger.stake_state(&bond_block).unwrap().stake_of(&pk, None),
         1_000
     );
     // Side blocks never saw the bond.
-    assert_eq!(ledger.stake_state(&side_tip).unwrap().stake_of(&pk), 0);
+    assert_eq!(ledger.stake_state(&side_tip).unwrap().stake_of(&pk, None), 0);
 
     for id in ledger.dag().linearize() {
         if ledger.state(&id).is_some() {

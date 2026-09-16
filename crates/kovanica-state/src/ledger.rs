@@ -1367,8 +1367,10 @@ fn apply_regular(
                     .expect("unbond pre-checked above");
             }
         } else if let Some(vrf_pk) = bond_pk {
-            let value = tx.outputs()[0].value;
-            st.freeze(OutPoint::new(txid, 0), vrf_pk, value, height);
+            let output = &tx.outputs()[0];
+            let value = output.value;
+            let asset_id = output.asset_id;
+            st.freeze(OutPoint::new(txid, 0), vrf_pk, asset_id, value, height);
         }
     }
 
@@ -1738,7 +1740,7 @@ fn compose_delta(first: &BlockDelta, second: &BlockDelta) -> BlockDelta {
 /// registry's maturity check.
 fn apply_stake_delta(delta: &StakeDelta, stake: &mut StakeState) {
     for (op, f) in &delta.frozen {
-        stake.freeze(*op, f.vrf_pk, f.value, f.bond_height);
+        stake.freeze(*op, f.vrf_pk, f.asset_id, f.value, f.bond_height);
     }
     for (op, f) in &delta.unfrozen {
         let matures_at = f.bond_height.saturating_add(UNBOND_MATURITY);
@@ -2549,8 +2551,10 @@ impl Ledger {
                 let Some(_) = verified else {
                     return Err(LedgerInsertError::BadStakeProof { vrf_pk: s.vrf_pk });
                 };
-                let total = pre_stake.total_stake();
-                let mine = pre_stake.stake_of(&s.vrf_pk);
+                // Multi-asset: aggregate stake across all assets for eligibility.
+                // Each bond is for a specific asset, but sortition considers total bonded value.
+                let total = pre_stake.total_stake_all_assets();
+                let mine = pre_stake.stake_of_all_assets(&s.vrf_pk);
                 let threshold =
                     StakeState::eligibility_threshold(mine, total, cfg.rate_num, cfg.rate_den);
                 if s.output.as_u64() >= threshold {
@@ -3595,7 +3599,7 @@ mod tests {
         // Bond 60 of the 100.
         apply_block_with_stake(&mut utxo, &mut stake, &[bond_tx(&alice, op, 60, pk)], 0, 10)
             .unwrap();
-        assert_eq!(stake.stake_of(&pk), 60);
+        assert_eq!(stake.stake_of(&pk, None), 60);
         // The bond output is the only output (the 40 remainder is fee); it is
         // still a normal UTXO — just frozen in the registry.
         assert_eq!(utxo.balance(&alice.address()), 60);
@@ -3619,7 +3623,7 @@ mod tests {
         ));
         // Atomic: the rejected steal changed nothing.
         assert!(utxo.contains(&frozen_op));
-        assert_eq!(stake.stake_of(&pk), 60);
+        assert_eq!(stake.stake_of(&pk, None), 60);
 
         // Immature unbond is rejected.
         let unbond = unbond_tx(&alice, &[frozen_op], 60);
@@ -3636,8 +3640,8 @@ mod tests {
 
         // After maturity the unbond applies and frees the value.
         apply_block_with_stake(&mut utxo, &mut stake, &[unbond], 0, 10 + UNBOND_MATURITY).unwrap();
-        assert_eq!(stake.stake_of(&pk), 0);
-        assert_eq!(stake.total_stake(), 0);
+        assert_eq!(stake.stake_of(&pk, None), 0);
+        assert_eq!(stake.total_stake(None), 0);
 
         // The released output is an ordinary UTXO again.
         let freed = OutPoint::new(unbond_tx(&alice, &[frozen_op], 60).id(), 0);
@@ -3668,10 +3672,10 @@ mod tests {
         let b1 = ledger
             .insert(vec![ledger.genesis()], 1, 1, 0, &[bond])
             .unwrap();
-        assert_eq!(ledger.stake_state(&b1).unwrap().stake_of(&pk), 400);
+        assert_eq!(ledger.stake_state(&b1).unwrap().stake_of(&pk, None), 400);
         // Genesis's view still shows zero (per-block states are independent).
         assert_eq!(
-            ledger.stake_state(&ledger.genesis()).unwrap().total_stake(),
+            ledger.stake_state(&ledger.genesis()).unwrap().total_stake(None),
             0
         );
 
@@ -3698,7 +3702,7 @@ mod tests {
         let b_unbond = ledger
             .insert(vec![tip], 1, 300, 0, &[unbond])
             .expect("matured unbond applies");
-        assert_eq!(ledger.stake_state(&b_unbond).unwrap().stake_of(&pk), 0);
+        assert_eq!(ledger.stake_state(&b_unbond).unwrap().stake_of(&pk, None), 0);
         // The unbonded output is freely spendable in a later block.
         let freed = OutPoint::new(unbond_id, 0);
         let spend = Transaction::signed(

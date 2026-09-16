@@ -143,8 +143,8 @@ fn full_stake_validator_always_wins() {
         )
         .unwrap();
     let stake = ledger.stake_state(&b1).unwrap().clone();
-    assert_eq!(stake.total_stake(), 500);
-    assert_eq!(stake.stake_of(&v.pk), 500);
+    assert_eq!(stake.total_stake_all_assets(), 500);
+    assert_eq!(stake.stake_of_all_assets(&v.pk), 500);
 
     ledger.set_hybrid(hybrid_no_pin());
 
@@ -815,5 +815,5 @@ fn prepared_bond_block_records_stake_under_hybrid() {
     let block = producer.dag().block(&bond).unwrap().clone();
     let txs = kovanica_state::decode_block_payload(block.payload()).unwrap();
     consumer.insert_prepared_block(block, &txs).unwrap();
-    assert_eq!(consumer.stake_state(&bond).unwrap().total_stake(), 500);
+    assert_eq!(consumer.stake_state(&bond).unwrap().total_stake_all_assets(), 500);
 }

@@ -817,23 +817,23 @@ impl Node {
         Ok(self.ledger()?.dag().tips())
     }
 
-    /// Total bonded stake in the selected tip's view.
+    /// Total bonded stake in the selected tip's view (across all assets).
     pub fn total_stake(&self) -> Result<u64, NodeError> {
         let ledger = self.ledger()?;
         let tip = ledger.dag().selected_tip();
         Ok(ledger
             .stake_state(&tip)
-            .map(|s| s.total_stake())
+            .map(|s| s.total_stake_all_assets())
             .unwrap_or(0))
     }
 
-    /// `vrf_pk`'s bonded stake in the selected tip's view.
+    /// `vrf_pk`'s bonded stake in the selected tip's view (across all assets).
     pub fn stake_of(&self, vrf_pk: &[u8; 32]) -> Result<u64, NodeError> {
         let ledger = self.ledger()?;
         let tip = ledger.dag().selected_tip();
         Ok(ledger
             .stake_state(&tip)
-            .map(|s| s.stake_of(vrf_pk))
+            .map(|s| s.stake_of_all_assets(vrf_pk))
             .unwrap_or(0))
     }
 
@@ -1865,9 +1865,9 @@ impl Node {
         Ok(id)
     }
 
-    /// Estimated competitive fee rate from the mempool, in atoms/byte.
+    /// Estimated competitive fee rate from the mempool (p90), in atoms/byte.
     pub fn fee_estimate(&self) -> Result<u64, NodeError> {
-        Ok(self.mempool.fee_estimate())
+        Ok(self.mempool.fee_estimate_p90())
     }
 
     /// Assemble the largest valid prefix of the mempool into a block on the
@@ -2110,6 +2110,12 @@ impl Node {
     /// A pending mempool transaction by id, if present.
     pub fn mempool_tx(&self, id: &TxId) -> Option<Transaction> {
         self.mempool.get(id).cloned()
+    }
+
+    /// Estimate a competitive fee rate from the current mempool (p90).
+    /// Returns atoms per byte. Returns `min_fee_rate` if mempool is empty or below capacity.
+    pub fn estimate_fee(&self) -> u64 {
+        self.mempool.fee_estimate_p90()
     }
 
     fn evict_mempool(&mut self) {
