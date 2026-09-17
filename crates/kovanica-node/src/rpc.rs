@@ -36,8 +36,7 @@ htlc_refund <from-seed> <outpoint-tx-hex> <outpoint-index> <script-hex> <to-addr
 htlc_balance <script-hex> | \
 vault_create <from-seed> <amount> <unlock-height> <csv> <owner-pk-hex> | \
 vault_release <from-seed> <outpoint-tx-hex> <outpoint-index> <script-hex> <to-addr> | \
-vault_balance <script-hex> | \
-fee_estimate [target-blocks]";
+vault_balance <script-hex>";
 
 /// Run one command line against `node`, returning the response line. Never
 /// panics on bad input; malformed commands produce an `err ...` response.
@@ -67,6 +66,7 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
                     u64_arg(subsidy)?,
                     u64_arg(amount)?,
                     u64_arg(seed)?,
+                    None, // RPC genesis is treasury-less; the explorer profile opts in explicitly
                 )
                 .map_err(|e| e.to_string())?;
             Ok(format!("genesis {genesis} founder {founder}"))
@@ -80,6 +80,7 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
                     u64_arg(subsidy)?,
                     u64_arg(amount)?,
                     u64_arg(seed)?,
+                    None, // RPC genesis is treasury-less; the explorer profile opts in explicitly
                     u64_arg(finality_depth)?,
                     u64::MAX,
                 )
@@ -263,12 +264,6 @@ fn run(node: &mut Node, line: &str) -> Result<String, String> {
         }
 
         "len" => Ok(node.block_count().map_err(|e| e.to_string())?.to_string()),
-
-        "fee_estimate" => {
-            let target_blocks = args.first().copied().unwrap_or("1");
-            let _target = u64_arg(target_blocks)?;
-            Ok(node.estimate_fee().to_string())
-        }
 
         "save" => {
             let [path] = fixed::<1>(&args)?;

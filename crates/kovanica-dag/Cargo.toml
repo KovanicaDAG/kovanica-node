@@ -17,11 +17,15 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-criterion = "0.5"
+criterion.workspace = true
 
 
 [[bench]]
 name = "dag_insert"
+harness = false
+
+[[bench]]
+name = "consensus"
 harness = false
 
 [lints.rust]

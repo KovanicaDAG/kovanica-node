@@ -12,23 +12,26 @@ kovanica-dag = { path = "../kovanica-dag" }
 kovanica-state = { path = "../kovanica-state" }
 hex.workspace = true
 blake3.workspace = true
-socket2 = "0.5"
-base64 = "0.22"
-sha1 = "0.10"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-rand = "0.8"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-metrics = "0.22"
-# default features pull hyper-tls/openssl for the http-listener we don't use
-# (we render /metrics ourselves); dropping them keeps ARM cross-builds simple.
-metrics-exporter-prometheus = { version = "0.13", default-features = false }
-arbitrary = "1.3"
-proptest = "1.0"
+socket2.workspace = true
+base64.workspace = true
+sha1.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+arbitrary.workspace = true
+proptest.workspace = true
 
 [dev-dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "node_hot_paths"
+harness = false
 
 [features]
 # Enabled by `cargo fuzz` (via --cfg fuzzing builds) and for fuzz-target compilation.

@@ -33,7 +33,7 @@ fn log_roundtrip_recovers_blocks_and_continues() {
 
     // Produce blocks on the original node and persist incrementally.
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     node.set_miner(founder.address());
     node.produce_empty().unwrap();
     node.pool(1, 100, 2).unwrap();
@@ -80,7 +80,7 @@ fn hybrid_log_preserves_staked_block_id() {
 
     // Bond the founder's coin so the validator can win a staked-VRF block.
     let mut node = Node::new();
-    node.genesis(3, 1_000, 1_000, 1).unwrap();
+    node.genesis(3, 1_000, 1_000, 1, None).unwrap();
     node.enable_hybrid(cfg.clone()).unwrap();
     node.set_validator_seed([7u8; 32]);
 

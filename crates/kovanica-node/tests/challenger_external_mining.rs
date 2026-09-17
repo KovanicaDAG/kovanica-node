@@ -374,6 +374,7 @@ fn test_empirical_mempool_packing_and_utxo_eviction() {
     );
     let fees = tmpl["fees"].as_u64().unwrap();
     assert!(fees > 0, "Template should record non-zero fees");
+    let subsidy = tmpl["subsidy"].as_u64().unwrap();
 
     let parents: Vec<BlockId> = tmpl["parents"]
         .as_array()
@@ -426,9 +427,11 @@ fn test_empirical_mempool_packing_and_utxo_eviction() {
     let new_sender_bal = node_after.balance(&sender_addr).unwrap();
     let new_recipient_bal = node_after.balance(&recipient_addr).unwrap();
 
+    // RFC-006: the sender (miner) receives subsidy + fees/4 and pays the fee,
+    // so the net credit is subsidy - 3*fees/4.
     assert_eq!(
         new_sender_bal,
-        initial_sender_bal - (transfer_amount as u128) + (200 * ATOM as u128)
+        initial_sender_bal - (transfer_amount as u128) + (subsidy as u128) - 3 * (fees as u128) / 4
     );
     assert_eq!(
         new_recipient_bal,

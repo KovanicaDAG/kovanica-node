@@ -14,13 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kovanica_dag::{pow, Block, BlockId, Dag, VrfPublicKey, VrfSecretKey};
 use kovanica_dag::{vrf_keypair_from_seed, vrf_prove};
+use kovanica_state::ledger::apply_block_with_stake;
 use kovanica_state::multisig::{verify_threshold_signatures, MultisigScript};
 use kovanica_state::stake::{Freeze, UNBOND_MATURITY, UNBOND_PREFIX};
 use kovanica_state::{
-    apply_block, decode_block_payload, encode_block_payload, verify, Address, AssetId,
-    HalvingSchedule, HtlcScript, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError,
-    LedgerStore, OutPoint, Sig, StakedVrf, StealthAddress, Transaction, TxId, TxInput, TxOutput,
-    UtxoSet, VaultScript, DEFAULT_HALVING_ERA,
+    decode_block_payload, encode_block_payload, verify, Address, AssetId, HalvingSchedule,
+    HtlcScript, HybridConfig, KeyPair, Ledger, LedgerError, LedgerInsertError, LedgerStore,
+    OutPoint, Sig, StakedVrf, StealthAddress, Transaction, TxId, TxInput, TxOutput, UtxoSet,
+    VaultScript, COINBASE_MATURITY, DEFAULT_HALVING_ERA, FEE_PRODUCER_DEN, FEE_PRODUCER_NUM,
 };
 
 use crate::mempool_v2::{MempoolConfig, MempoolV2};
@@ -106,6 +107,8 @@ pub enum NodeError {
     InsufficientMultisigSignatures { have: usize, need: u8 },
     /// A multisig operation expected a single input but the transaction has more.
     MultisigInputCount { expected: usize, actual: usize },
+    /// Treasury genesis requires the standard RFC-006 premine amount.
+    TreasuryPremineMismatch { amount: u64 },
 }
 
 impl core::fmt::Display for NodeError {
@@ -150,11 +153,41 @@ impl core::fmt::Display for NodeError {
                     "multisig transaction must have exactly {expected} input(s), got {actual}"
                 )
             }
+            NodeError::TreasuryPremineMismatch { amount } => write!(
+                f,
+                "treasury genesis requires the standard RFC-006 premine ({amount} != RFC006_PREMINE)"
+            ),
         }
     }
 }
 
 impl std::error::Error for NodeError {}
+
+/// RFC-006 treasury genesis configuration.
+///
+/// Treasury inclusion is an **explicit** decision — it is never inferred from
+/// the premine amount. When present, the genesis coinbase mints the standard
+/// RFC-006 premine ([`kovanica_state::RFC006_PREMINE`]) plus
+/// [`kovanica_state::RFC006_TREASURY_TRANCHES`] vault outputs, each locking
+/// [`kovanica_state::RFC006_TREASURY_TRANCHE`] behind an absolute-time vault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreasuryGenesis {
+    /// Treasury key seed. `None` = deterministic placeholder keys
+    /// (`KeyPair::from_u64(0x7E45_0000 + k)` — **TESTNET-ONLY and publicly
+    /// derivable by design**; anyone can compute them, so they must never hold
+    /// real funds); `Some(seed)` = derive the treasury keys from the secret
+    /// (`BLAKE3(seed || "treasury" || k)`, mainnet key ceremony; the seed must
+    /// be delivered out-of-band and never stored in the repository).
+    pub seed: Option<[u8; 32]>,
+}
+
+impl TreasuryGenesis {
+    /// Treasury with the deterministic placeholder keys (testnet default).
+    /// ⚠️ TESTNET-ONLY: these keys are publicly derivable by design.
+    pub fn placeholder() -> Self {
+        Self { seed: None }
+    }
+}
 
 /// The result of a successful [`Node::send`]: the block that carried the spend
 /// and the transaction's id.
@@ -164,6 +197,36 @@ pub struct Sent {
     pub block: BlockId,
     /// Id of the transfer transaction.
     pub tx: TxId,
+}
+
+/// Wire form for HTTP JSON: native KVNC (`None`) → `"KVNC"`. Other assets → lowercase hex.
+pub fn asset_id_to_wire(asset_id: Option<AssetId>) -> String {
+    match asset_id {
+        None => "KVNC".to_string(),
+        Some(id) if id.is_native() => "KVNC".to_string(),
+        Some(id) => id.to_hex(),
+    }
+}
+
+/// Parse wire `asset_id` query/body value into ledger form.
+/// `"KVNC"`, empty, or missing → `None` (native). Else 32-byte hex → `Some(AssetId)`.
+pub fn asset_id_from_wire(s: Option<&str>) -> Result<Option<AssetId>, String> {
+    let Some(raw) = s.map(str::trim).filter(|x| !x.is_empty()) else {
+        return Ok(None);
+    };
+    if raw.eq_ignore_ascii_case("KVNC") {
+        return Ok(None);
+    }
+    let bytes = hex::decode(raw).map_err(|_| "asset_id is not hex".to_string())?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "asset_id must be 32 bytes (64 hex chars) or KVNC".to_string())?;
+    let id = AssetId::from_bytes(arr);
+    if id.is_native() {
+        Ok(None)
+    } else {
+        Ok(Some(id))
+    }
 }
 
 /// An unsigned transfer ready for a wallet to sign.
@@ -454,9 +517,9 @@ pub struct Node {
     stealth_counter: std::sync::atomic::AtomicU64,
 }
 
-/// Blocks per subsidy-halving era. Issuance is `cap >> (height / HALVING_ERA)`.
-pub const HALVING_ERA: u64 = 500_000;
-/// Floor: `max(1, subsidy / 500_000)`. On the 200 KVNC testnet that is 0.0004 KVNC.
+/// RFC-006 emission era length (blocks).
+pub const HALVING_ERA: u64 = 2_000_000;
+/// Floor: `max(1, subsidy / 500_000)`.
 pub const MIN_FEE_DIVISOR: u64 = 500_000;
 
 impl Default for Node {
@@ -573,6 +636,35 @@ impl Node {
         self.now_ms().max(floor)
     }
 
+    /// The work target to use for a block built on `parents`. When hybrid mode
+    /// with a retargeting policy is active, this returns the hybrid config's
+    /// retarget target (via [`Ledger::expected_work`]); otherwise it falls back
+    /// to the DAG's difficulty target or 1.
+    fn work_target_for_parents(&self, parents: &[BlockId]) -> u128 {
+        if let Some(ledger) = self.ledger.as_ref() {
+            if let Some(work) = ledger.expected_work(parents) {
+                eprintln!(
+                    "DEBUG work_target_for_parents: expected_work returned {} (hybrid_enabled={})",
+                    work,
+                    ledger.hybrid_enabled()
+                );
+                return work;
+            } else {
+                eprintln!("DEBUG work_target_for_parents: expected_work returned None (hybrid_enabled={})", ledger.hybrid_enabled());
+            }
+        }
+        let fallback = self
+            .ledger()
+            .ok()
+            .and_then(|l| l.dag().next_work_target(parents))
+            .unwrap_or(1);
+        eprintln!(
+            "DEBUG work_target_for_parents: fallback returned {}",
+            fallback
+        );
+        fallback
+    }
+
     /// The proof-of-work nonce to stamp on a new block built on `parents` with
     /// `work`, `timestamp_ms`, and transactions `txs`.
     ///
@@ -583,14 +675,20 @@ impl Node {
     /// byte-identical to the block [`Ledger::insert`] will build (same parents,
     /// work, timestamp, and payload encoding) so the winning nonce carries over
     /// to exactly the same id.
+    /// Mine a nonce for a block with the given parameters. Returns 0 if neither
+    /// DAG-level PoW nor hybrid retargeting is enforced.
     fn mine_nonce(
-        dag: &Dag,
+        &self,
         parents: &[BlockId],
         work: u128,
         timestamp_ms: u64,
         txs: &[Transaction],
     ) -> u64 {
-        if !dag.proof_of_work_enabled() {
+        let ledger = self.ledger.as_ref().expect("checked above");
+        let dag = ledger.dag();
+        // Mine if either DAG-level PoW is enabled OR hybrid mode with retarget is active.
+        let hybrid_retarget = ledger.hybrid_config().and_then(|c| c.retarget).is_some();
+        if !dag.proof_of_work_enabled() && !hybrid_retarget {
             return 0;
         }
         let template = Block::new(
@@ -640,8 +738,17 @@ impl Node {
         subsidy: u64,
         amount: u64,
         founder_seed: u64,
+        treasury: Option<TreasuryGenesis>,
     ) -> Result<(BlockId, Address), NodeError> {
-        self.genesis_with_finality(k, subsidy, amount, founder_seed, u64::MAX, u64::MAX)
+        self.genesis_with_finality(
+            k,
+            subsidy,
+            amount,
+            founder_seed,
+            treasury,
+            u64::MAX,
+            u64::MAX,
+        )
     }
 
     /// Like [`Node::genesis`], but with configurable finality depth and payload
@@ -663,6 +770,7 @@ impl Node {
         subsidy: u64,
         amount: u64,
         founder_seed: u64,
+        treasury: Option<TreasuryGenesis>,
         finality_depth: u64,
         payload_pruning_depth: u64,
     ) -> Result<(BlockId, Address), NodeError> {
@@ -670,8 +778,22 @@ impl Node {
             return Err(NodeError::AlreadyInitialized);
         }
         let founder = Self::address(founder_seed);
-        let coinbase =
-            Transaction::coinbase(vec![TxOutput::native(amount, founder)], b"genesis".to_vec());
+        // RFC-006: treasury inclusion is explicit — never inferred from the
+        // premine amount. With treasury on, the genesis coinbase mints the
+        // standard RFC-006 premine plus treasury vaults; `amount` must match
+        // the standard premine (it is part of the consensus genesis and cannot
+        // vary while the treasury is present).
+        let coinbase = match treasury {
+            Some(t) => {
+                if amount != kovanica_state::RFC006_PREMINE {
+                    return Err(NodeError::TreasuryPremineMismatch { amount });
+                }
+                kovanica_state::rfc006_genesis_coinbase(founder, t.seed)
+            }
+            None => {
+                Transaction::coinbase(vec![TxOutput::native(amount, founder)], b"genesis".to_vec())
+            }
+        };
         let schedule = HalvingSchedule::new(subsidy, DEFAULT_HALVING_ERA);
         let ledger = if finality_depth == u64::MAX && payload_pruning_depth == u64::MAX {
             Ledger::new(k, schedule, &[coinbase]).map_err(NodeError::Ledger)?
@@ -775,14 +897,9 @@ impl Node {
     }
 
     /// Compute the subsidy at a given height (height 0 = genesis).
-    /// `cap` is the genesis subsidy. Halving era is `HALVING_ERA` (500_000 blocks).
+    /// RFC-006 geometric decay alpha=3/4 per era of `HALVING_ERA` blocks.
     pub fn issuance_at(cap: u64, height: u64) -> u64 {
-        let era = height / HALVING_ERA;
-        if era >= 63 {
-            0
-        } else {
-            cap >> era
-        }
+        kovanica_state::HalvingSchedule::new(cap, HALVING_ERA).subsidy_at(height)
     }
 
     pub(crate) fn ledger(&self) -> Result<&Ledger, NodeError> {
@@ -817,23 +934,23 @@ impl Node {
         Ok(self.ledger()?.dag().tips())
     }
 
-    /// Total bonded stake in the selected tip's view (across all assets).
+    /// Total bonded stake in the selected tip's view.
     pub fn total_stake(&self) -> Result<u64, NodeError> {
         let ledger = self.ledger()?;
         let tip = ledger.dag().selected_tip();
         Ok(ledger
             .stake_state(&tip)
-            .map(|s| s.total_stake_all_assets())
+            .map(|s| s.total_stake())
             .unwrap_or(0))
     }
 
-    /// `vrf_pk`'s bonded stake in the selected tip's view (across all assets).
+    /// `vrf_pk`'s bonded stake in the selected tip's view.
     pub fn stake_of(&self, vrf_pk: &[u8; 32]) -> Result<u64, NodeError> {
         let ledger = self.ledger()?;
         let tip = ledger.dag().selected_tip();
         Ok(ledger
             .stake_state(&tip)
-            .map(|s| s.stake_of_all_assets(vrf_pk))
+            .map(|s| s.stake_of(vrf_pk))
             .unwrap_or(0))
     }
 
@@ -957,10 +1074,10 @@ impl Node {
         }
 
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let block = self
             .ledger
             .as_mut()
@@ -1073,9 +1190,28 @@ impl Node {
             .checked_add(fee)
             .ok_or(NodeError::InsufficientFunds)?;
         let state = self.ledger()?.ledger_state();
+        let chain_height = self
+            .ledger()
+            .as_ref()
+            .map(|l| l.tip_blue_score())
+            .unwrap_or(0);
+        let mature_before = chain_height.saturating_sub(COINBASE_MATURITY);
         let mut owned: Vec<(OutPoint, u64)> = state
             .iter()
             .filter(|(_, out)| out.owner == kp.address() && out.asset_id.is_none())
+            .filter(|(op, _)| {
+                // Non-coinbase outputs are always spendable;
+                // coinbase outputs need creation_height <= mature_before.
+                // We approximate: if creation_height is 0 (legacy), allow.
+                // For the maturity check we need the UtxoEntry; use get_entry.
+                match state.get_entry(op) {
+                    Some(entry) => entry
+                        .is_coinbase
+                        .then(|| entry.creation_height <= mature_before)
+                        .unwrap_or(true),
+                    None => true,
+                }
+            })
             .map(|(op, out)| (*op, out.value))
             .collect();
         owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -1137,9 +1273,26 @@ impl Node {
             .checked_add(fee)
             .ok_or(NodeError::InsufficientFunds)?;
         let state = self.ledger()?.ledger_state();
+        // RFC-006 coinbase maturity: only spend coinbases whose creation height
+        // is at least COINBASE_MATURITY below the current chain height, or the
+        // ledger rejects the tx at produce time (CoinbaseImmature). Mirrors
+        // build_transfer_with_outputs.
+        let chain_height = self
+            .ledger()
+            .as_ref()
+            .map(|l| l.tip_blue_score())
+            .unwrap_or(0);
+        let mature_before = chain_height.saturating_sub(COINBASE_MATURITY);
         let mut owned: Vec<(OutPoint, u64)> = state
             .iter()
             .filter(|(_, out)| out.owner == from && out.asset_id == asset_id)
+            .filter(|(op, _)| match state.get_entry(op) {
+                Some(entry) => entry
+                    .is_coinbase
+                    .then(|| entry.creation_height <= mature_before)
+                    .unwrap_or(true),
+                None => true,
+            })
             .map(|(op, out)| (*op, out.value))
             .collect();
         owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -1206,6 +1359,54 @@ impl Node {
         Ok(rows)
     }
 
+    /// Unspent outputs owned by `owner` that are spendable now (RFC-006
+    /// coinbase-maturity respected).  Immutable coinbase outputs are
+    /// returned; coinbase outputs whose `creation_height` is still within
+    /// `COINBASE_MATURITY` blocks of the tip are filtered out.
+    pub fn spendable_utxos_of(&self, owner: &Address) -> Result<Vec<(OutPoint, u64)>, NodeError> {
+        let chain_height = self.chain_height().unwrap_or(0);
+        let mature_before = chain_height.saturating_sub(COINBASE_MATURITY);
+        let mut rows: Vec<(OutPoint, u64)> = self
+            .ledger()?
+            .ledger_state()
+            .iter_entries()
+            .filter(|(_, entry)| &entry.output.owner == owner)
+            .filter(|(_, entry)| !entry.is_coinbase || entry.creation_height <= mature_before)
+            .map(|(op, entry)| (*op, entry.output.value))
+            .collect();
+        rows.sort_by_key(|row| row.0);
+        Ok(rows)
+    }
+
+    /// Unspent outputs owned by `owner`, including `asset_id` (KVP-102 HTTP).
+    pub fn utxos_detailed_of(
+        &self,
+        owner: &Address,
+    ) -> Result<Vec<(OutPoint, u64, Option<AssetId>)>, NodeError> {
+        let mut rows: Vec<(OutPoint, u64, Option<AssetId>)> = self
+            .ledger()?
+            .ledger_state()
+            .iter()
+            .filter(|(_, o)| &o.owner == owner)
+            .map(|(op, o)| (*op, o.value, o.asset_id))
+            .collect();
+        rows.sort_by_key(|row| row.0);
+        Ok(rows)
+    }
+
+    /// Spendable balances grouped by wire asset id (`"KVNC"` or hex).
+    pub fn balances_map_of(
+        &self,
+        owner: &Address,
+    ) -> Result<std::collections::BTreeMap<String, u128>, NodeError> {
+        let mut map = std::collections::BTreeMap::new();
+        for (_, value, asset_id) in self.utxos_detailed_of(owner)? {
+            let key = asset_id_to_wire(asset_id);
+            *map.entry(key).or_insert(0u128) += value as u128;
+        }
+        Ok(map)
+    }
+
     /// Send `amount` from an explicit keypair to an arbitrary address
     /// **immediately**, as a new block built on the current tips. The
     /// seed-based [`Node::send_to`] is a thin wrapper over this — wallets that
@@ -1227,10 +1428,10 @@ impl Node {
         let tx = self.build_transfer_with_asset(kp, amount, to, asset_id)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
@@ -1300,10 +1501,10 @@ impl Node {
         let tx = self.build_transfer_with(kp, amount, to)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
@@ -1352,10 +1553,10 @@ impl Node {
         let tx = self.build_transfer_with_outputs(kp, amount, output)?;
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
@@ -1656,10 +1857,10 @@ impl Node {
     fn insert_tx_block(&mut self, tx: Transaction) -> Result<TxId, NodeError> {
         let tx_id = tx.id();
         let parents = self.ledger()?.dag().tips();
-        let timestamp = self.next_timestamp(self.ledger()?.dag(), &parents);
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, std::slice::from_ref(&tx));
+        let timestamp = self.next_timestamp(dag, &parents);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, std::slice::from_ref(&tx));
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let block = ledger
             .insert(parents, work, timestamp, nonce, &[tx])
@@ -1865,9 +2066,9 @@ impl Node {
         Ok(id)
     }
 
-    /// Estimated competitive fee rate from the mempool (p90), in atoms/byte.
+    /// Estimated competitive fee rate from the mempool, in atoms/byte.
     pub fn fee_estimate(&self) -> Result<u64, NodeError> {
-        Ok(self.mempool.fee_estimate_p90())
+        Ok(self.mempool.fee_estimate())
     }
 
     /// Assemble the largest valid prefix of the mempool into a block on the
@@ -1886,18 +2087,31 @@ impl Node {
             return Ok(None);
         }
 
-        let (subsidy, mut working, original) = {
+        let (subsidy, mut working, original, mut stake, next_height) = {
             let ledger = self.ledger.as_ref().expect("checked above");
+            let tip = ledger.dag().selected_tip();
             (
                 ledger.subsidy(),
                 ledger.ledger_state(),
                 ledger.ledger_state(),
+                ledger.stake_state(&tip).unwrap_or_default(),
+                ledger.tip_blue_score() + 1,
             )
         };
         let mut selected = Vec::new();
         let mut selected_ids = Vec::new();
         for tx in self.mempool.ordered_pending() {
-            if apply_block(&mut working, std::slice::from_ref(&tx), subsidy).is_ok() {
+            // Validate against the real next block height so coinbase-maturity
+            // (RFC-006) is judged correctly: immature spends are excluded.
+            if apply_block_with_stake(
+                &mut working,
+                &mut stake,
+                std::slice::from_ref(&tx),
+                subsidy,
+                next_height,
+            )
+            .is_ok()
+            {
                 selected_ids.push(tx.id());
                 selected.push(tx);
             }
@@ -1929,8 +2143,8 @@ impl Node {
         }
 
         let dag = self.ledger.as_ref().expect("checked above").dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &block_txs);
+        let work = self.work_target_for_parents(&parents);
+        let nonce = self.mine_nonce(&parents, work, timestamp, &block_txs);
         let ledger = self.ledger.as_mut().expect("checked above");
         let start = std::time::Instant::now();
         let block = ledger
@@ -2024,9 +2238,10 @@ impl Node {
         }
 
         let dag = self.ledger()?.dag();
-        let work = dag.next_work_target(&parents).unwrap_or(1);
+        let work = self.work_target_for_parents(&parents);
+        eprintln!("DEBUG produce_empty: work = {}", work);
         let txs = self.issuance_txs(timestamp, 0);
-        let nonce = Self::mine_nonce(dag, &parents, work, timestamp, &txs);
+        let nonce = self.mine_nonce(&parents, work, timestamp, &txs);
         let ledger = self.ledger.as_mut().ok_or(NodeError::NotInitialized)?;
         let start = std::time::Instant::now();
         let id = ledger
@@ -2048,12 +2263,25 @@ impl Node {
     pub fn mining_template_for(&self, miner: Option<Address>) -> Result<MiningTemplate, NodeError> {
         let ledger = self.ledger.as_ref().ok_or(NodeError::NotInitialized)?;
         let subsidy = ledger.subsidy();
+        let tip = ledger.dag().selected_tip();
+        let next_height = ledger.tip_blue_score() + 1;
         let mut working = ledger.ledger_state();
+        let mut stake = ledger.stake_state(&tip).unwrap_or_default();
         let original = ledger.ledger_state();
 
         let mut selected = Vec::new();
         for tx in self.mempool.ordered_pending() {
-            if apply_block(&mut working, std::slice::from_ref(&tx), subsidy).is_ok() {
+            // Validate against the real next block height so templates exclude
+            // immature-coinbase spends (RFC-006) that would be rejected at submit.
+            if apply_block_with_stake(
+                &mut working,
+                &mut stake,
+                std::slice::from_ref(&tx),
+                subsidy,
+                next_height,
+            )
+            .is_ok()
+            {
                 selected.push(tx);
             }
         }
@@ -2061,7 +2289,8 @@ impl Node {
 
         let parents = ledger.dag().tips();
         let timestamp_ms = self.next_timestamp(ledger.dag(), &parents);
-        let work = ledger.dag().next_work_target(&parents).unwrap_or(1);
+        let work = self.work_target_for_parents(&parents);
+        let dag = ledger.dag();
 
         let mut block_txs = self.issuance_txs_for(miner, timestamp_ms, fees);
         block_txs.extend(selected);
@@ -2092,7 +2321,9 @@ impl Node {
             return Vec::new();
         };
         let subsidy = self.issuance().unwrap_or(0);
-        let total = subsidy.saturating_add(extra_fees);
+        // RFC-006: 75% of fees are burned; the producer claims subsidy + fees/4.
+        let fee_share = extra_fees / FEE_PRODUCER_DEN * FEE_PRODUCER_NUM;
+        let total = subsidy.saturating_add(fee_share);
         if total == 0 {
             return Vec::new();
         }
@@ -2110,12 +2341,6 @@ impl Node {
     /// A pending mempool transaction by id, if present.
     pub fn mempool_tx(&self, id: &TxId) -> Option<Transaction> {
         self.mempool.get(id).cloned()
-    }
-
-    /// Estimate a competitive fee rate from the current mempool (p90).
-    /// Returns atoms per byte. Returns `min_fee_rate` if mempool is empty or below capacity.
-    pub fn estimate_fee(&self) -> u64 {
-        self.mempool.fee_estimate_p90()
     }
 
     fn evict_mempool(&mut self) {
@@ -3019,7 +3244,7 @@ mod tests {
     #[test]
     fn test_node_spv_header_and_export() {
         let mut node = Node::new();
-        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1, None).unwrap();
         let sent1 = node.send(1, 100, 2).unwrap();
         let sent2 = node.send(2, 50, 3).unwrap();
 
@@ -3048,7 +3273,7 @@ mod tests {
     #[test]
     fn test_node_headers_from() {
         let mut node = Node::new();
-        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1, None).unwrap();
         let sent1 = node.send(1, 100, 2).unwrap();
         let sent2 = node.send(2, 50, 3).unwrap();
 
@@ -3085,7 +3310,7 @@ mod tests {
     #[test]
     fn test_node_merkle_block() {
         let mut node = Node::new();
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
         let sent = node.send(1, 200, 2).unwrap();
 
         // Matching transaction
@@ -3123,7 +3348,7 @@ mod tests {
         let mut node = Node::new();
         let miner_kp = KeyPair::from_u64(1);
         node.set_miner(miner_kp.address());
-        let (genesis, _) = node.genesis(3, 1000, 1000, 1).unwrap();
+        let (genesis, _) = node.genesis(3, 1000, 1000, 1, None).unwrap();
 
         let template = node.mining_template().unwrap();
         assert_eq!(template.parents, vec![genesis]);
@@ -3151,7 +3376,7 @@ mod tests {
         let mut node = Node::new();
         let miner_kp = KeyPair::from_u64(1);
         node.set_miner(miner_kp.address());
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
 
         // Submit a spend to the mempool
         node.pool(1, 100, 2).unwrap();

@@ -19,4 +19,4 @@ kovanica-state = { path = "../kovanica-state" }
 kovanica-node = { path = "../kovanica-node" }
 hex.workspace = true
 thiserror.workspace = true
-uniffi = { version = "0.32", features = ["cli"] }
+uniffi.workspace = true

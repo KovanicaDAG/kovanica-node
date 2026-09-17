@@ -412,10 +412,9 @@ impl MempoolV2 {
 
     /// Estimate a competitive fee rate from the current pending pool.
     ///
-    /// Returns the `percentile` fee rate (e.g., 90 for p90), floored at `min_fee_rate`.
-    /// If the mempool is empty or below capacity, returns `min_fee_rate`.
-    /// `percentile` should be in range 1..=100.
-    pub fn fee_estimate(&self, percentile: u8) -> u64 {
+    /// Returns the 75th percentile fee rate, floored at `min_fee_rate`. If the
+    /// mempool is empty or below capacity, returns `min_fee_rate`.
+    pub fn fee_estimate(&self) -> u64 {
         if self.pending.is_empty() {
             return self.config.min_fee_rate;
         }
@@ -434,13 +433,8 @@ impl MempoolV2 {
 
         let mut rates: Vec<u64> = self.pending.values().map(|e| e.fee_rate).collect();
         rates.sort_unstable();
-        let idx = ((rates.len() as u64 * percentile as u64) / 100).min(rates.len() as u64 - 1) as usize;
+        let idx = (rates.len() * 3 / 4).min(rates.len() - 1);
         rates[idx].max(self.config.min_fee_rate)
-    }
-
-    /// Estimate fee rate at p90 (90th percentile).
-    pub fn fee_estimate_p90(&self) -> u64 {
-        self.fee_estimate(90)
     }
 
     /// Remove a tx from pending pool.
@@ -912,7 +906,7 @@ mod tests {
         }
 
         // Mempool is full; estimate should be at least the median rate.
-        let estimate = pool.fee_estimate(90);
+        let estimate = pool.fee_estimate();
         assert!(estimate >= pool.config.min_fee_rate);
     }
 
@@ -929,7 +923,7 @@ mod tests {
         let tx = tx_spending(op, 10_000, 9_000);
         pool.add(tx, &utxo).unwrap();
 
-        assert_eq!(pool.fee_estimate(90), pool.config.min_fee_rate);
+        assert_eq!(pool.fee_estimate(), pool.config.min_fee_rate);
     }
 
     #[test]

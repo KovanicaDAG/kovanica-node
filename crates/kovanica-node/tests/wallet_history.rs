@@ -10,7 +10,7 @@ use kovanica_node::{Node, WalletDirection};
 
 fn node() -> Node {
     let mut n = Node::new();
-    n.genesis(3, 1_000, 1_000, 1).unwrap();
+    n.genesis(3, 1_000, 1_000, 1, None).unwrap();
     n
 }
 

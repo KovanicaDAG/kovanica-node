@@ -16,9 +16,11 @@
 use std::sync::{Mutex, MutexGuard};
 
 use kovanica_dag::BlockId;
-use kovanica_node::{net, Node};
+use kovanica_node::{net, Node, TreasuryGenesis};
 use kovanica_state::stake::bond_tag;
-use kovanica_state::{KeyPair, OutPoint, Sig, StealthAddress, Transaction, TxOutput};
+use kovanica_state::{
+    KeyPair, OutPoint, Sig, StealthAddress, Transaction, TxOutput, RFC006_PREMINE,
+};
 
 /// Why a [`LightNode`] operation failed.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -269,6 +271,16 @@ impl LightNode {
             config.subsidy,
             config.founder_amount,
             config.founder_seed,
+            // RFC-006 genesis gate: the live light-node config uses
+            // founder_amount = RFC006_PREMINE (200 KVNC), so the genesis
+            // coinbase must include the 10x1M treasury vaults with the
+            // placeholder keys to reproduce the live network genesis
+            // (9565fc20…). Non-standard premines stay treasury-less.
+            if config.founder_amount == RFC006_PREMINE {
+                Some(TreasuryGenesis::placeholder())
+            } else {
+                None
+            },
             config.finality_depth,
             config.payload_pruning_depth,
         )?;
@@ -359,8 +371,11 @@ impl LightNode {
 
         // Source coin selection over UNFROZEN coins only (frozen value moves
         // exclusively through unbond transactions).
+        // Spendable coins only: `spendable_utxos_of` respects RFC-006
+        // coinbase maturity, so a freshly-mined subsidy coinbase is never
+        // chosen over an older (mature) funding coin.
         let candidates: Vec<(OutPoint, u64)> = node
-            .utxos_of(&addr)?
+            .spendable_utxos_of(&addr)?
             .into_iter()
             .filter(|(op, _)| !node.outpoint_is_frozen(op).unwrap_or(true))
             .collect();
@@ -381,9 +396,12 @@ impl LightNode {
                     .find(|(op, _v)| *op == funder)
                     .map(|(_, v)| *v - amount)
                     .unwrap_or(0);
+                let fee = node.min_fee();
                 let mut outputs = vec![TxOutput::native(amount, addr)];
-                if rest > 0 {
-                    outputs.push(TxOutput::native(rest, addr));
+                if rest > fee {
+                    outputs.push(TxOutput::native(rest - fee, addr));
+                } else if rest == fee {
+                    // exact: fee is paid, no change
                 }
                 let mut split =
                     Transaction::unsigned(std::slice::from_ref(&funder), outputs, Vec::new());
@@ -459,8 +477,11 @@ impl LightNode {
             .map(|pk| *pk.as_bytes())
             .ok_or_else(|| invalid("call set_validator_seed before bonding"))?;
 
+        // Spendable coins only: `spendable_utxos_of` respects RFC-006
+        // coinbase maturity, so a freshly-mined subsidy coinbase is never
+        // chosen over an older (mature) funding coin.
         let candidates: Vec<(OutPoint, u64)> = node
-            .utxos_of(&addr)?
+            .spendable_utxos_of(&addr)?
             .into_iter()
             .filter(|(op, _)| !node.outpoint_is_frozen(op).unwrap_or(true))
             .collect();
@@ -480,9 +501,12 @@ impl LightNode {
                     .find(|(op, _v)| *op == funder)
                     .map(|(_, v)| *v - amount)
                     .unwrap_or(0);
+                let fee = node.min_fee();
                 let mut outputs = vec![TxOutput::native(amount, addr)];
-                if rest > 0 {
-                    outputs.push(TxOutput::native(rest, addr));
+                if rest > fee {
+                    outputs.push(TxOutput::native(rest - fee, addr));
+                } else if rest == fee {
+                    // exact: fee is paid, no change
                 }
                 let mut split =
                     Transaction::unsigned(std::slice::from_ref(&funder), outputs, Vec::new());

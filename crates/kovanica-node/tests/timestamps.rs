@@ -15,7 +15,7 @@ const DRIFT_MS: u64 = 2 * 60 * 60 * 1000;
 /// in `network.rs`.
 fn genesis_node() -> Node {
     let mut node = Node::new();
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
     node
 }
 

@@ -12,6 +12,8 @@ use std::time::Duration;
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
+use kovanica_state::SupplyMetrics;
+
 /// Global metrics recorder initialization guard.
 static METRICS_INIT: Once = Once::new();
 
@@ -157,6 +159,13 @@ pub mod names {
     pub const BLOCK_REJECTED_TOTAL: &str = "kovanica_block_rejected_total";
     pub const TX_VALIDATION_DURATION_SECONDS: &str = "kovanica_tx_validation_duration_seconds";
     pub const TX_REJECTED_TOTAL: &str = "kovanica_tx_rejected_total";
+
+    // RFC-006 supply
+    pub const SUPPLY_TOTAL: &str = "kovanica_supply_total";
+    pub const SUPPLY_CIRCULATING: &str = "kovanica_supply_circulating";
+    pub const SUPPLY_MINTED: &str = "kovanica_supply_minted";
+    pub const SUPPLY_BURNED: &str = "kovanica_supply_burned";
+    pub const SUPPLY_MAX: &str = "kovanica_supply_max";
 }
 
 /// Record a produced (or mined) block.
@@ -319,6 +328,21 @@ pub fn record_tx_validation(duration: Duration, rejected: bool) {
     if rejected {
         counter!(names::TX_REJECTED_TOTAL).increment(1);
     }
+}
+
+/// Surface the RFC-006 supply snapshot as gauges (atoms).
+///
+/// Called on the `/metrics` scrape path so Prometheus always sees fresh
+/// supply values even when no block/mempool event fired recently (same
+/// pattern as [`set_peer_count`]). `total` and `minted` both report
+/// cumulative native minted; `circulating` is the live UTXO total;
+/// `burned` is cumulative fee burn; `max` is the hard cap.
+pub fn record_supply(supply: SupplyMetrics) {
+    gauge!(names::SUPPLY_TOTAL).set(supply.total as f64);
+    gauge!(names::SUPPLY_CIRCULATING).set(supply.circulating as f64);
+    gauge!(names::SUPPLY_MINTED).set(supply.total as f64);
+    gauge!(names::SUPPLY_BURNED).set(supply.burned as f64);
+    gauge!(names::SUPPLY_MAX).set(supply.max_supply as f64);
 }
 
 /// A timer guard that records a histogram on drop.

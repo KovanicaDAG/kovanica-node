@@ -379,7 +379,7 @@ fn test_merkle_odd_leaf_count_and_index_bounds_analysis() {
 fn test_cross_block_merkle_forgery_and_tampered_payloads() {
     let mut node = Node::new();
     node.set_now_ms(1000);
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
 
     let gen_id = node.genesis_id().unwrap();
     let gen_hdr = node.spv_header(&gen_id).unwrap();
@@ -446,7 +446,7 @@ fn test_concurrent_tcp_light_clients_and_high_throughput_load() {
     let node_handle = thread::spawn(move || {
         let mut node = Node::new();
         node.set_now_ms(1_000);
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
         let mut block_idx = 0u64;
 
         while let Ok(cmd) = cmd_rx.recv() {

@@ -23,7 +23,7 @@ use std::time::Duration;
 /// Helper to create a test node with DHT
 fn create_test_node(node_id: NodeId, k: usize) -> Node {
     let mut node = Node::new();
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
     node.init_dht_routing_table(node_id, k);
     node
 }
@@ -846,7 +846,7 @@ fn test_relay_dht_ping_pong() {
 #[test]
 fn test_relay_handle_dht_query() {
     let mut node = Node::new();
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
     let node_id = NodeId::random();
     node.init_dht_routing_table(node_id, 8);
 

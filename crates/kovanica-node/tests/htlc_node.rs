@@ -39,7 +39,7 @@ fn swap_e2e_same_chain() {
     // Bob extracts the preimage and redeems A. Both parties end up with the
     // counterparty's funds, minus the five protocol fees.
     let mut node = Node::new();
-    node.genesis(3, 2000, 2000, 1).unwrap(); // 2000 to Alice (seed 1)
+    node.genesis(3, 2000, 2000, 1, None).unwrap(); // 2000 to Alice (seed 1)
 
     let alice = KeyPair::from_u64(1);
     let bob = KeyPair::from_u64(2);
@@ -126,7 +126,7 @@ fn swap_refund_path() {
     // after T_A. An early refund of HTLC-A is rejected with
     // `HtlcTimeoutNotReached` (the refund block's height is below the timeout).
     let mut node = Node::new();
-    node.genesis(3, 2000, 2000, 1).unwrap();
+    node.genesis(3, 2000, 2000, 1, None).unwrap();
 
     let alice = KeyPair::from_u64(1);
     let bob = KeyPair::from_u64(2);
@@ -239,7 +239,7 @@ fn htlc_rpc_commands() {
     // The four line-RPC commands end-to-end: create → balance → redeem →
     // balance, then a second create → refund → balance.
     let mut node = Node::new();
-    node.genesis(3, 2000, 2000, 1).unwrap();
+    node.genesis(3, 2000, 2000, 1, None).unwrap();
 
     let bob = KeyPair::from_u64(2);
     let bob_pk_hex = hex::encode(bob.address().payload());

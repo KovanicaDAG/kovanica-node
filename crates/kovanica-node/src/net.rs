@@ -880,7 +880,7 @@ mod tests {
 
     fn two_records() -> Vec<BlockRecord> {
         let mut node = Node::new();
-        node.genesis(3, 100, 100, 1).expect("genesis");
+        node.genesis(3, 100, 100, 1, None).expect("genesis");
         node.send_to(1, 10, Node::address(2)).expect("send");
         node.export()
     }
@@ -927,7 +927,7 @@ mod tests {
 
     fn genesis_node() -> Node {
         let mut node = Node::new();
-        node.genesis(3, 1000, 1000, 1).unwrap();
+        node.genesis(3, 1000, 1000, 1, None).unwrap();
         node
     }
 

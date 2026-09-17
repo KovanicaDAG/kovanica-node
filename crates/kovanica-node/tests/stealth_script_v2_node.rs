@@ -15,7 +15,7 @@ const SCRIPT_V2: &[u8] = &[0x01, 0x02, 0x03, 0x04, 0x05];
 #[test]
 fn send_to_script_v2_funds_and_balances() {
     let mut node = Node::new();
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
 
     // Fund actor 1 with a spendable coin (genesis already did: 1000).
     let kp = KeyPair::from_u64(1);
@@ -34,7 +34,7 @@ fn send_to_script_v2_funds_and_balances() {
 #[test]
 fn send_to_stealth_funds_and_balances() {
     let mut node = Node::new();
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
 
     // Recipient's stealth address: scan key from seed 2, spend key from seed 3.
     let scan_kp = KeyPair::from_u64(2);
@@ -60,7 +60,7 @@ fn send_to_stealth_funds_and_balances() {
 #[test]
 fn stealth_send_is_deterministic_and_distinct_per_send() {
     let mut node = Node::new();
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
 
     let scan_kp = KeyPair::from_u64(2);
     let spend_kp = KeyPair::from_u64(3);
@@ -80,7 +80,7 @@ fn stealth_send_is_deterministic_and_distinct_per_send() {
 #[test]
 fn zero_amount_stealth_send_rejected() {
     let mut node = Node::new();
-    node.genesis(3, 1000, 1000, 1).unwrap();
+    node.genesis(3, 1000, 1000, 1, None).unwrap();
 
     let scan_kp = KeyPair::from_u64(2);
     let spend_kp = KeyPair::from_u64(3);

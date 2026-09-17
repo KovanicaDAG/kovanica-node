@@ -40,7 +40,7 @@ fn vault_absolute_gate_enforced() {
     // An absolute-lock vault (CLTV-style): the release spend's own block must
     // sit at height >= unlock_height.
     let mut node = Node::new();
-    node.genesis(3, 2000, 2000, 1).unwrap();
+    node.genesis(3, 2000, 2000, 1, None).unwrap();
 
     // unlock_height = pre-funding tip + 3: the funding block consumes one
     // height, so the first release attempt sits below the gate.
@@ -77,7 +77,7 @@ fn vault_relative_gate_enforced() {
     // A relative-lock vault (CSV-style): release requires the spend block to
     // be `csv` blocks above this output's creation height.
     let mut node = Node::new();
-    node.genesis(3, 2000, 2000, 1).unwrap();
+    node.genesis(3, 2000, 2000, 1, None).unwrap();
 
     let (script, outpoint) = create(&mut node, 0, 4);
     let alice = owner(1);
@@ -108,7 +108,7 @@ fn vault_both_locks_compose() {
     // With both locks set, the later gate wins. unlock_height sits far ahead,
     // so an early release is blocked even though the relative gate has passed.
     let mut node = Node::new();
-    node.genesis(3, 2000, 2000, 1).unwrap();
+    node.genesis(3, 2000, 2000, 1, None).unwrap();
 
     let height_before_funding = node.chain_height().unwrap();
     let (script, outpoint) = create(&mut node, (height_before_funding + 10) as u32, 2);
@@ -133,7 +133,7 @@ fn vault_requires_owner_signature() {
     // A spend signed by a key that is not the template owner is rejected as a
     // bad signature (the ledger verifies `owner_pk` against the sighash).
     let mut node = Node::new();
-    node.genesis(3, 2000, 2000, 1).unwrap();
+    node.genesis(3, 2000, 2000, 1, None).unwrap();
 
     let (script, outpoint) = create(&mut node, 0, 1);
     let mallory = owner(2);
@@ -154,7 +154,7 @@ fn vault_rpc_commands() {
     // The three line-RPC commands end-to-end: create → balance → release →
     // balance, plus the help-text listing.
     let mut node = Node::new();
-    node.genesis(3, 2000, 2000, 1).unwrap();
+    node.genesis(3, 2000, 2000, 1, None).unwrap();
 
     let alice = owner(1);
     let owner_pk_hex = hex::encode(alice.address().payload());

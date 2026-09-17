@@ -26,7 +26,7 @@ fn validator_pk(seed: [u8; 32]) -> [u8; 32] {
 /// one 1000-atom coin and is also the miner.
 fn setup() -> (Node, KeyPair, [u8; 32]) {
     let mut n = Node::new();
-    n.genesis(3, 1_000, 1_000, 1).unwrap();
+    n.genesis(3, 1_000, 1_000, 1, None).unwrap();
     n.enable_hybrid(hybrid_cfg()).unwrap();
     let seed = [7u8; 32];
     n.set_validator_seed(seed);
@@ -35,8 +35,11 @@ fn setup() -> (Node, KeyPair, [u8; 32]) {
 
 /// Bond `value` from `funder`, splitting a larger coin first when needed.
 fn bond(n: &mut Node, funder: &KeyPair, vrf_pk: &[u8; 32], value: u64) {
+    // Pick the largest spendable coin: `spendable_utxos_of` respects
+    // RFC-006 coinbase maturity, so a freshly-mined subsidy coinbase is
+    // never chosen over an older (mature) funding coin.
     let coin = n
-        .utxos_of(&funder.address())
+        .spendable_utxos_of(&funder.address())
         .unwrap()
         .into_iter()
         .filter(|(op, _)| !n.outpoint_is_frozen(op).unwrap())
