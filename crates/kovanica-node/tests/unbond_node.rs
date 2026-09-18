@@ -4,7 +4,7 @@
 
 use kovanica_dag::vrf_keypair_from_seed;
 use kovanica_node::Node;
-use kovanica_state::stake::{bond_tag, UNBOND_MATURITY};
+use kovanica_state::stake::UNBOND_MATURITY;
 use kovanica_state::{HybridConfig, KeyPair, Transaction, TxOutput};
 
 fn hybrid_cfg() -> HybridConfig {
@@ -66,7 +66,7 @@ fn bond(n: &mut Node, funder: &KeyPair, vrf_pk: &[u8; 32], value: u64) {
     let b = Transaction::signed(
         &[(source, funder)],
         vec![TxOutput::native(value, funder.address())],
-        bond_tag(vrf_pk),
+        kovanica_state::bond_tag(kovanica_state::NATIVE_ASSET_ID, vrf_pk),
     );
     n.submit_tx(b).unwrap();
     n.produce_block().unwrap().expect("bond mined");

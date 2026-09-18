@@ -94,7 +94,7 @@ fn hybrid_log_preserves_staked_block_id() {
     let bond = kovanica_state::Transaction::signed(
         &[(coin, &founder)],
         vec![kovanica_state::TxOutput::native(1_000, founder.address())],
-        kovanica_state::stake::bond_tag(&pk),
+        kovanica_state::bond_tag(kovanica_state::NATIVE_ASSET_ID, &pk),
     );
     node.submit_tx(bond).unwrap();
     node.produce_block().unwrap().unwrap();

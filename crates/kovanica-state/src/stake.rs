@@ -18,11 +18,12 @@
 //! committed by [`Transaction::sighash`](crate::tx::Transaction::sighash)):
 //!
 //! * **Bond** — a signed transaction whose tag is
-//!   [`BOND_PREFIX`] followed by the validator's 32-byte VRF public key,
-//!   with exactly one output paid back to the spender itself. That output stays
-//!   a normal UTXO but becomes **frozen**: registered in the
-//!   [`StakeState`] against the VRF key, and unspendable except by an unbond
-//!   transaction. Value bonded = the output's value.
+//!   [`BOND_PREFIX`] followed by the 32-byte asset_id (or 32 zero bytes for native KVNC)
+//!   and the validator's 32-byte VRF public key, with exactly one output paid
+//!   back to the spender itself. That output stays a normal UTXO but becomes
+//!   **frozen**: registered in the [`StakeState`] against the (asset_id, VRF key)
+//!   pair, and unspendable except by an unbond transaction. Value bonded = the
+//!   output's value.
 //! * **Unbond** — a signed transaction whose tag is [`UNBOND_PREFIX`],
 //!   spending only frozen outpoints owned (and signed) by the same key holder.
 //!   Each spent frozen output unlocks after [`UNBOND_MATURITY`] blocks (blue
@@ -40,7 +41,7 @@ use core::fmt;
 
 use kovanica_dag::VrfOutput;
 
-use crate::tx::OutPoint;
+use crate::tx::{AssetId, OutPoint};
 
 /// Blocks (blue height) a bond must age before its outpoint may be unbonded.
 ///
@@ -49,25 +50,36 @@ use crate::tx::OutPoint;
 /// short enough for testnet ergonomics.
 pub const UNBOND_MATURITY: u64 = 100;
 
-/// Tag prefix marking a **bond** transaction, followed by 32 VRF-pk bytes.
+/// Tag prefix marking a **bond** transaction, followed by 32-byte asset_id and 32 VRF-pk bytes.
+/// For native KVNC, asset_id is 32 zero bytes.
 pub const BOND_PREFIX: &[u8] = b"KVB1";
 /// Tag prefix marking an **unbond** transaction.
 pub const UNBOND_PREFIX: &[u8] = b"KVU1";
 
-/// Build a bond transaction tag: `KVB1 || vrf_pk`.
-pub fn bond_tag(vrf_pk: &[u8; 32]) -> Vec<u8> {
+/// Native KVNC asset_id (32 zero bytes).
+pub const NATIVE_ASSET_ID: AssetId = AssetId::native();
+
+/// Build a bond transaction tag: `KVB1 || asset_id || vrf_pk`.
+pub fn bond_tag(asset_id: AssetId, vrf_pk: &[u8; 32]) -> Vec<u8> {
     let mut tag = BOND_PREFIX.to_vec();
+    tag.extend_from_slice(asset_id.as_bytes());
     tag.extend_from_slice(vrf_pk);
     tag
 }
 
-/// Parse a bond tag into its VRF public-key bytes, or `None` if `tag` is not a
+/// Parse a bond tag into its (asset_id, VRF public-key bytes), or `None` if `tag` is not a
 /// well-formed bond tag.
-pub fn parse_bond_tag(tag: &[u8]) -> Option<[u8; 32]> {
-    if tag.len() != BOND_PREFIX.len() + 32 || !tag.starts_with(BOND_PREFIX) {
+pub fn parse_bond_tag(tag: &[u8]) -> Option<(AssetId, [u8; 32])> {
+    if tag.len() != BOND_PREFIX.len() + 32 + 32 || !tag.starts_with(BOND_PREFIX) {
         return None;
     }
-    Some(tag[BOND_PREFIX.len()..].try_into().expect("32 bytes"))
+    let asset_bytes: [u8; 32] = tag[BOND_PREFIX.len()..BOND_PREFIX.len() + 32]
+        .try_into()
+        .expect("32 bytes");
+    let vrf_pk: [u8; 32] = tag[BOND_PREFIX.len() + 32..]
+        .try_into()
+        .expect("32 bytes");
+    Some((AssetId::from_bytes(asset_bytes), vrf_pk))
 }
 
 /// Whether `tag` marks an unbond transaction.
@@ -122,10 +134,12 @@ impl fmt::Display for StakeError {
 
 impl std::error::Error for StakeError {}
 
-/// A frozen (bonded) outpoint: which VRF key it backs, the height it bonded at,
+/// A frozen (bonded) outpoint: which asset and VRF key it backs, the height it bonded at,
 /// and its value (cached for unlocked accounting).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Freeze {
+    /// The asset the bonded value backs.
+    pub asset_id: AssetId,
     /// The VRF public key the bonded value backs.
     pub vrf_pk: [u8; 32],
     /// Blue height of the block whose application froze the outpoint.
@@ -134,7 +148,7 @@ pub struct Freeze {
     pub value: u64,
 }
 
-/// The stake registry: frozen bonds plus per-key locked totals.
+/// The stake registry: frozen bonds plus per-(asset,key) locked totals.
 ///
 /// Deterministic and derived entirely from applying blocks in GHOSTDAG order;
 /// kept alongside the [`crate::utxo::UtxoSet`] per block by
@@ -142,7 +156,8 @@ pub struct Freeze {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StakeState {
     frozen: std::collections::HashMap<OutPoint, Freeze>,
-    locked: std::collections::HashMap<[u8; 32], u64>,
+    // Key is (asset_id, vrf_pk) - using a tuple as key
+    locked: std::collections::HashMap<(AssetId, [u8; 32]), u64>,
 }
 
 impl StakeState {
@@ -151,13 +166,31 @@ impl StakeState {
         Self::default()
     }
 
-    /// Total value currently bonded to `vrf_pk`.
-    pub fn stake_of(&self, vrf_pk: &[u8; 32]) -> u64 {
-        self.locked.get(vrf_pk).copied().unwrap_or(0)
+    /// Total value currently bonded to `vrf_pk` for a specific `asset_id`.
+    pub fn stake_of(&self, asset_id: AssetId, vrf_pk: &[u8; 32]) -> u64 {
+        self.locked.get(&(asset_id, *vrf_pk)).copied().unwrap_or(0)
     }
 
-    /// Sum of all bonded value across every validator.
-    pub fn total_stake(&self) -> u64 {
+    /// Total value currently bonded to `vrf_pk` across all assets.
+    pub fn stake_of_any_asset(&self, vrf_pk: &[u8; 32]) -> u64 {
+        self.locked
+            .iter()
+            .filter(|((_, pk), _)| pk == vrf_pk)
+            .map(|(_, v)| *v)
+            .sum()
+    }
+
+    /// Sum of all bonded value across every validator for a specific asset.
+    pub fn total_stake(&self, asset_id: AssetId) -> u64 {
+        self.locked
+            .iter()
+            .filter(|((aid, _), _)| *aid == asset_id)
+            .map(|(_, v)| *v)
+            .sum()
+    }
+
+    /// Sum of all bonded value across every validator and every asset.
+    pub fn total_stake_all_assets(&self) -> u64 {
         self.locked.values().sum()
     }
 
@@ -178,21 +211,23 @@ impl StakeState {
 
     /// Register a newly created bond outpoint. Called by the ledger when a
     /// bond-shaped transaction applies: the output `(txid, index)` of `value`
-    /// becomes frozen backing `vrf_pk` from `height`.
+    /// becomes frozen backing `vrf_pk` for `asset_id` from `height`.
     ///
     /// Internal to the ledger rules; exposed for tests and tooling.
-    pub fn freeze(&mut self, outpoint: OutPoint, vrf_pk: [u8; 32], value: u64, height: u64) {
+    pub fn freeze(&mut self, outpoint: OutPoint, asset_id: AssetId, vrf_pk: [u8; 32], value: u64, height: u64) {
         let entry = self.frozen.entry(outpoint).or_insert(Freeze {
+            asset_id,
             vrf_pk,
             bond_height: height,
             value,
         });
         *entry = Freeze {
+            asset_id,
             vrf_pk,
             bond_height: height,
             value,
         };
-        *self.locked.entry(vrf_pk).or_insert(0) += value;
+        *self.locked.entry((asset_id, vrf_pk)).or_insert(0) += value;
     }
 
     /// Read-only counterpart of [`Self::unfreeze_spend`]: verify that
@@ -220,10 +255,11 @@ impl StakeState {
     pub fn unfreeze_spend(&mut self, outpoint: OutPoint, height: u64) -> Result<u64, StakeError> {
         self.check_unbond(outpoint, height)?;
         let freeze = self.frozen.remove(&outpoint).expect("checked above");
-        let locked = self.locked.entry(freeze.vrf_pk).or_insert(0);
+        let key = (freeze.asset_id, freeze.vrf_pk);
+        let locked = self.locked.entry(key).or_insert(0);
         *locked = locked.saturating_sub(freeze.value);
         if *locked == 0 {
-            self.locked.remove(&freeze.vrf_pk);
+            self.locked.remove(&key);
         }
         Ok(freeze.value)
     }
@@ -264,8 +300,11 @@ impl StakeState {
         output.as_u64() < Self::eligibility_threshold(stake, total, rate_num, rate_den)
     }
 
-    /// Canonical encoding (checkpoint format): frozen bonds then locked totals,
+    /// Canonical encoding (checkpoint format v8): frozen bonds then locked totals,
     /// each length-prefixed, entries sorted for determinism.
+    /// Format: [n_bonds][bonds...][n_totals][totals...]
+    /// Bond: [txid(32)][index(4)][asset_id(32)][vrf_pk(32)][bond_height(8)][value(8)]
+    /// Total: [asset_id(32)][vrf_pk(32)][amount(8)]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut bonds: Vec<(&OutPoint, &Freeze)> = self.frozen.iter().collect();
@@ -274,14 +313,20 @@ impl StakeState {
         for (op, frz) in bonds {
             buf.extend_from_slice(op.tx.as_bytes());
             buf.extend_from_slice(&op.index.to_le_bytes());
+            buf.extend_from_slice(frz.asset_id.as_bytes());
             buf.extend_from_slice(&frz.vrf_pk);
             buf.extend_from_slice(&frz.bond_height.to_le_bytes());
             buf.extend_from_slice(&frz.value.to_le_bytes());
         }
-        let mut totals: Vec<([u8; 32], u64)> = self.locked.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut totals: Vec<(AssetId, [u8; 32], u64)> = self
+            .locked
+            .iter()
+            .map(|((aid, pk), v)| (*aid, *pk, *v))
+            .collect();
         totals.sort_unstable();
         buf.extend_from_slice(&(totals.len() as u64).to_le_bytes());
-        for (pk, amount) in totals {
+        for (aid, pk, amount) in totals {
+            buf.extend_from_slice(aid.as_bytes());
             buf.extend_from_slice(&pk);
             buf.extend_from_slice(&amount.to_le_bytes());
         }
@@ -304,11 +349,13 @@ impl StakeState {
         pos += 8;
         let mut frozen = std::collections::HashMap::new();
         for _ in 0..n_bonds {
-            need(pos, 32 + 4 + 32 + 8 + 8, bytes.len())?;
+            need(pos, 32 + 4 + 32 + 32 + 8 + 8, bytes.len())?;
             let tx = crate::tx::TxId::from_bytes(bytes[pos..pos + 32].try_into().unwrap());
             pos += 32;
             let index = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap());
             pos += 4;
+            let asset_id = AssetId::from_bytes(bytes[pos..pos + 32].try_into().unwrap());
+            pos += 32;
             let vrf_pk = bytes[pos..pos + 32].try_into().unwrap();
             pos += 32;
             let bond_height = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
@@ -320,6 +367,7 @@ impl StakeState {
                 .insert(
                     op,
                     Freeze {
+                        asset_id,
                         vrf_pk,
                         bond_height,
                         value,
@@ -335,12 +383,14 @@ impl StakeState {
         pos += 8;
         let mut locked = std::collections::HashMap::new();
         for _ in 0..n_totals {
-            need(pos, 40, bytes.len())?;
+            need(pos, 32 + 32 + 8, bytes.len())?;
+            let asset_id = AssetId::from_bytes(bytes[pos..pos + 32].try_into().unwrap());
+            pos += 32;
             let pk = bytes[pos..pos + 32].try_into().unwrap();
             pos += 32;
             let amount = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
             pos += 8;
-            if locked.insert(pk, amount).is_some() {
+            if locked.insert((asset_id, pk), amount).is_some() {
                 return Err(StakeDecodeError::DuplicateEntry);
             }
         }
@@ -391,19 +441,21 @@ mod tests {
     #[test]
     fn bond_tags_roundtrip() {
         let key = pk(7);
-        assert_eq!(parse_bond_tag(&bond_tag(&key)), Some(key));
+        let native = NATIVE_ASSET_ID;
+        assert_eq!(parse_bond_tag(&bond_tag(native, &key)), Some((native, key)));
         assert_eq!(parse_bond_tag(b"KVB1"), None);
         assert_eq!(parse_bond_tag(b"KVX1"), None);
         assert!(is_unbond_tag(b"KVU1"));
-        assert!(!is_unbond_tag(&bond_tag(&key)));
+        assert!(!is_unbond_tag(&bond_tag(native, &key)));
     }
 
     #[test]
     fn freeze_and_mature_unbond_accounting() {
         let mut st = StakeState::new();
-        st.freeze(op(1), pk(9), 500, 10);
-        assert_eq!(st.stake_of(&pk(9)), 500);
-        assert_eq!(st.total_stake(), 500);
+        let native = NATIVE_ASSET_ID;
+        st.freeze(op(1), native, pk(9), 500, 10);
+        assert_eq!(st.stake_of(native, &pk(9)), 500);
+        assert_eq!(st.total_stake(native), 500);
         assert!(st.is_frozen(&op(1)));
 
         // Immature until bond_height + UNBOND_MATURITY.
@@ -417,8 +469,8 @@ mod tests {
         );
 
         assert_eq!(st.unfreeze_spend(op(1), 10 + UNBOND_MATURITY).unwrap(), 500);
-        assert_eq!(st.stake_of(&pk(9)), 0);
-        assert_eq!(st.total_stake(), 0);
+        assert_eq!(st.stake_of(native, &pk(9)), 0);
+        assert_eq!(st.total_stake(native), 0);
         assert!(!st.is_frozen(&op(1)));
     }
 
@@ -434,16 +486,17 @@ mod tests {
     #[test]
     fn multiple_bonds_accumulate_per_key() {
         let mut st = StakeState::new();
-        st.freeze(op(1), pk(3), 100, 0);
-        st.freeze(op(2), pk(3), 250, 5);
-        st.freeze(op(3), pk(4), 50, 7);
-        assert_eq!(st.stake_of(&pk(3)), 350);
-        assert_eq!(st.total_stake(), 400);
+        let native = NATIVE_ASSET_ID;
+        st.freeze(op(1), native, pk(3), 100, 0);
+        st.freeze(op(2), native, pk(3), 250, 5);
+        st.freeze(op(3), native, pk(4), 50, 7);
+        assert_eq!(st.stake_of(native, &pk(3)), 350);
+        assert_eq!(st.total_stake(native), 400);
         assert_eq!(st.bond_count(), 3);
 
         st.unfreeze_spend(op(2), 5 + UNBOND_MATURITY).unwrap();
-        assert_eq!(st.stake_of(&pk(3)), 100);
-        assert_eq!(st.total_stake(), 150);
+        assert_eq!(st.stake_of(native, &pk(3)), 100);
+        assert_eq!(st.total_stake(native), 150);
     }
 
     #[test]
@@ -495,8 +548,9 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip() {
         let mut st = StakeState::new();
-        st.freeze(op(1), pk(3), 100, 12);
-        st.freeze(op(2), pk(4), 900, 77);
+        let native = NATIVE_ASSET_ID;
+        st.freeze(op(1), native, pk(3), 100, 12);
+        st.freeze(op(2), native, pk(4), 900, 77);
         let decoded = StakeState::decode(&st.encode()).unwrap();
         assert_eq!(decoded, st);
         // Empty roundtrip.
@@ -509,7 +563,8 @@ mod tests {
     #[test]
     fn decode_rejects_corruption() {
         let mut st = StakeState::new();
-        st.freeze(op(1), pk(3), 100, 0);
+        let native = NATIVE_ASSET_ID;
+        st.freeze(op(1), native, pk(3), 100, 0);
         let bytes = st.encode();
         assert_eq!(
             StakeState::decode(&bytes[..bytes.len() - 1]),

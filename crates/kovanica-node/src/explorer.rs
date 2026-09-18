@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use kovanica_dag::{Block, BlockId};
 use kovanica_state::{
-    decode_block_payload, encode_block_payload, Address, HybridConfig, OutPoint, Transaction, TxId,
-    TxOutput,
+    decode_block_payload, encode_block_payload, Address, AssetId, HybridConfig, OutPoint,
+    Transaction, TxId, TxOutput, MAX_SUPPLY,
 };
 
 use crate::dht::{NodeId, PeerContact, RoutingTable};
@@ -28,7 +28,7 @@ use crate::net::{
     decode_records, encode_records, pull_blocks_timeout, serve_exchange, serve_headers_first,
     sync_headers_first,
 };
-use crate::node::{BlockRecord, Node, TreasuryGenesis, WalletDirection, HALVING_ERA};
+use crate::node::{BlockRecord, Node, CoinJoinParticipant, CoinJoinPrepared, TreasuryGenesis, WalletDirection, HALVING_ERA};
 use crate::p2p::Mesh;
 
 const UI: &str = include_str!("explorer.html");
@@ -1270,8 +1270,18 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
                 .map(|s| jstr(&s)),
         );
         let profile = network_profile();
+
+        // RFC-006 supply metrics from the ledger
+        let (native_minted, total, circulating, burned, max_supply) = n
+            .and_then(|n| n.ledger().ok())
+            .map(|l| {
+                let s = l.supply();
+                (s.total, s.total, s.circulating, s.burned, s.max_supply)
+            })
+            .unwrap_or((0, 0, 0, 0, MAX_SUPPLY));
+
         let body = format!(
-            "{{\"network\":{},\"genesis\":{},\"tip\":{},\"listen\":{},\"peers\":{},\"pow\":{},\"min_fee\":{},\"atom\":{},\"token\":\"KVNC\",\"k\":{},\"subsidy\":{},\"founder_amount\":{},\"founder_seed\":{},\"finality_depth\":{},\"payload_pruning_depth\":{},\"light_config\":{{\"k\":{},\"subsidy\":{},\"premine\":{},\"founder_seed\":{},\"finality_depth\":{},\"payload_pruning_depth\":{}}}}}",
+            "{{\"network\":{},\"genesis\":{},\"tip\":{},\"listen\":{},\"peers\":{},\"pow\":{},\"min_fee\":{},\"atom\":{},\"token\":\"KVNC\",\"k\":{},\"subsidy\":{},\"founder_amount\":{},\"founder_seed\":{},\"finality_depth\":{},\"payload_pruning_depth\":{},\"native_minted\":{},\"total\":{},\"circulating\":{},\"burned\":{},\"max_supply\":{},\"operator_wallet_address\":{},\"light_config\":{{\"k\":{},\"subsidy\":{},\"premine\":{},\"founder_seed\":{},\"finality_depth\":{},\"payload_pruning_depth\":{}}}}}",
             jstr(profile.id),
             jstr(&genesis),
             jstr(&tip),
@@ -1286,6 +1296,12 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
             profile.founder_seed,
             profile.finality_depth,
             profile.payload_pruning_depth,
+            native_minted,
+            total,
+            circulating,
+            burned,
+            max_supply,
+            jstr(&app.mesh.node("alpha").and_then(|n| n.operator_wallet().map(|w| w.address().to_kvnc())).unwrap_or_default()),
             profile.genesis_k,
             profile.genesis_subsidy,
             profile.genesis_premine,
@@ -2206,6 +2222,124 @@ fn parse_partial_sigs(body: &serde_json::Value) -> Result<Vec<[u8; 64]>, String>
     Ok(out)
 }
 
+/// Parse CoinJoin participants from JSON body.
+fn parse_coinjoin_participants(body_str: &str) -> Result<Vec<CoinJoinParticipant>, String> {
+    let json = serde_json::from_str::<serde_json::Value>(body_str).map_err(|e| format!("invalid json: {e}"))?;
+    let arr = json
+        .get("participants")
+        .and_then(|v| v.as_array())
+        .ok_or("participants must be an array")?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, p) in arr.iter().enumerate() {
+        let address = p
+            .get("address")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("participants[{i}].address is required"))?;
+        let amount = p
+            .get("amount")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("participants[{i}].amount is required"))?
+            .parse::<u64>()
+            .map_err(|_| format!("participants[{i}].amount must be integer"))?;
+        let recipient = p
+            .get("recipient")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("participants[{i}].recipient is required"))?;
+        let asset_id = p
+            .get("asset_id")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                let raw = hex::decode(s.trim()).ok()?;
+                if raw.len() != 32 { return None; }
+                Some(AssetId::from_bytes(<[u8; 32]>::try_from(raw.as_slice()).ok()?))
+            })
+            .flatten();
+        out.push(CoinJoinParticipant {
+            from: parse_addr(address)?,
+            outputs: vec![TxOutput::new(amount, asset_id, parse_addr(recipient)?)],
+            asset_id,
+        });
+    }
+    Ok(out)
+}
+
+/// Parse CoinJoinPrepared from JSON body.
+fn parse_coinjoin_prepared(body_str: &str) -> Result<CoinJoinPrepared, String> {
+    let json = serde_json::from_str::<serde_json::Value>(body_str).map_err(|e| format!("invalid json: {e}"))?;
+    let tx_hex = json.get("tx_hex").and_then(|v| v.as_str()).ok_or("tx_hex required")?;
+    let sighashes_hex: Vec<String> = json
+        .get("sighashes_hex")
+        .and_then(|v| v.as_array())
+        .ok_or("sighashes_hex required")?
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+    let outpoints_hex: Vec<String> = json
+        .get("outpoints_hex")
+        .and_then(|v| v.as_array())
+        .ok_or("outpoints_hex required")?
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+    let values: Vec<String> = json
+        .get("values")
+        .and_then(|v| v.as_array())
+        .ok_or("values required")?
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+    let fee = json.get("fee").and_then(|v| v.as_str()).ok_or("fee required")?.to_string();
+    Ok(CoinJoinPrepared {
+        tx: Transaction::decode(&hex::decode(tx_hex).map_err(|e| format!("tx_hex not hex: {e}"))?)
+            .map_err(|e| format!("tx decode: {e:?}"))?,
+        sighashes: sighashes_hex.iter().map(|s| {
+            let raw = hex::decode(s).map_err(|e| format!("sighash not hex: {e}"))?;
+            <[u8; 32]>::try_from(raw.as_slice()).map_err(|_| "sighash must be 32 bytes".to_string())
+        }).collect::<Result<Vec<[u8; 32]>, _>>()?,
+        outpoints: outpoints_hex.iter().map(|s| {
+            let parts: Vec<&str> = s.split(':').collect();
+            if parts.len() != 2 { return Err("outpoint must be txid:index".to_string()); }
+            let txid = TxId::from_bytes(
+                <[u8; 32]>::try_from(hex::decode(parts[0]).map_err(|e| format!("txid not hex: {e}"))?.as_slice())
+                    .map_err(|_| "txid must be 32 bytes".to_string())?
+            );
+            let index = parts[1].parse::<u32>().map_err(|_| "index not u32".to_string())?;
+            Ok(OutPoint::new(txid, index))
+        }).collect::<Result<Vec<_>, _>>()?,
+        values: values.iter().map(|s| s.parse::<u64>().map_err(|_| "value not u64".to_string())).collect::<Result<Vec<_>, _>>()?,
+        fee: fee.parse::<u64>().map_err(|_| "fee not u64".to_string())?,
+    })
+}
+
+/// Serialize CoinJoinPrepared to JSON string.
+fn serialize_coinjoin_prepared(prepared: &CoinJoinPrepared) -> String {
+    let sighashes_hex: Vec<String> = prepared.sighashes.iter().map(|s| hex::encode(s)).collect();
+    let outpoints_hex: Vec<String> = prepared.outpoints.iter().map(|op| format!("{}:{}", op.tx.to_hex(), op.index)).collect();
+    let values: Vec<String> = prepared.values.iter().map(|v| v.to_string()).collect();
+    format!(
+        "{{\"tx_hex\":\"{}\",\"sighashes_hex\":{},\"outpoints_hex\":{},\"values\":{},\"fee\":\"{}\"}}",
+        hex::encode(prepared.tx.encode()),
+        serde_json::to_string(&sighashes_hex).unwrap(),
+        serde_json::to_string(&outpoints_hex).unwrap(),
+        serde_json::to_string(&values).unwrap(),
+        prepared.fee
+    )
+}
+
+/// Parse signatures from a JSON array string.
+fn parse_signatures(sigs_str: &str) -> Result<Vec<[u8; 64]>, String> {
+    let json = serde_json::from_str::<serde_json::Value>(sigs_str).map_err(|e| format!("invalid json: {e}"))?;
+    let arr = json.as_array().ok_or("signatures must be an array")?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, sig) in arr.iter().enumerate() {
+        let s = sig.as_str().ok_or_else(|| format!("signatures[{i}] not string"))?;
+        let raw = hex::decode(s.trim()).map_err(|_| format!("signatures[{i}] not hex"))?;
+        if raw.len() != 64 { return Err(format!("signatures[{i}] must be 64 bytes")); }
+        out.push(<[u8; 64]>::try_from(raw.as_slice()).map_err(|_| format!("signatures[{i}] invalid"))?);
+    }
+    Ok(out)
+}
+
 fn handle_multisig_sign(
     app: &mut Explorer,
     q: &HashMap<String, String>,
@@ -2484,6 +2618,26 @@ fn dispatch(
                 "{{\"ok\":true,\"slow\":{},\"normal\":{},\"fast\":{}}}",
                 slow, normal, fast
             ));
+        }
+        "coinjoin_prepare" => {
+            // Expects JSON body: { participants: CoinJoinParticipant[] }
+            // For simplicity, parse from query string or body
+            let body = q.get("body").ok_or("missing body")?;
+            // Parse JSON body - in production use proper JSON parsing
+            // For now, expect a simple format
+            // body format: {"participants":[{"address":"...","amount":"...","recipient":"...","asset_id":null}]}
+            let participants: Vec<CoinJoinParticipant> = parse_coinjoin_participants(body)?;
+            let n = app.mesh.node(&node).ok_or("unknown node")?;
+            let prepared = n.coinjoin_prepare(participants).map_err(|e| e.to_string())?;
+            return Ok(serialize_coinjoin_prepared(&prepared));
+        }
+        "coinjoin_submit" => {
+            let body = q.get("body").ok_or("missing body")?;
+            let prepared: CoinJoinPrepared = parse_coinjoin_prepared(body)?;
+            let signatures: Vec<[u8; 64]> = parse_signatures(q.get("signatures").ok_or("missing signatures")?)?;
+            let n = app.mesh.node_mut(&node).ok_or("unknown node")?;
+            n.coinjoin_submit(prepared, signatures).map_err(|e| e.to_string())?;
+            return Ok("{\"ok\":true}".into());
         }
         other => return Err(format!("unknown action {other}")),
     }
@@ -3882,7 +4036,7 @@ mod tests {
         let bond = Transaction::signed(
             &[(coin, &founder)],
             vec![TxOutput::native(value, founder.address())],
-            bond_tag(&pk),
+            kovanica_state::bond_tag(kovanica_state::NATIVE_ASSET_ID, &pk),
         );
         app.mesh.node_mut("alpha").unwrap().submit_tx(bond).unwrap();
         app.mesh
@@ -3985,7 +4139,7 @@ mod tests {
         let bond = Transaction::signed(
             &[(coin, &founder)],
             vec![TxOutput::native(value, founder.address())],
-            bond_tag(&pk),
+            kovanica_state::bond_tag(kovanica_state::NATIVE_ASSET_ID, &pk),
         );
         app.mesh.node_mut("alpha").unwrap().submit_tx(bond).unwrap();
         app.mesh

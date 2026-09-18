@@ -100,7 +100,7 @@ fn full_bond_tx(
     Transaction::signed(
         &[(coin, founder)],
         vec![TxOutput::native(funding, founder.address())],
-        bond_tag(&validator.pk),
+        kovanica_state::bond_tag(kovanica_state::NATIVE_ASSET_ID, &validator.pk),
     )
 }
 
@@ -143,8 +143,9 @@ fn full_stake_validator_always_wins() {
         )
         .unwrap();
     let stake = ledger.stake_state(&b1).unwrap().clone();
-    assert_eq!(stake.total_stake(), 500);
-    assert_eq!(stake.stake_of(&v.pk), 500);
+    let native = kovanica_state::NATIVE_ASSET_ID;
+    assert_eq!(stake.total_stake(native), 500);
+    assert_eq!(stake.stake_of(native, &v.pk), 500);
 
     ledger.set_hybrid(hybrid_no_pin());
 
@@ -815,5 +816,6 @@ fn prepared_bond_block_records_stake_under_hybrid() {
     let block = producer.dag().block(&bond).unwrap().clone();
     let txs = kovanica_state::decode_block_payload(block.payload()).unwrap();
     consumer.insert_prepared_block(block, &txs).unwrap();
-    assert_eq!(consumer.stake_state(&bond).unwrap().total_stake(), 500);
+    let native = kovanica_state::NATIVE_ASSET_ID;
+    assert_eq!(consumer.stake_state(&bond).unwrap().total_stake(native), 500);
 }

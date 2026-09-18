@@ -65,7 +65,7 @@ fn staked_block_produced_gossiped_and_readmitted() {
     let bond = Transaction::signed(
         &[(coin, &founder)],
         vec![TxOutput::native(1_000, founder.address())],
-        bond_tag(&pk),
+        kovanica_state::bond_tag(kovanica_state::NATIVE_ASSET_ID, &pk),
     );
     producer.submit_tx(bond).unwrap();
     producer.produce_block().unwrap().expect("bond block mined");

@@ -74,8 +74,11 @@ use crate::htlc::HtlcScript;
 use crate::keys::{verify, verify_pk, Address, KeyPair};
 use crate::multisig::{verify_threshold_signatures, MultisigScript};
 use crate::script_v2::ScriptV2;
-use crate::stake::{
-    is_unbond_tag, parse_bond_tag, Freeze, StakeError, StakeState, UNBOND_MATURITY,
+
+// Re-export stake types and functions for internal use and downstream crates
+pub use crate::stake::{
+    bond_tag, parse_bond_tag, is_unbond_tag, Freeze, StakeError, StakeState, UNBOND_MATURITY, NATIVE_ASSET_ID,
+    BOND_PREFIX, UNBOND_PREFIX,
 };
 use crate::vault::VaultScript;
 
@@ -96,6 +99,12 @@ pub const HTLC_ACTIVATION_SCORE: u64 = 0;
 
 /// Default blue-score threshold for RFC-005 vault activation.
 pub const VAULT_ACTIVATION_SCORE: u64 = 0;
+
+/// Default blue-score threshold for RFC-006 tokenomics activation.
+/// When blue_score > TOKENOMICS_ACTIVATION_SCORE, RFC-006 rules apply:
+/// smooth emission curve, MAX_SUPPLY cap, coinbase maturity (COINBASE_MATURITY),
+/// fee burn (75% destroyed, 25% to producer).
+pub const TOKENOMICS_ACTIVATION_SCORE: u64 = 0;
 
 /// RFC-006 emission schedule for block subsidy.
 ///
@@ -665,6 +674,7 @@ pub fn apply_block(
         SCRIPT_V2_ACTIVATION_SCORE,
         HTLC_ACTIVATION_SCORE,
         VAULT_ACTIVATION_SCORE,
+        TOKENOMICS_ACTIVATION_SCORE,
     )
 }
 
@@ -700,6 +710,7 @@ pub fn apply_block_with_stake(
         SCRIPT_V2_ACTIVATION_SCORE,
         HTLC_ACTIVATION_SCORE,
         VAULT_ACTIVATION_SCORE,
+        TOKENOMICS_ACTIVATION_SCORE,
     )
 }
 
@@ -721,6 +732,7 @@ fn apply_block_inner(
     script_v2_activation_score: u64,
     htlc_activation_score: u64,
     vault_activation_score: u64,
+    tokenomics_activation_score: u64,
 ) -> Result<BlockSummary, LedgerError> {
     // Stage all changes on a copy; only commit if the whole block validates, so
     // a rejected block has no effect (atomicity).
@@ -901,8 +913,11 @@ fn apply_regular(
 
     // Tag-driven stake roles. A tag that matches neither convention is an
     // ordinary transfer and only faces the frozen-input rule.
-    let bond_pk = parse_bond_tag(tx.tag());
+    let bond_info = parse_bond_tag(tx.tag());
     let unbond = is_unbond_tag(tx.tag());
+    let (bond_asset_id, bond_pk) = bond_info
+        .map(|(aid, pk)| (Some(aid), Some(pk)))
+        .unwrap_or((None, None));
 
     let sighash = tx.sighash();
     let mut seen: HashSet<OutPoint> = HashSet::with_capacity(tx.inputs().len());
@@ -1477,8 +1492,9 @@ fn apply_regular(
                     .expect("unbond pre-checked above");
             }
         } else if let Some(vrf_pk) = bond_pk {
+            let asset_id = bond_asset_id.unwrap_or(NATIVE_ASSET_ID);
             let value = tx.outputs()[0].value;
-            st.freeze(OutPoint::new(txid, 0), vrf_pk, value, height);
+            st.freeze(OutPoint::new(txid, 0), asset_id, vrf_pk, value, height);
         }
     }
 
@@ -1636,6 +1652,7 @@ pub fn apply_dag(dag: &Dag, subsidy: u64) -> LedgerRun {
                 SCRIPT_V2_ACTIVATION_SCORE,
                 HTLC_ACTIVATION_SCORE,
                 VAULT_ACTIVATION_SCORE,
+                TOKENOMICS_ACTIVATION_SCORE,
             ) {
                 Ok(summary) => {
                     cumulative_minted = cumulative_minted.saturating_add(summary.minted);
@@ -1875,7 +1892,7 @@ fn compose_delta(first: &BlockDelta, second: &BlockDelta) -> BlockDelta {
 /// registry's maturity check.
 fn apply_stake_delta(delta: &StakeDelta, stake: &mut StakeState) {
     for (op, f) in &delta.frozen {
-        stake.freeze(*op, f.vrf_pk, f.value, f.bond_height);
+        stake.freeze(*op, f.asset_id, f.vrf_pk, f.value, f.bond_height);
     }
     for (op, f) in &delta.unfrozen {
         let matures_at = f.bond_height.saturating_add(UNBOND_MATURITY);
@@ -2024,6 +2041,10 @@ pub struct Ledger {
     htlc_activation_score: u64,
     /// Blue score activation threshold for RFC-005 vault transactions.
     vault_activation_score: u64,
+    /// Blue score activation threshold for RFC-006 tokenomics rules.
+    /// When blue_score > TOKENOMICS_ACTIVATION_SCORE: smooth emission curve,
+    /// MAX_SUPPLY cap, coinbase maturity (COINBASE_MATURITY), fee burn (75%/25%).
+    tokenomics_activation_score: u64,
     /// RFC-006: cumulative native KVNC atoms minted on the selected chain.
     native_minted: u64,
     /// RFC-006: cumulative fee atoms burned (75% of selected-chain fees).
@@ -2101,6 +2122,7 @@ impl Ledger {
             script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
             htlc_activation_score: HTLC_ACTIVATION_SCORE,
             vault_activation_score: VAULT_ACTIVATION_SCORE,
+            tokenomics_activation_score: TOKENOMICS_ACTIVATION_SCORE,
             native_minted: summary.minted,
             fees_burned: burned,
             block_minted,
@@ -2166,6 +2188,18 @@ impl Ledger {
     /// The blue-score activation threshold for RFC-005 vault transactions.
     pub fn vault_activation_score(&self) -> u64 {
         self.vault_activation_score
+    }
+
+    /// Set the blue-score activation threshold for RFC-006 tokenomics rules.
+    /// When blue_score > TOKENOMICS_ACTIVATION_SCORE: smooth emission curve,
+    /// MAX_SUPPLY cap, coinbase maturity (COINBASE_MATURITY), fee burn (75%/25%).
+    pub fn set_tokenomics_activation_score(&mut self, score: u64) {
+        self.tokenomics_activation_score = score;
+    }
+
+    /// The blue-score activation threshold for RFC-006 tokenomics rules.
+    pub fn tokenomics_activation_score(&self) -> u64 {
+        self.tokenomics_activation_score
     }
 
     /// Like [`Ledger::new`], but with a finite finality depth: blocks more than
@@ -2732,6 +2766,7 @@ impl Ledger {
                     self.script_v2_activation_score,
                     self.htlc_activation_score,
                     self.vault_activation_score,
+                    self.tokenomics_activation_score,
                 ) {
                     view_minted = view_minted.saturating_add(merged_summary.minted);
                     // A2: each block contributes its OWN burn (fees - fees/4);
@@ -2760,6 +2795,7 @@ impl Ledger {
             self.script_v2_activation_score,
             self.htlc_activation_score,
             self.vault_activation_score,
+            self.tokenomics_activation_score,
         )?;
         view_minted = view_minted.saturating_add(summary.minted);
         view_fees = view_fees.saturating_add(summary.fees - summary.fees / FEE_PRODUCER_DEN);
@@ -2841,8 +2877,8 @@ impl Ledger {
                 let Some(_) = verified else {
                     return Err(LedgerInsertError::BadStakeProof { vrf_pk: s.vrf_pk });
                 };
-                let total = pre_stake.total_stake();
-                let mine = pre_stake.stake_of(&s.vrf_pk);
+                let total = pre_stake.total_stake_all_assets();
+                let mine = pre_stake.stake_of_any_asset(&s.vrf_pk);
                 let threshold =
                     StakeState::eligibility_threshold(mine, total, cfg.rate_num, cfg.rate_den);
                 if s.output.as_u64() >= threshold {
@@ -3020,6 +3056,7 @@ impl Ledger {
                     self.script_v2_activation_score,
                     self.htlc_activation_score,
                     self.vault_activation_score,
+                    self.tokenomics_activation_score,
                 );
             }
         }
@@ -3382,6 +3419,7 @@ impl Ledger {
             script_v2_activation_score: SCRIPT_V2_ACTIVATION_SCORE,
             htlc_activation_score: HTLC_ACTIVATION_SCORE,
             vault_activation_score: VAULT_ACTIVATION_SCORE,
+            tokenomics_activation_score: TOKENOMICS_ACTIVATION_SCORE,
             native_minted: 0,
             fees_burned: 0,
             block_minted: HashMap::new(),
@@ -4016,7 +4054,7 @@ mod tests {
             vec![TxOutput::native(90, alice.address())],
             vec![],
         );
-        // height 51 < 51+100 → immature
+// height 51 < 51+100 → immature
         let err = apply_block_inner(
             &mut utxo.clone(),
             None,
@@ -4031,6 +4069,7 @@ mod tests {
             0,
             0,
             VAULT_ACTIVATION_SCORE,
+            TOKENOMICS_ACTIVATION_SCORE,
         )
         .unwrap_err();
         assert!(matches!(err, LedgerError::CoinbaseImmature { .. }));
@@ -4050,6 +4089,7 @@ mod tests {
             0,
             0,
             VAULT_ACTIVATION_SCORE,
+            TOKENOMICS_ACTIVATION_SCORE,
         )
         .unwrap();
         assert!(!utxo.contains(&op));
@@ -4065,12 +4105,12 @@ mod tests {
             .to_bytes()
     }
 
-    /// A bond transaction: `amount` from `kp`, single self-output, `KVB1||pk` tag.
+    /// A bond transaction: `amount` from `kp`, single self-output, `KVB1||asset_id||pk` tag.
     fn bond_tx(kp: &KeyPair, op: OutPoint, amount: u64, pk: [u8; 32]) -> Transaction {
         Transaction::signed(
             &[(op, kp)],
             vec![TxOutput::native(amount, kp.address())],
-            bond_tag(&pk),
+            bond_tag(NATIVE_ASSET_ID, &pk),
         )
     }
 
@@ -4097,7 +4137,8 @@ mod tests {
         // Bond 60 of the 100.
         apply_block_with_stake(&mut utxo, &mut stake, &[bond_tx(&alice, op, 60, pk)], 0, 10)
             .unwrap();
-        assert_eq!(stake.stake_of(&pk), 60);
+        let native = NATIVE_ASSET_ID;
+        assert_eq!(stake.stake_of(native, &pk), 60);
         // The bond output is the only output (the 40 remainder is fee); it is
         // still a normal UTXO — just frozen in the registry.
         assert_eq!(utxo.balance(&alice.address()), 60);
@@ -4121,7 +4162,8 @@ mod tests {
         ));
         // Atomic: the rejected steal changed nothing.
         assert!(utxo.contains(&frozen_op));
-        assert_eq!(stake.stake_of(&pk), 60);
+        let native = NATIVE_ASSET_ID;
+        assert_eq!(stake.stake_of(native, &pk), 60);
 
         // Immature unbond is rejected.
         let unbond = unbond_tx(&alice, &[frozen_op], 60);
@@ -4138,8 +4180,9 @@ mod tests {
 
         // After maturity the unbond applies and frees the value.
         apply_block_with_stake(&mut utxo, &mut stake, &[unbond], 0, 10 + UNBOND_MATURITY).unwrap();
-        assert_eq!(stake.stake_of(&pk), 0);
-        assert_eq!(stake.total_stake(), 0);
+        let native = NATIVE_ASSET_ID;
+        assert_eq!(stake.stake_of(native, &pk), 0);
+        assert_eq!(stake.total_stake(native), 0);
 
         // The released output is an ordinary UTXO again.
         let freed = OutPoint::new(unbond_tx(&alice, &[frozen_op], 60).id(), 0);
@@ -4174,10 +4217,11 @@ mod tests {
         let b1 = ledger
             .insert(vec![ledger.genesis()], 1, 1, 0, &[bond])
             .unwrap();
-        assert_eq!(ledger.stake_state(&b1).unwrap().stake_of(&pk), 400);
+        let native = NATIVE_ASSET_ID;
+        assert_eq!(ledger.stake_state(&b1).unwrap().stake_of(native, &pk), 400);
         // Genesis's view still shows zero (per-block states are independent).
         assert_eq!(
-            ledger.stake_state(&ledger.genesis()).unwrap().total_stake(),
+            ledger.stake_state(&ledger.genesis()).unwrap().total_stake(native),
             0
         );
 
@@ -4204,7 +4248,8 @@ mod tests {
         let b_unbond = ledger
             .insert(vec![tip], 1, 300, 0, &[unbond])
             .expect("matured unbond applies");
-        assert_eq!(ledger.stake_state(&b_unbond).unwrap().stake_of(&pk), 0);
+        let native = NATIVE_ASSET_ID;
+        assert_eq!(ledger.stake_state(&b_unbond).unwrap().stake_of(native, &pk), 0);
         // The unbonded output is freely spendable in a later block.
         let freed = OutPoint::new(unbond_id, 0);
         let spend = Transaction::signed(

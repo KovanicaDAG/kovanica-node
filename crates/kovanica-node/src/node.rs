@@ -10,8 +10,10 @@
 //! runnable, self-contained demo of the whole stack.
 
 use std::fs;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use kovanica_cli::Wallet;
 use kovanica_dag::{pow, Block, BlockId, Dag, VrfPublicKey, VrfSecretKey};
 use kovanica_dag::{vrf_keypair_from_seed, vrf_prove};
 use kovanica_state::ledger::apply_block_with_stake;
@@ -242,6 +244,34 @@ pub struct Prepared {
     pub value: u64,
     /// Protocol fee burned-or-paid to the miner (atoms).
     pub fee: u64,
+}
+
+/// A batched CoinJoin transaction ready for participants to sign.
+/// Each participant signs their own inputs independently.
+#[derive(Clone, Debug)]
+pub struct CoinJoinPrepared {
+    /// The unsigned batched transaction (zeroed signatures).
+    pub tx: Transaction,
+    /// Sighash for each input, in order — the wallet must sign each.
+    /// All inputs share the same sighash (the transaction sighash).
+    pub sighashes: Vec<[u8; 32]>,
+    /// The outpoints being spent, in order.
+    pub outpoints: Vec<OutPoint>,
+    /// Values of the outpoints being spent, in order.
+    pub values: Vec<u64>,
+    /// Total protocol fee for the batch (atoms).
+    pub fee: u64,
+}
+
+/// Participant specification for CoinJoin batching.
+#[derive(Clone, Debug)]
+pub struct CoinJoinParticipant {
+    /// The participant's address (must own the UTXOs being spent).
+    pub from: Address,
+    /// The outputs this participant wants to create.
+    pub outputs: Vec<TxOutput>,
+    /// The asset to spend (None = native KVNC).
+    pub asset_id: Option<AssetId>,
 }
 
 /// Information about a created HTLC output (RFC-004).
@@ -515,6 +545,12 @@ pub struct Node {
     /// Per-node counter for deterministic stealth-send ephemeral secrets. See
     /// [`Node::send_to_stealth`] — production should use a random `r` instead.
     stealth_counter: std::sync::atomic::AtomicU64,
+    /// Operator wallet (BIP39 mnemonic) for receiving mining rewards.
+    /// Generated on first genesis, saved to `$KOVANICA_DATA/operator-wallet.key`.
+    operator_wallet: Option<Wallet>,
+    /// Founder wallet (BIP39 mnemonic) for receiving the 200K KVNC premine.
+    /// Generated on first genesis, saved to `$KOVANICA_DATA/founder-wallet.key`.
+    founder_wallet: Option<Wallet>,
 }
 
 /// RFC-006 emission era length (blocks).
@@ -539,6 +575,8 @@ impl Default for Node {
                 crate::p2p_hardening::P2pHardeningConfig::default(),
             ),
             stealth_counter: std::sync::atomic::AtomicU64::new(0),
+            operator_wallet: None,
+            founder_wallet: None,
         }
     }
 }
@@ -566,6 +604,8 @@ impl Node {
                 crate::p2p_hardening::P2pHardeningConfig::default(),
             ),
             stealth_counter: std::sync::atomic::AtomicU64::new(0),
+            operator_wallet: None,
+            founder_wallet: None,
         }
     }
 
@@ -777,7 +817,36 @@ impl Node {
         if self.ledger.is_some() {
             return Err(NodeError::AlreadyInitialized);
         }
-        let founder = Self::address(founder_seed);
+
+        // Get data directory for wallet storage
+        let data_dir = Self::data_dir();
+
+        // Generate or load founder wallet (receives 200K KVNC premine)
+        // For test compatibility, derive deterministically from founder_seed
+        let founder_wallet = self.founder_wallet.get_or_insert_with(|| {
+            let mut seed_bytes = [0u8; 32];
+            seed_bytes[..8].copy_from_slice(&founder_seed.to_le_bytes());
+            let wallet = Wallet::from_seed(seed_bytes);
+            let wallet_path = data_dir.join("founder-wallet.key");
+            wallet.save(&wallet_path, true).expect("failed to save founder wallet");
+            eprintln!("Generated founder wallet: {}", wallet.address().to_kvnc());
+            eprintln!("Founder wallet saved to: {}", wallet_path.display());
+            wallet
+        });
+
+        // Generate or load operator wallet (receives mining rewards)
+        let operator_wallet = self.operator_wallet.get_or_insert_with(|| {
+            let wallet = Wallet::generate_with_mnemonic().expect("failed to generate operator wallet");
+            let wallet_path = data_dir.join("operator-wallet.key");
+            wallet.save(&wallet_path, true).expect("failed to save operator wallet");
+            eprintln!("Generated operator wallet: {}", wallet.address().to_kvnc());
+            eprintln!("Operator wallet saved to: {}", wallet_path.display());
+            wallet
+        });
+
+        let founder = founder_wallet.address();
+        let _operator = operator_wallet.address();
+
         // RFC-006: treasury inclusion is explicit — never inferred from the
         // premine amount. With treasury on, the genesis coinbase mints the
         // standard RFC-006 premine plus treasury vaults; `amount` must match
@@ -815,8 +884,22 @@ impl Node {
         };
         let genesis = ledger.genesis();
         self.ledger = Some(ledger);
-        self.miner = Some(founder);
+        // Default miner is the founder (for backward compatibility with tests).
+        // The operator wallet is generated and saved for future use (operator can
+        // call set_miner(operator_wallet.address()) to switch).
+        if self.miner.is_none() {
+            self.miner = Some(founder);
+        }
         Ok((genesis, founder))
+    }
+
+    /// Returns the data directory for wallet storage.
+    fn data_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("KOVANICA_DATA") {
+            return PathBuf::from(dir);
+        }
+        // Default to testnet data directory
+        PathBuf::from("data")
     }
 
     /// Enable (or disable) payload pruning on the underlying DAG. Returns an
@@ -853,6 +936,16 @@ impl Node {
     /// Current miner address, if set.
     pub fn miner(&self) -> Option<Address> {
         self.miner
+    }
+
+    /// Operator wallet (BIP39 mnemonic) for receiving mining rewards, if generated.
+    pub fn operator_wallet(&self) -> Option<&Wallet> {
+        self.operator_wallet.as_ref()
+    }
+
+    /// Founder wallet (BIP39 mnemonic) for receiving the premine, if generated.
+    pub fn founder_wallet(&self) -> Option<&Wallet> {
+        self.founder_wallet.as_ref()
     }
 
     /// Set this node's staked-validator identity from a 32-byte VRF seed. The
@@ -902,7 +995,7 @@ impl Node {
         kovanica_state::HalvingSchedule::new(cap, HALVING_ERA).subsidy_at(height)
     }
 
-    pub(crate) fn ledger(&self) -> Result<&Ledger, NodeError> {
+    pub fn ledger(&self) -> Result<&Ledger, NodeError> {
         self.ledger.as_ref().ok_or(NodeError::NotInitialized)
     }
 
@@ -940,7 +1033,7 @@ impl Node {
         let tip = ledger.dag().selected_tip();
         Ok(ledger
             .stake_state(&tip)
-            .map(|s| s.total_stake())
+            .map(|s| s.total_stake(kovanica_state::NATIVE_ASSET_ID))
             .unwrap_or(0))
     }
 
@@ -950,7 +1043,7 @@ impl Node {
         let tip = ledger.dag().selected_tip();
         Ok(ledger
             .stake_state(&tip)
-            .map(|s| s.stake_of(vrf_pk))
+            .map(|s| s.stake_of(kovanica_state::NATIVE_ASSET_ID, vrf_pk))
             .unwrap_or(0))
     }
 
@@ -1342,6 +1435,128 @@ impl Node {
         let sig = Sig::from_bytes(signature);
         for i in 0..tx.inputs().len() {
             tx.attach_signature(i, sig);
+        }
+        self.submit_tx(tx)
+    }
+
+    /// Build an **unsigned** CoinJoin transaction from multiple participants.
+    /// Each participant provides a list of their inputs (outpoints) and desired outputs.
+    /// The method selects covering UTXOs for each participant, builds a single transaction
+    /// with all inputs and outputs, and returns the unsigned transaction plus sighashes
+    /// for each input that each participant must sign.
+    ///
+    /// This is a non-consensus, node-level utility for privacy-enhancing batched spends.
+    pub fn coinjoin_prepare(
+        &self,
+        participants: Vec<CoinJoinParticipant>,
+    ) -> Result<CoinJoinPrepared, NodeError> {
+        if participants.is_empty() {
+            return Err(NodeError::ZeroAmount);
+        }
+        let fee = self.min_fee();
+        let state = self.ledger()?.ledger_state();
+        let chain_height = self.chain_height().unwrap_or(0);
+        let mature_before = chain_height.saturating_sub(COINBASE_MATURITY);
+
+        // Collect all inputs and outputs from participants
+        let mut all_inputs: Vec<(OutPoint, u64, Address)> = Vec::new(); // (outpoint, value, owner)
+        let mut all_outputs: Vec<TxOutput> = Vec::new();
+
+        for participant in &participants {
+            let participant_addr = participant.from;
+            let participant_outputs = participant.outputs.clone();
+
+            // Select covering UTXOs for this participant
+            let need = participant_outputs.iter().map(|o| o.value).sum::<u64>()
+                .checked_add(fee)
+                .ok_or(NodeError::InsufficientFunds)?;
+
+            let mut owned: Vec<(OutPoint, u64)> = state
+                .iter()
+                .filter(|(_, out)| &out.owner == &participant_addr && out.asset_id == participant.asset_id)
+                .filter(|(op, _)| match state.get_entry(op) {
+                    Some(entry) => entry
+                        .is_coinbase
+                        .then(|| entry.creation_height <= mature_before)
+                        .unwrap_or(true),
+                    None => true,
+                })
+                .map(|(op, out)| (*op, out.value))
+                .collect();
+            owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+            let mut selected: Vec<(OutPoint, u64)> = Vec::new();
+            let mut total: u64 = 0;
+            for (op, value) in owned {
+                selected.push((op, value));
+                total = total.saturating_add(value);
+                if total >= need {
+                    break;
+                }
+            }
+            if total < need {
+                return Err(NodeError::InsufficientFunds);
+            }
+
+            for (op, value) in selected {
+                all_inputs.push((op, value, participant_addr));
+            }
+            all_outputs.extend(participant_outputs);
+
+            // Add change output if needed
+            let change = total - need;
+            if change > 0 {
+                all_outputs.push(TxOutput::new(change, participant.asset_id, participant_addr));
+            }
+        }
+
+        // Build the batched transaction
+        let outpoints: Vec<OutPoint> = all_inputs.iter().map(|(op, _, _)| *op).collect();
+        let values: Vec<u64> = all_inputs.iter().map(|(_, value, _)| *value).collect();
+        let owners: Vec<Address> = all_inputs.iter().map(|(_, _, owner)| *owner).collect();
+
+        let tx = Transaction::unsigned(&outpoints, all_outputs, Vec::new());
+        // All inputs in a CoinJoin share the same transaction sighash
+        let tx_sighash = tx.sighash();
+        let sighashes: Vec<[u8; 32]> = vec![tx_sighash; outpoints.len()];
+
+        Ok(CoinJoinPrepared {
+            tx,
+            sighashes,
+            outpoints,
+            values,
+            fee,
+        })
+    }
+
+    /// Submit a fully signed CoinJoin transaction.
+    /// `signatures` must be in the same order as the outpoints in the returned
+    /// `CoinJoinPrepared`. Each signature corresponds to one input.
+    pub fn coinjoin_submit(
+        &mut self,
+        prepared: CoinJoinPrepared,
+        signatures: Vec<[u8; 64]>,
+    ) -> Result<TxId, NodeError> {
+        if signatures.len() != prepared.outpoints.len() {
+            return Err(NodeError::BadSignature);
+        }
+        let mut tx = prepared.tx;
+        // Attach all signatures first
+        for (i, sig_bytes) in signatures.iter().enumerate() {
+            let sig = Sig::from_bytes(*sig_bytes);
+            tx.attach_signature(i, sig);
+        }
+        // Verify all signatures against their respective owners
+        let state = self.ledger()?.ledger_state();
+        for (i, (op, sig_bytes)) in prepared.outpoints.iter().zip(signatures.iter()).enumerate() {
+            let owner = state.get_entry(op).map(|e| e.output.owner);
+            let Some(owner) = owner else {
+                return Err(NodeError::BadSignature);
+            };
+            // All inputs share the same sighash
+            if !verify(&owner, &prepared.sighashes[0], sig_bytes) {
+                return Err(NodeError::BadSignature);
+            }
         }
         self.submit_tx(tx)
     }
@@ -3033,6 +3248,8 @@ impl Node {
                 crate::p2p_hardening::P2pHardeningConfig::default(),
             ),
             stealth_counter: std::sync::atomic::AtomicU64::new(0),
+            operator_wallet: None,
+            founder_wallet: None,
         })
     }
 
@@ -3055,6 +3272,8 @@ impl Node {
                 crate::p2p_hardening::P2pHardeningConfig::default(),
             ),
             stealth_counter: std::sync::atomic::AtomicU64::new(0),
+            operator_wallet: None,
+            founder_wallet: None,
         })
     }
 

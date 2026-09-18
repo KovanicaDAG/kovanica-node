@@ -87,11 +87,17 @@ pub use keys::{verify, verify_pk, Address, KeyPair, StealthAddress};
 pub use ledger::{
     apply_block, apply_dag, placeholder_treasury_key, rfc006_genesis_coinbase, BlockSummary,
     HalvingSchedule, HybridConfig, Ledger, LedgerCheckpointError, LedgerError, LedgerInsertError,
-    LedgerRun, LedgerSnapshotError, StakedVrf, SupplyMetrics, ATOM, BLOCKS_PER_YEAR,
-    COINBASE_MATURITY, DEFAULT_HALVING_ERA, FEE_PRODUCER_DEN, FEE_PRODUCER_NUM,
+    LedgerRun, LedgerSnapshotError, StakedVrf, SupplyMetrics, ATOM,
+    BLOCKS_PER_YEAR, COINBASE_MATURITY, DEFAULT_HALVING_ERA, FEE_PRODUCER_DEN, FEE_PRODUCER_NUM,
     HTLC_ACTIVATION_SCORE, MAX_SUPPLY, MULTISIG_ACTIVATION_SCORE, NATIVE_TOKEN_ACTIVATION_SCORE,
     RFC006_ERA_LENGTH, RFC006_GENESIS_SUBSIDY, RFC006_PREMINE, RFC006_TREASURY_TOTAL,
-    RFC006_TREASURY_TRANCHE, RFC006_TREASURY_TRANCHES, VAULT_ACTIVATION_SCORE,
+    RFC006_TREASURY_TRANCHE, RFC006_TREASURY_TRANCHES, TOKENOMICS_ACTIVATION_SCORE,
+    VAULT_ACTIVATION_SCORE,
+};
+pub use crate::stake::{
+    UNBOND_MATURITY, NATIVE_ASSET_ID, BOND_PREFIX, UNBOND_PREFIX,
+    bond_tag, parse_bond_tag, is_unbond_tag,
+    StakeState, StakeError, Freeze,
 };
 pub use multisig::{verify_threshold_signatures, MultisigScript, MAX_MULTISIG_KEYS};
 pub use spv::{

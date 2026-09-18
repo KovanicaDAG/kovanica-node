@@ -17,7 +17,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use kovanica_dag::BlockId;
 use kovanica_node::{net, Node, TreasuryGenesis};
-use kovanica_state::stake::bond_tag;
+use kovanica_state::stake::{UNBOND_MATURITY, NATIVE_ASSET_ID};
 use kovanica_state::{
     KeyPair, OutPoint, Sig, StealthAddress, Transaction, TxOutput, RFC006_PREMINE,
 };
@@ -176,6 +176,43 @@ pub struct MultisigAddress {
     pub address: String,
     /// The canonical `[M, N, pk1, ..., pkN]` redeem script, lowercase hex.
     pub redeem_script_hex: String,
+}
+
+/// An output specification for CoinJoin.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct CoinJoinOutput {
+    /// The amount in atoms (decimal string).
+    pub amount: String,
+    /// The recipient address.
+    pub to: String,
+    /// The asset to use (None = native KVNC).
+    pub asset_id_hex: Option<String>,
+}
+
+/// A participant in a CoinJoin batch.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct CoinJoinParticipant {
+    /// The participant's address (must own the UTXOs being spent).
+    pub from: String,
+    /// The outputs this participant wants to create.
+    pub outputs: Vec<CoinJoinOutput>,
+    /// The asset to spend (None = native KVNC).
+    pub asset_id_hex: Option<String>,
+}
+
+/// A prepared CoinJoin transaction ready for participants to sign.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct CoinJoinPrepared {
+    /// The unsigned batched transaction, hex-encoded.
+    pub tx_hex: String,
+    /// Sighash for each input (all inputs share the same transaction sighash).
+    pub sighashes_hex: Vec<String>,
+    /// The outpoints being spent, in order (hex-encoded).
+    pub outpoints_hex: Vec<String>,
+    /// Values of the outpoints being spent, in order (decimal strings).
+    pub values: Vec<String>,
+    /// Total protocol fee for the batch (atoms, decimal string).
+    pub fee: String,
 }
 
 /// One output of a multisig spend, as seen from the mobile FFI.
@@ -416,7 +453,7 @@ impl LightNode {
         let bond = Transaction::signed(
             &[(source_op, &kp)],
             vec![TxOutput::native(amount, addr)],
-            bond_tag(&vrf_pk),
+            kovanica_state::bond_tag(kovanica_state::NATIVE_ASSET_ID, &vrf_pk),
         );
         let bond_id = bond.id();
         node.submit_tx(bond)?;
@@ -521,7 +558,7 @@ impl LightNode {
         let bond = Transaction::signed(
             &[(source_op, &kp)],
             vec![TxOutput::native(amount, addr)],
-            bond_tag(&vrf_pk),
+            kovanica_state::bond_tag(kovanica_state::NATIVE_ASSET_ID, &vrf_pk),
         );
         let bond_id = bond.id();
         node.submit_tx(bond)?;
@@ -1280,6 +1317,156 @@ impl LightNode {
         Ok(hex::encode(kovanica_node::atomic_swap::preimage_hash(
             &preimage,
         )))
+    }
+
+    // ---------------------------------------------------------------------------
+    // CoinJoin (node-level, non-consensus batched spends)
+    // ---------------------------------------------------------------------------
+
+    /// Build an **unsigned** CoinJoin transaction from multiple participants.
+    /// Each participant provides their address, desired outputs, and optional asset.
+    /// The method selects covering UTXOs for each participant, builds a single
+    /// transaction with all inputs and outputs, and returns the unsigned transaction
+    /// plus sighashes for each input that each participant must sign.
+    ///
+    /// This is a non-consensus, node-level utility for privacy-enhancing batched spends.
+    pub fn coinjoin_prepare(
+        &self,
+        participants: Vec<CoinJoinParticipant>,
+    ) -> Result<CoinJoinPrepared, LightNodeError> {
+        let node_participants: Vec<kovanica_node::CoinJoinParticipant> = participants
+            .into_iter()
+            .map(|p| {
+                let from = kovanica_state::Address::parse(&p.from)
+                    .map_err(|e| invalid(format!("bad address: {e}")))?;
+                let outputs = p.outputs
+                    .into_iter()
+                    .map(|o| {
+                        let to = kovanica_state::Address::parse(&o.to)
+                            .map_err(|e| invalid(format!("bad address: {e}")))?;
+                        let amount = o.amount.parse::<u64>()
+                            .map_err(|_| invalid("amount must be a decimal string"))?;
+                        let asset_id = match o.asset_id_hex {
+                            Some(hex) => {
+                                let raw = decode_hex(&hex, "asset id")?;
+                                if raw.len() != 32 {
+                                    return Err(invalid("asset id must be 32 bytes hex"));
+                                }
+                                Some(kovanica_state::AssetId::from_bytes(
+                                    <[u8; 32]>::try_from(raw.as_slice())
+                                        .map_err(|_| invalid("asset id must be 32 bytes hex"))?,
+                                ))
+                            }
+                            None => None,
+                        };
+                        Ok(kovanica_state::TxOutput::new(amount, asset_id, to))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let asset_id = match p.asset_id_hex {
+                    Some(hex) => {
+                        let raw = decode_hex(&hex, "asset id")?;
+                        if raw.len() != 32 {
+                            return Err(invalid("asset id must be 32 bytes hex"));
+                        }
+                        Some(kovanica_state::AssetId::from_bytes(
+                            <[u8; 32]>::try_from(raw.as_slice())
+                                .map_err(|_| invalid("asset id must be 32 bytes hex"))?,
+                        ))
+                    }
+                    None => None,
+                };
+                Ok(kovanica_node::CoinJoinParticipant {
+                    from,
+                    outputs,
+                    asset_id,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut node = self.lock();
+        let prepared = node.coinjoin_prepare(node_participants)?;
+
+        // Encode transaction
+        let tx_hex = hex::encode(prepared.tx.encode());
+        // Sighashes (all inputs share the same transaction sighash)
+        let sighashes_hex = prepared.sighashes.iter().map(|s| hex::encode(s)).collect();
+        // Outpoints
+        let outpoints_hex = prepared.outpoints.iter().map(|op| format!("{}:{}", op.tx.to_hex(), op.index)).collect();
+        // Values as decimal strings
+        let values = prepared.values.iter().map(|v| v.to_string()).collect();
+
+        Ok(CoinJoinPrepared {
+            tx_hex,
+            sighashes_hex,
+            outpoints_hex,
+            values,
+            fee: prepared.fee.to_string(),
+        })
+    }
+
+    /// Submit a fully signed CoinJoin transaction.
+    /// `prepared` is the result from `coinjoin_prepare`.
+    /// `signatures_hex` is a list of 64-byte Ed25519 signatures (lowercase hex),
+    /// one per input, in the same order as `prepared.outpoints_hex`.
+    pub fn coinjoin_submit(
+        &self,
+        prepared: CoinJoinPrepared,
+        signatures_hex: Vec<String>,
+    ) -> Result<String, LightNodeError> {
+        let signatures: Vec<[u8; 64]> = signatures_hex
+            .into_iter()
+            .map(|s| {
+                let raw = decode_hex(&s, "signature")?;
+                if raw.len() != 64 {
+                    return Err(invalid("signature must be 64 bytes hex"));
+                }
+                <[u8; 64]>::try_from(raw.as_slice())
+                    .map_err(|_| invalid("signature must be 64 bytes hex"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Decode the transaction
+        let tx_bytes = decode_hex(&prepared.tx_hex, "tx")?;
+        let mut tx = kovanica_state::Transaction::decode(&tx_bytes)
+            .map_err(|e| invalid(format!("undecodable tx: {e}")))?;
+
+        // Attach signatures
+        for (i, sig_bytes) in signatures.iter().enumerate() {
+            let sig = kovanica_state::Sig::from_bytes(*sig_bytes);
+            tx.attach_signature(i, sig);
+        }
+
+        // Verify all signatures against their respective owners
+        let mut node = self.lock();
+        let state = node.ledger()?.ledger_state();
+        for (i, op_hex) in prepared.outpoints_hex.iter().enumerate() {
+            let parts: Vec<&str> = op_hex.split(':').collect();
+            if parts.len() != 2 {
+                return Err(invalid("outpoint must be 'txid:index'"));
+            }
+            let txid = kovanica_state::TxId::from_bytes(
+                <[u8; 32]>::try_from(decode_hex(parts[0], "txid")?.as_slice())
+                    .map_err(|_| invalid("txid must be 32 bytes hex"))?,
+            );
+            let index = parts[1].parse::<u32>().map_err(|_| invalid("bad outpoint index"))?;
+            let op = kovanica_state::OutPoint::new(txid, index);
+
+            let owner = state.get_entry(&op).map(|e| e.output.owner);
+            let Some(owner) = owner else {
+                return Err(invalid("outpoint not found in UTXO set"));
+            };
+            // All inputs share the same sighash
+            let sighash = hex::decode(&prepared.sighashes_hex[0])
+                .map_err(|_| invalid("bad sighash hex"))?;
+            let sighash: [u8; 32] = sighash.as_slice().try_into().map_err(|_| invalid("bad sighash length"))?;
+            if !kovanica_state::verify(&owner, &sighash, &signatures[i]) {
+                return Err(invalid("signature verification failed"));
+            }
+        }
+
+        // Submit the signed transaction
+        node.submit_tx(tx)?;
+        Ok("submitted".to_string())
     }
 }
 

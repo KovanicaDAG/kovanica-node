@@ -10,6 +10,7 @@ description = "Runnable node for the Kovanica Protocol: a line RPC over an in-me
 [dependencies]
 kovanica-dag = { path = "../kovanica-dag" }
 kovanica-state = { path = "../kovanica-state" }
+kovanica-cli = { path = "../kovanica-cli" }
 hex.workspace = true
 blake3.workspace = true
 socket2.workspace = true
