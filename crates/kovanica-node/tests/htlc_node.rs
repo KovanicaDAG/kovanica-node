@@ -310,3 +310,45 @@ fn htlc_rpc_commands() {
     assert!(help.contains("htlc_refund"));
     assert!(help.contains("htlc_balance"));
 }
+
+#[test]
+fn htlc_prepare_external_sign_submit_flow() {
+    // Mirrors the web flow (option B): the node prepares an *unsigned* funding
+    // tx, the wallet signs the sighash locally (only the signature — never the
+    // seed — leaves the browser), and the node finalizes + submits. Verifies
+    // the exact sequence the explorer HTLC endpoints drive.
+    let mut node = Node::new();
+    node.genesis(3, 2000, 2000, 1, None).unwrap(); // 2000 to Alice (seed 1)
+
+    let alice = KeyPair::from_u64(1);
+    let bob = KeyPair::from_u64(2);
+    let hash = preimage_hash(&PREIMAGE);
+
+    let prepared = node
+        .prepare_htlc(
+            alice.address(),
+            500,
+            *bob.address().payload(),
+            hash,
+            3,
+            None,
+        )
+        .unwrap();
+    // The prepared tx is unsigned and NOT yet in the ledger.
+    assert_eq!(node.balance_of_htlc(&prepared.script), 0);
+
+    // The wallet signs the sighash externally and sends only the signature.
+    let sig = alice.sign(&prepared.sighash);
+    let signed = node.finalize_unsigned(&prepared.tx, sig).unwrap();
+    let before = node.balance(&alice.address()).unwrap();
+    node.submit_tx(signed).unwrap();
+    node.produce_block().unwrap();
+
+    // Funds are locked to the HTLC address; Alice keeps the change (minus fee)
+    // plus the producer subsidy for the block that confirmed the tx.
+    assert_eq!(node.balance_of_htlc(&prepared.script), 500);
+    assert_eq!(
+        node.balance(&alice.address()).unwrap(),
+        before - 500 + 2000 - prepared.fee as u128
+    );
+}

@@ -1824,6 +1824,579 @@ pub fn handle(app: &mut Explorer, mut stream: TcpStream) -> std::io::Result<()> 
     if method == "POST" && path == "/api/multisig/submit" {
         return handle_multisig_submit(app, &query, &body_str, &mut stream);
     }
+    // ------------------------------------------------------------------
+    // HTLC / Atomic Swap endpoints
+    // ------------------------------------------------------------------
+    if method == "POST" && path == "/api/htlc/prepare" {
+        let json_body: serde_json::Value = match serde_json::from_str(&body_str) {
+            Ok(val) => val,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid json body: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let from_addr = match json_body.get("from").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'from' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let amount = match json_body.get("amount").and_then(|v| v.as_u64()) {
+            Some(a) => a,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'amount' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let recipient_pk_hex = match json_body.get("recipient_pk").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'recipient_pk' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let preimage_hash_hex = match json_body.get("preimage_hash").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'preimage_hash' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let timeout = match json_body.get("timeout").and_then(|v| v.as_u64()) {
+            Some(t) => t as u32,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'timeout' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let asset_id = json_body
+            .get("asset_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                let bytes = hex::decode(s.trim()).ok()?;
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    Some(kovanica_state::AssetId::from_bytes(arr))
+                } else {
+                    None
+                }
+            });
+
+        let from = match parse_addr(from_addr) {
+            Ok(a) => a,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid from address: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let recipient_pk_bytes = match hex::decode(recipient_pk_hex.trim()) {
+            Ok(b) if b.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            _ => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("recipient_pk must be 32-byte hex")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let preimage_hash_bytes = match hex::decode(preimage_hash_hex.trim()) {
+            Ok(b) if b.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            _ => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("preimage_hash must be 32-byte hex")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let node_name = query
+            .get("node")
+            .cloned()
+            .unwrap_or_else(|| app.selected.clone());
+        let Some(node) = app.mesh.node_mut(&node_name) else {
+            let err = format!("{{\"ok\":false,\"error\":\"unknown node {}\"}}", node_name);
+            return respond(&mut stream, 400, "application/json", err.as_bytes());
+        };
+
+        // Node's HTLC preparation only needs the sender address (UTXO selection
+        // + script sender key). The web wallet signs the sighash offline and
+        // submits the fully-signed tx via /api/submit_tx — the secret key never
+        // leaves the wallet.
+        let prepared = match node.prepare_htlc(
+            from,
+            amount,
+            recipient_pk_bytes,
+            preimage_hash_bytes,
+            timeout,
+            asset_id,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&e.to_string()));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let tx_hex = hex::encode(prepared.tx.encode());
+        let script_hex = hex::encode(prepared.script.bytes());
+        let body = format!(
+            "{{\"ok\":true,\"tx_hex\":{},\"sighash\":{},\"htlc_address\":{},\"script_hex\":{},\"outpoint\":{{\"tx\":{},\"index\":{}}},\"value\":{},\"fee\":{}}}",
+            jstr(&tx_hex),
+            jstr(&hex::encode(prepared.sighash)),
+            jstr(&prepared.htlc_address),
+            jstr(&script_hex),
+            jstr(&prepared.outpoint.tx.to_string()),
+            prepared.outpoint.index,
+            prepared.value,
+            prepared.fee
+        );
+        return respond(&mut stream, 200, "application/json", body.as_bytes());
+    }
+    if method == "POST" && path == "/api/htlc/spend" {
+        let json_body: serde_json::Value = match serde_json::from_str(&body_str) {
+            Ok(val) => val,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid json body: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let outpoint_tx = match json_body.get("outpoint_tx").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'outpoint_tx' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let outpoint_index = json_body
+            .get("outpoint_index")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let script_hex = match json_body.get("script_hex").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'script_hex' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let to_addr = match json_body.get("to").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr("missing 'to' field"));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let kind = match json_body.get("kind").and_then(|v| v.as_str()) {
+            Some("redeem") => crate::HtlcSpendKind::Redeem,
+            Some("refund") => crate::HtlcSpendKind::Refund,
+            _ => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("'kind' must be 'redeem' or 'refund'")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let preimage_bytes = match json_body.get("preimage_hex").and_then(|v| v.as_str()) {
+            Some(s) => match hex::decode(s.trim()) {
+                Ok(b) => b,
+                Err(e) => {
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr(&format!("invalid preimage_hex: {e}"))
+                    );
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            },
+            None => Vec::new(),
+        };
+
+        let outpoint = match parse_tx_id(outpoint_tx) {
+            Ok(tx_id) => OutPoint::new(tx_id, outpoint_index),
+            Err(e) => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&e));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let to = match parse_addr(to_addr) {
+            Ok(a) => a,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid to address: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let script_bytes = match hex::decode(script_hex.trim()) {
+            Ok(b) => b,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid script_hex: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let script = match kovanica_state::htlc::HtlcScript::parse(&script_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid script: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let node_name = query
+            .get("node")
+            .cloned()
+            .unwrap_or_else(|| app.selected.clone());
+        let Some(node) = app.mesh.node_mut(&node_name) else {
+            let err = format!("{{\"ok\":false,\"error\":\"unknown node {}\"}}", node_name);
+            return respond(&mut stream, 400, "application/json", err.as_bytes());
+        };
+
+        let preimage = if kind == crate::HtlcSpendKind::Redeem {
+            Some(preimage_bytes.as_slice())
+        } else {
+            None
+        };
+        match node.prepare_htlc_spend(outpoint, &script, to, kind, preimage) {
+            Ok(prepared) => {
+                let body = format!(
+                    "{{\"ok\":true,\"tx_hex\":{},\"sighash\":{},\"value\":{},\"fee\":{}}}",
+                    jstr(&hex::encode(prepared.tx.encode())),
+                    jstr(&hex::encode(prepared.sighash)),
+                    prepared.value,
+                    prepared.fee
+                );
+                return respond(&mut stream, 200, "application/json", body.as_bytes());
+            }
+            Err(e) => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&e.to_string()));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        }
+    }
+    if method == "POST" && path == "/api/htlc/finalize" {
+        let json_body: serde_json::Value = match serde_json::from_str(&body_str) {
+            Ok(val) => val,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid json body: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let tx_hex = match json_body.get("tx_hex").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'tx_hex' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let signature_hex = match json_body.get("signature_hex").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'signature_hex' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let tx_bytes = match hex::decode(tx_hex.trim()) {
+            Ok(b) => b,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid tx_hex: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let tx = match Transaction::decode(&tx_bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("undecodable transaction: {e:?}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let sig_arr: [u8; 64] = match hex::decode(signature_hex.trim()) {
+            Ok(b) if b.len() == 64 => {
+                let mut arr = [0u8; 64];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            _ => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("signature_hex must be 64-byte hex")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let node_name = query
+            .get("node")
+            .cloned()
+            .unwrap_or_else(|| app.selected.clone());
+        let Some(node) = app.mesh.node_mut(&node_name) else {
+            let err = format!("{{\"ok\":false,\"error\":\"unknown node {}\"}}", node_name);
+            return respond(&mut stream, 400, "application/json", err.as_bytes());
+        };
+
+        // Optional HTLC spend context: when `kind` is present the transaction
+        // is a redeem/refund of an HTLC output, so the signature is verified
+        // against the script's recipient/sender key and the witness stack is
+        // built from the template (+ preimage for redeem).
+        let spend_kind = match json_body.get("kind").and_then(|v| v.as_str()) {
+            Some("redeem") => Some(crate::HtlcSpendKind::Redeem),
+            Some("refund") => Some(crate::HtlcSpendKind::Refund),
+            _ => None,
+        };
+        let script = match json_body.get("script_hex").and_then(|v| v.as_str()) {
+            Some(s) => match hex::decode(s.trim()) {
+                Ok(b) => match kovanica_state::htlc::HtlcScript::parse(&b) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        let err = format!(
+                            "{{\"ok\":false,\"error\":{}}}",
+                            jstr(&format!("invalid script: {e}"))
+                        );
+                        return respond(&mut stream, 400, "application/json", err.as_bytes());
+                    }
+                },
+                Err(e) => {
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr(&format!("invalid script_hex: {e}"))
+                    );
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            },
+            None => None,
+        };
+        let preimage = match json_body.get("preimage_hex").and_then(|v| v.as_str()) {
+            Some(s) => match hex::decode(s.trim()) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    let err = format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        jstr(&format!("invalid preimage_hex: {e}"))
+                    );
+                    return respond(&mut stream, 400, "application/json", err.as_bytes());
+                }
+            },
+            None => None,
+        };
+
+        let result = match (spend_kind, &script) {
+            (Some(kind), Some(script)) => {
+                node.finalize_htlc_spend(&tx, script, kind, preimage.as_deref(), sig_arr)
+            }
+            (None, _) => node.finalize_unsigned(&tx, sig_arr),
+            (Some(_), None) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("script_hex required when kind is set")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        match result {
+            Ok(signed) => {
+                let body = format!(
+                    "{{\"ok\":true,\"signed_tx_hex\":{}}}",
+                    jstr(&hex::encode(signed.encode()))
+                );
+                return respond(&mut stream, 200, "application/json", body.as_bytes());
+            }
+            Err(e) => {
+                let err = format!("{{\"ok\":false,\"error\":{}}}", jstr(&e.to_string()));
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        }
+    }
+    if method == "POST" && path == "/api/htlc/balance" {
+        let json_body: serde_json::Value = match serde_json::from_str(&body_str) {
+            Ok(val) => val,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid json body: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let script_hex = match json_body.get("script_hex").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'script_hex' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let script_bytes = match hex::decode(script_hex.trim()) {
+            Ok(b) => b,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid script_hex: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let node_name = query
+            .get("node")
+            .cloned()
+            .unwrap_or_else(|| app.selected.clone());
+        let Some(node) = app.mesh.node_mut(&node_name) else {
+            let err = format!("{{\"ok\":false,\"error\":\"unknown node {}\"}}", node_name);
+            return respond(&mut stream, 400, "application/json", err.as_bytes());
+        };
+
+        let script = match kovanica_state::htlc::HtlcScript::parse(&script_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid script: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let balance = node.balance_of_htlc(&script);
+        let body = format!("{{\"ok\":true,\"balance\":{}}}", balance);
+        return respond(&mut stream, 200, "application/json", body.as_bytes());
+    }
+    if method == "POST" && path == "/api/htlc/status" {
+        let json_body: serde_json::Value = match serde_json::from_str(&body_str) {
+            Ok(val) => val,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid json body: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let script_hex = match json_body.get("script_hex").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr("missing 'script_hex' field")
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+        let from_height = json_body
+            .get("from_height")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let script_bytes = match hex::decode(script_hex.trim()) {
+            Ok(b) => b,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid script_hex: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let node_name = query
+            .get("node")
+            .cloned()
+            .unwrap_or_else(|| app.selected.clone());
+        let Some(node) = app.mesh.node_mut(&node_name) else {
+            let err = format!("{{\"ok\":false,\"error\":\"unknown node {}\"}}", node_name);
+            return respond(&mut stream, 400, "application/json", err.as_bytes());
+        };
+
+        let script = match kovanica_state::htlc::HtlcScript::parse(&script_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                let err = format!(
+                    "{{\"ok\":false,\"error\":{}}}",
+                    jstr(&format!("invalid script: {e}"))
+                );
+                return respond(&mut stream, 400, "application/json", err.as_bytes());
+            }
+        };
+
+        let balance = node.balance_of_htlc(&script);
+        let redeem = node.scan_for_htlc_redeem(&script, from_height);
+        let body = match redeem {
+            Some((tx_id, preimage)) => format!(
+                "{{\"ok\":true,\"balance\":{},\"redeem_tx\":{},\"preimage\":{}}}",
+                balance,
+                jstr(&tx_id.to_string()),
+                jstr(&hex::encode(preimage))
+            ),
+            None => format!(
+                "{{\"ok\":true,\"balance\":{},\"redeem_tx\":null,\"preimage\":null}}",
+                balance
+            ),
+        };
+        return respond(&mut stream, 200, "application/json", body.as_bytes());
+    }
+    // ------------------------------------------------------------------
     if method == "POST" && path.starts_with("/api/") {
         let action = path.trim_start_matches("/api/");
         if let Some(node) = query.get("node") {
@@ -4579,5 +5152,397 @@ mod tests {
         assert_eq!(v["limit"], 2);
         assert_eq!(v["offset"], 1);
         assert!(v["total"].as_u64().unwrap() >= 3);
+    }
+
+    #[test]
+    fn htlc_http_prepare_sign_submit_status_flow() {
+        // End-to-end exercised over the real HTTP surface: prepare an unsigned
+        // funding tx, sign the sighash outside the node (the web wallet's job),
+        // finalize + submit, mine a block, then query HTLC status on-chain.
+        let mut app = Explorer::boot();
+        app.mining = false;
+        // Mature the founder's genesis coinbase (RFC-006 CSV maturity).
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
+
+        let alice = kovanica_state::KeyPair::from_u64(1);
+        let bob = kovanica_state::KeyPair::from_u64(2);
+        let preimage: [u8; 32] = [0x42u8; 32];
+        let preimage_hash = crate::atomic_swap::preimage_hash(&preimage);
+
+        // 1. /api/htlc/prepare — unsigned funding tx + sighash.
+        let prepare_body = format!(
+            "{{\"from\":\"{}\",\"amount\":50000,\"recipient_pk\":\"{}\",\"preimage_hash\":\"{}\",\"timeout\":3}}",
+            alice.address().to_hex(),
+            hex::encode(bob.address().payload()),
+            hex::encode(preimage_hash)
+        );
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/prepare HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            prepare_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "prepare: {body}");
+        let prepared: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(prepared["ok"], true);
+        let tx_hex = prepared["tx_hex"].as_str().unwrap();
+        let script_hex = prepared["script_hex"].as_str().unwrap();
+        let sighash = prepared["sighash"].as_str().unwrap();
+        assert!(prepared["value"].as_u64().unwrap() >= 50000);
+
+        // 2. The wallet signs the sighash locally; only the signature is sent.
+        let sighash_bytes: [u8; 32] = hex::decode(sighash).unwrap().try_into().unwrap();
+        let sig = alice.sign(&sighash_bytes);
+        let finalize_body = format!(
+            "{{\"tx_hex\":\"{}\",\"signature_hex\":\"{}\"}}",
+            tx_hex,
+            hex::encode(sig)
+        );
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/finalize HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            finalize_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "finalize: {body}");
+        let finalized: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let signed_tx_hex = finalized["signed_tx_hex"].as_str().unwrap();
+
+        // 3. Submit the fully-signed tx.
+        let submit_body = format!("{{\"tx_hex\":\"{signed_tx_hex}\"}}");
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/submit_tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            submit_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "submit: {body}");
+        let submitted: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(submitted["ok"], true);
+
+        // 4. Mine a block so the HTLC output lands in the ledger.
+        app.mesh.produce("alpha").unwrap();
+
+        // 5. /api/htlc/status confirms the funds are locked on-chain.
+        let status_body = format!("{{\"script_hex\":\"{script_hex}\"}}");
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            status_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "status: {body}");
+        let status_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status_json["balance"], 50000);
+        assert_eq!(status_json["redeem_tx"], serde_json::Value::Null);
+
+        // 6. Bob (the recipient) claims the locked value: /api/htlc/spend
+        // prepares an unsigned redeem, Bob signs the sighash locally, and
+        // /api/htlc/finalize verifies the signature against the script's
+        // recipient key before returning the fully-signed spend.
+        let funding_txid = submitted["tx"].as_str().unwrap();
+        let spend_body = format!(
+            "{{\"outpoint_tx\":\"{funding_txid}\",\"outpoint_index\":0,\"script_hex\":\"{script_hex}\",\"to\":\"{}\",\"kind\":\"redeem\",\"preimage_hex\":\"{}\"}}",
+            bob.address().to_hex(),
+            hex::encode(preimage)
+        );
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/spend HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            spend_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "spend: {body}");
+        let spend: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(spend["ok"], true);
+        let spend_tx_hex = spend["tx_hex"].as_str().unwrap();
+        let spend_sighash = spend["sighash"].as_str().unwrap();
+
+        let spend_sighash_bytes: [u8; 32] = hex::decode(spend_sighash).unwrap().try_into().unwrap();
+        let spend_sig = bob.sign(&spend_sighash_bytes);
+        let spend_finalize_body = format!(
+            "{{\"tx_hex\":\"{spend_tx_hex}\",\"script_hex\":\"{script_hex}\",\"kind\":\"redeem\",\"preimage_hex\":\"{}\",\"signature_hex\":\"{}\"}}",
+            hex::encode(preimage),
+            hex::encode(spend_sig)
+        );
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/finalize HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            spend_finalize_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "spend finalize: {body}");
+        let spend_finalized: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let redeem_signed_hex = spend_finalized["signed_tx_hex"].as_str().unwrap();
+
+        // A wrong signature must be rejected before it reaches the mempool.
+        let wrong_sig = alice.sign(&spend_sighash_bytes);
+        let wrong_body = format!(
+            "{{\"tx_hex\":\"{spend_tx_hex}\",\"script_hex\":\"{script_hex}\",\"kind\":\"redeem\",\"preimage_hex\":\"{}\",\"signature_hex\":\"{}\"}}",
+            hex::encode(preimage),
+            hex::encode(wrong_sig)
+        );
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/finalize HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            wrong_body.as_bytes(),
+        );
+        assert_eq!(status, 400, "wrong sig must be rejected");
+        assert!(body.contains("bad spend signature"));
+
+        // 7. Submit the redeem and mine it.
+        let redeem_submit_body = format!("{{\"tx_hex\":\"{redeem_signed_hex}\"}}");
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/submit_tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            redeem_submit_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "redeem submit: {body}");
+        app.mesh.produce("alpha").unwrap();
+
+        // 8. Status now reports the claim: nothing locked, redeem revealed with
+        // the preimage. Bob's UTXOs grew by at least the locked 500 minus fee.
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            status_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "status after redeem: {body}");
+        let status_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status_json["balance"], 0);
+        assert_ne!(status_json["redeem_tx"], serde_json::Value::Null);
+        assert_eq!(
+            status_json["preimage"].as_str().unwrap(),
+            hex::encode(preimage)
+        );
+
+        let bob_utxos_body = format!(
+            "GET /api/utxos?address={} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            bob.address().to_hex()
+        );
+        let (status, body) = send_req(&mut app, &bob_utxos_body);
+        assert_eq!(status, 200, "bob utxos: {body}");
+        let bob_utxos: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let bob_total: u64 = bob_utxos["utxos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["value"].as_u64().unwrap())
+            .sum();
+        assert!(
+            bob_total >= 10000,
+            "bob should hold the claimed value (50000 - 40000 fee): {bob_total}"
+        );
+    }
+
+    #[test]
+    fn htlc_http_refund_flow() {
+        // The sender's recovery path over the real HTTP surface: a refund
+        // before the timeout is rejected by the ledger, and once the chain
+        // reaches the timeout the refund spends the locked output back to the
+        // sender. Signing happens outside the node, as in the redeem flow.
+        let mut app = Explorer::boot();
+        app.mining = false;
+        for _ in 0..100 {
+            app.mesh.produce_empty("alpha").unwrap();
+        }
+
+        let alice = kovanica_state::KeyPair::from_u64(1);
+        let bob = kovanica_state::KeyPair::from_u64(2);
+        let preimage_hash = crate::atomic_swap::preimage_hash(&[0x42u8; 32]);
+
+        // 1. Fund an HTLC with a far-future timeout (refund must be rejected).
+        let prepare_body = format!(
+            "{{\"from\":\"{}\",\"amount\":50000,\"recipient_pk\":\"{}\",\"preimage_hash\":\"{}\",\"timeout\":1000000}}",
+            alice.address().to_hex(),
+            hex::encode(bob.address().payload()),
+            hex::encode(preimage_hash)
+        );
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/prepare HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            prepare_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "prepare: {body}");
+        let prepared: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let tx_hex = prepared["tx_hex"].as_str().unwrap().to_string();
+        let sighash = prepared["sighash"].as_str().unwrap().to_string();
+        let script_hex = prepared["script_hex"].as_str().unwrap().to_string();
+
+        let sighash_bytes: [u8; 32] = hex::decode(&sighash).unwrap().try_into().unwrap();
+        let sig = alice.sign(&sighash_bytes);
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/finalize HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!("{{\"tx_hex\":\"{tx_hex}\",\"signature_hex\":\"{}\"}}", hex::encode(sig)).as_bytes(),
+        );
+        assert_eq!(status, 200, "finalize: {body}");
+        let finalized: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let signed_tx_hex = finalized["signed_tx_hex"].as_str().unwrap().to_string();
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/submit_tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!("{{\"tx_hex\":\"{signed_tx_hex}\"}}").as_bytes(),
+        );
+        assert_eq!(status, 200, "submit funding: {body}");
+        let submitted: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let funding_txid = submitted["tx"].as_str().unwrap().to_string();
+        app.mesh.produce("alpha").unwrap();
+
+        // 2. Refund attempt before the timeout: prepared fine, but the ledger
+        // rejects the spend at submission.
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/spend HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!(
+                "{{\"outpoint_tx\":\"{funding_txid}\",\"outpoint_index\":0,\"script_hex\":\"{script_hex}\",\"to\":\"{}\",\"kind\":\"refund\"}}",
+                alice.address().to_hex()
+            )
+            .as_bytes(),
+        );
+        assert_eq!(status, 200, "prepare refund: {body}");
+        let refund: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let refund_tx_hex = refund["tx_hex"].as_str().unwrap();
+        let refund_sighash = refund["sighash"].as_str().unwrap();
+        let refund_sighash_bytes: [u8; 32] =
+            hex::decode(refund_sighash).unwrap().try_into().unwrap();
+        let refund_sig = alice.sign(&refund_sighash_bytes);
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/finalize HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!(
+                "{{\"tx_hex\":\"{refund_tx_hex}\",\"script_hex\":\"{script_hex}\",\"kind\":\"refund\",\"signature_hex\":\"{}\"}}",
+                hex::encode(refund_sig)
+            )
+            .as_bytes(),
+        );
+        assert_eq!(status, 200, "finalize refund: {body}");
+        let refund_finalized: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let refund_signed = refund_finalized["signed_tx_hex"].as_str().unwrap();
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/submit_tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!("{{\"tx_hex\":\"{refund_signed}\"}}").as_bytes(),
+        );
+        assert_eq!(status, 200, "submit premature refund: {body}");
+
+        // The timeout is a height-lock: enforced when a block is produced.
+        // The premature refund is dropped from the mempool, so the HTLC stays
+        // locked. Same HTLC still locked.
+        app.mesh.produce("alpha").unwrap();
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!("{{\"script_hex\":\"{script_hex}\"}}").as_bytes(),
+        );
+        assert_eq!(status, 200, "status: {body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["balance"],
+            50000
+        );
+
+        // 4. A fresh HTLC with a reachable timeout is refundable right away
+        // (the chain is already past `timeout`).
+        let prepare_body = format!(
+            "{{\"from\":\"{}\",\"amount\":50000,\"recipient_pk\":\"{}\",\"preimage_hash\":\"{}\",\"timeout\":3}}",
+            alice.address().to_hex(),
+            hex::encode(bob.address().payload()),
+            hex::encode(preimage_hash)
+        );
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/prepare HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            prepare_body.as_bytes(),
+        );
+        assert_eq!(status, 200, "prepare 2: {body}");
+        let prepared: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let script2_hex = prepared["script_hex"].as_str().unwrap().to_string();
+        let tx2_hex = prepared["tx_hex"].as_str().unwrap().to_string();
+        let sighash2 = prepared["sighash"].as_str().unwrap().to_string();
+        let sighash2_bytes: [u8; 32] = hex::decode(&sighash2).unwrap().try_into().unwrap();
+        let sig2 = alice.sign(&sighash2_bytes);
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/finalize HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!("{{\"tx_hex\":\"{tx2_hex}\",\"signature_hex\":\"{}\"}}", hex::encode(sig2)).as_bytes(),
+        );
+        assert_eq!(status, 200, "finalize 2: {body}");
+        let finalized: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let signed2 = finalized["signed_tx_hex"].as_str().unwrap().to_string();
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/submit_tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!("{{\"tx_hex\":\"{signed2}\"}}").as_bytes(),
+        );
+        assert_eq!(status, 200, "submit 2: {body}");
+        let submitted: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let funding2 = submitted["tx"].as_str().unwrap().to_string();
+        app.mesh.produce("alpha").unwrap();
+
+        // 5. Refund (post-timeout) succeeds and the lock is released back to
+        // Alice: the HTLC address no longer holds the value.
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/spend HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!(
+                "{{\"outpoint_tx\":\"{funding2}\",\"outpoint_index\":0,\"script_hex\":\"{script2_hex}\",\"to\":\"{}\",\"kind\":\"refund\"}}",
+                alice.address().to_hex()
+            )
+            .as_bytes(),
+        );
+        assert_eq!(status, 200, "prepare refund 2: {body}");
+        let refund: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let refund2 = refund["tx_hex"].as_str().unwrap().to_string();
+        let refund2_sighash = refund["sighash"].as_str().unwrap().to_string();
+        let refund2_sighash_bytes: [u8; 32] =
+            hex::decode(&refund2_sighash).unwrap().try_into().unwrap();
+        let refund2_sig = alice.sign(&refund2_sighash_bytes);
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/finalize HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!(
+                "{{\"tx_hex\":\"{refund2}\",\"script_hex\":\"{script2_hex}\",\"kind\":\"refund\",\"signature_hex\":\"{}\"}}",
+                hex::encode(refund2_sig)
+            )
+            .as_bytes(),
+        );
+        assert_eq!(status, 200, "finalize refund 2: {body}");
+        let finalized: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let refund2_signed = finalized["signed_tx_hex"].as_str().unwrap().to_string();
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/submit_tx HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!("{{\"tx_hex\":\"{refund2_signed}\"}}").as_bytes(),
+        );
+        assert_eq!(status, 200, "submit refund 2: {body}");
+        app.mesh.produce("alpha").unwrap();
+
+        let (status, body) = send_req_bytes(
+            &mut app,
+            "POST /api/htlc/status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n",
+            format!("{{\"script_hex\":\"{script2_hex}\"}}").as_bytes(),
+        );
+        assert_eq!(status, 200, "status after refund: {body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["balance"],
+            0
+        );
+
+        // Alice's UTXOs grew back by the locked 50000 minus the refund fee.
+        let (status, body) = send_req(
+            &mut app,
+            &format!(
+                "GET /api/utxos?address={} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+                alice.address().to_hex()
+            ),
+        );
+        assert_eq!(status, 200, "alice utxos: {body}");
+        let alice_utxos: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let alice_total: u64 = alice_utxos["utxos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["value"].as_u64().unwrap())
+            .sum();
+        assert!(
+            alice_total >= 10000,
+            "alice should hold the refunded value: {alice_total}"
+        );
     }
 }

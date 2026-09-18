@@ -274,6 +274,57 @@ pub struct CoinJoinParticipant {
     pub asset_id: Option<AssetId>,
 }
 
+/// Prepared HTLC transaction for atomic swap (unsigned, ready for counterparty signature).
+#[derive(Clone, Debug)]
+pub struct PreparedHtlc {
+    /// The unsigned transaction (zeroed signatures).
+    pub tx: Transaction,
+    /// BLAKE3 sighash the wallet must sign.
+    pub sighash: [u8; 32],
+    /// Selected funding outpoint.
+    pub outpoint: OutPoint,
+    /// Value of that outpoint.
+    pub value: u64,
+    /// Protocol fee burned-or-paid to the miner (atoms).
+    pub fee: u64,
+    /// HTLC address (Version 0x04).
+    pub htlc_address: String,
+    /// The HTLC script for later redemption/refund.
+    pub script: HtlcScript,
+}
+
+/// The spend path for an HTLC output (RFC-004).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HtlcSpendKind {
+    /// The recipient reveals the preimage and claims the value (unlocked).
+    Redeem,
+    /// The sender reclaims the value after the timeout block height.
+    Refund,
+}
+
+impl HtlcSpendKind {
+    /// The public key authorising this path, embedded in the template.
+    fn signer_pk(self, script: &HtlcScript) -> [u8; 32] {
+        match self {
+            HtlcSpendKind::Redeem => *script.recipient_pk(),
+            HtlcSpendKind::Refund => *script.sender_pk(),
+        }
+    }
+}
+
+/// An unsigned HTLC spend (redeem or refund) ready for the counterparty wallet
+/// to sign locally.
+#[derive(Clone, Debug)]
+pub struct PreparedHtlcSpend {
+    /// The unsigned transaction (zeroed witnesses).
+    pub tx: Transaction,
+    /// BLAKE3 sighash the counterparty wallet must sign.
+    pub sighash: [u8; 32],
+    /// The locked value being spent.
+    pub value: u64,
+    /// Protocol fee burned-or-paid to the miner (atoms).
+    pub fee: u64,
+}
 /// Information about a created HTLC output (RFC-004).
 #[derive(Clone, Debug)]
 pub struct HtlcInfo {
@@ -1840,6 +1891,53 @@ impl Node {
         })
     }
 
+    /// Prepare an unsigned HTLC transaction. Returns the transaction hex,
+    /// sighash, HTLC address, outpoint, value, and the HTLC script for later
+    /// use. The transaction is NOT broadcast; the caller must sign and submit.
+    pub fn prepare_htlc(
+        &self,
+        sender: Address,
+        amount: u64,
+        recipient_pk: [u8; 32],
+        preimage_hash: [u8; 32],
+        timeout: u32,
+        asset_id: Option<AssetId>,
+    ) -> Result<PreparedHtlc, NodeError> {
+        if amount == 0 {
+            return Err(NodeError::ZeroAmount);
+        }
+        let script = HtlcScript::new(preimage_hash, recipient_pk, *sender.payload(), timeout)
+            .map_err(|e| NodeError::Htlc(e.as_str()))?;
+        let address = script.address();
+        let prepared = self.prepare_transfer_asset(sender, amount, address, asset_id)?;
+        Ok(PreparedHtlc {
+            tx: prepared.tx,
+            sighash: prepared.sighash,
+            outpoint: prepared.outpoint,
+            value: prepared.value,
+            fee: prepared.fee,
+            htlc_address: address.to_string(),
+            script,
+        })
+    }
+
+    /// Attach a single Ed25519 signature to every input of an unsigned
+    /// transaction produced by [`Node::prepare_htlc`] / `prepare_transfer` and
+    /// return the fully-signed transaction for submission via [`Node::submit_tx`].
+    /// The secret key never enters the node — only the 64-byte signature does.
+    pub fn finalize_unsigned(
+        &self,
+        tx: &Transaction,
+        signature: [u8; 64],
+    ) -> Result<Transaction, NodeError> {
+        let sig = Sig::from_bytes(signature);
+        let mut signed = tx.clone();
+        for i in 0..signed.inputs().len() {
+            signed.attach_signature(i, sig);
+        }
+        Ok(signed)
+    }
+
     /// Redeem an HTLC output with the correct preimage. `kp` is the
     /// **recipient** (the party who knows the preimage); the witness is
     /// `[template, preimage, recipient_sig]` and has **no time constraint**
@@ -1930,6 +2028,34 @@ impl Node {
         witness_for: impl FnOnce([u8; 64]) -> Vec<Vec<u8>>,
     ) -> Result<Transaction, NodeError> {
         let fee = self.min_fee();
+        let (inputs, outputs, _value, _fee) =
+            self.htlc_spend_layout(outpoint, script, to, kp.address(), fee)?;
+        let mut tx = Transaction::new(inputs, outputs, Vec::new());
+        let sighash = tx.sighash();
+        let sig = kp.sign(&sighash);
+        tx.inputs_mut()[0].witness = witness_for(sig);
+        if tx.inputs().len() > 1 {
+            tx.attach_signature(1, Sig::from_bytes(sig));
+        }
+        Ok(tx)
+    }
+
+    /// Layout a spend of an HTLC output without signing. `signer` is the
+    /// address of whichever party's key authorises the chosen path — it owns
+    /// the native fee input for asset HTLCs. Native HTLCs spend the single
+    /// locked input and pay the fee out of the locked value
+    /// (`value - fee` to `to`); asset HTLCs pass the asset through unchanged
+    /// and add a largest-first native fee input from `signer`'s UTXOs.
+    ///
+    /// Returns `(inputs, outputs, locked_value, fee)`.
+    fn htlc_spend_layout(
+        &self,
+        outpoint: OutPoint,
+        script: &HtlcScript,
+        to: Address,
+        signer: Address,
+        fee: u64,
+    ) -> Result<(Vec<TxInput>, Vec<TxOutput>, u64, u64), NodeError> {
         let state = self.ledger()?.ledger_state();
         let htlc_out = state.get(&outpoint).ok_or(NodeError::InsufficientFunds)?;
         if htlc_out.owner != script.address() {
@@ -1938,20 +2064,19 @@ impl Node {
 
         let mut inputs = vec![TxInput::new(outpoint, Vec::new())];
         let mut outputs = Vec::new();
+        let locked = htlc_out.value;
         match htlc_out.asset_id {
             None => {
-                let value = htlc_out
-                    .value
+                let value = locked
                     .checked_sub(fee)
                     .ok_or(NodeError::InsufficientFunds)?;
                 outputs.push(TxOutput::native(value, to));
             }
             Some(asset) => {
-                outputs.push(TxOutput::new(htlc_out.value, Some(asset), to));
-                // Native fee input, largest-first from kp's UTXOs.
+                outputs.push(TxOutput::new(locked, Some(asset), to));
                 let mut owned: Vec<(OutPoint, u64)> = state
                     .iter()
-                    .filter(|(_, out)| out.owner == kp.address() && out.asset_id.is_none())
+                    .filter(|(_, out)| out.owner == signer && out.asset_id.is_none())
                     .map(|(op, out)| (*op, out.value))
                     .collect();
                 owned.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -1962,19 +2087,80 @@ impl Node {
                 inputs.push(TxInput::new(fee_op, Vec::new()));
                 let change = fee_value - fee;
                 if change > 0 {
-                    outputs.push(TxOutput::native(change, kp.address()));
+                    outputs.push(TxOutput::native(change, signer));
                 }
             }
         }
+        Ok((inputs, outputs, locked, fee))
+    }
 
-        let mut tx = Transaction::new(inputs, outputs, Vec::new());
-        let sighash = tx.sighash();
-        let sig = kp.sign(&sighash);
-        tx.inputs_mut()[0].witness = witness_for(sig);
-        if tx.inputs().len() > 1 {
-            tx.attach_signature(1, Sig::from_bytes(sig));
+    /// Prepare an unsigned redeem/refund of an HTLC output. The party whose key
+    /// authorises `kind` (recipient for [`HtlcSpendKind::Redeem`], sender for
+    /// [`HtlcSpendKind::Refund`]) signs `sighash` locally and hands the
+    /// signature + transaction to [`Node::finalize_htlc_spend`] — the secret
+    /// key never enters the node.
+    pub fn prepare_htlc_spend(
+        &self,
+        outpoint: OutPoint,
+        script: &HtlcScript,
+        to: Address,
+        kind: HtlcSpendKind,
+        preimage: Option<&[u8]>,
+    ) -> Result<PreparedHtlcSpend, NodeError> {
+        if kind == HtlcSpendKind::Redeem {
+            let preimage = preimage.ok_or(NodeError::Htlc("preimage required for redeem"))?;
+            if *blake3::hash(preimage).as_bytes() != *script.preimage_hash() {
+                return Err(NodeError::Htlc("preimage does not match preimage hash"));
+            }
         }
-        Ok(tx)
+        let signer = Address::p2pk(kind.signer_pk(script));
+        let fee = self.min_fee();
+        let (inputs, outputs, value, fee) =
+            self.htlc_spend_layout(outpoint, script, to, signer, fee)?;
+        let tx = Transaction::new(inputs, outputs, Vec::new());
+        let sighash = tx.sighash();
+        Ok(PreparedHtlcSpend {
+            tx,
+            sighash,
+            value,
+            fee,
+        })
+    }
+
+    /// Attach the counterparty's signature to an unsigned HTLC spend and return
+    /// the fully-signed transaction. The signature is verified against the
+    /// script's recipient/sender public key before it is written into the
+    /// witness stack (`[template, preimage, sig]` for redeem,
+    /// `[template, sig]` for refund); a fee input, if present, receives the
+    /// same signature.
+    pub fn finalize_htlc_spend(
+        &self,
+        tx: &Transaction,
+        script: &HtlcScript,
+        kind: HtlcSpendKind,
+        preimage: Option<&[u8]>,
+        signature: [u8; 64],
+    ) -> Result<Transaction, NodeError> {
+        let signer = Address::p2pk(kind.signer_pk(script));
+        if !verify(&signer, &tx.sighash(), &signature) {
+            return Err(NodeError::BadSignature);
+        }
+        let sig = Sig::from_bytes(signature);
+        let mut signed = tx.clone();
+        signed.inputs_mut()[0].witness = match kind {
+            HtlcSpendKind::Redeem => {
+                let preimage = preimage.ok_or(NodeError::Htlc("preimage required for redeem"))?;
+                if *blake3::hash(preimage).as_bytes() != *script.preimage_hash() {
+                    return Err(NodeError::Htlc("preimage does not match preimage hash"));
+                }
+                script.redeem_witness(preimage, signature)
+            }
+            HtlcSpendKind::Refund => script.refund_witness(signature),
+        };
+        for i in 1..signed.inputs().len() {
+            signed.attach_signature(i, sig);
+        }
+        Ok(signed)
     }
 
     // ------------------------------------------------------------------

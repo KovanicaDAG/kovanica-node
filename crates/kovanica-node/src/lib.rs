@@ -81,9 +81,9 @@ pub use net::{
     SyncStats,
 };
 pub use node::{
-    BlockHeader, BlockRecord, CoinJoinParticipant, CoinJoinPrepared, HtlcInfo, MerkleBlock,
-    MiningTemplate, Node, NodeError, Prepared, Sent, TreasuryGenesis, VaultInfo,
-    WalletDirection, WalletEvent,
+    BlockHeader, BlockRecord, CoinJoinParticipant, CoinJoinPrepared, HtlcInfo, HtlcSpendKind,
+    MerkleBlock, MiningTemplate, Node, NodeError, Prepared, PreparedHtlcSpend, Sent,
+    TreasuryGenesis, VaultInfo, WalletDirection, WalletEvent,
 };
 pub use p2p::{GossipEvent, GossipKind, Mesh, P2pError};
 pub use p2p_hardening::{P2pHardening, P2pHardeningConfig, PeerStats};
